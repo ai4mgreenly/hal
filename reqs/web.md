@@ -7,6 +7,26 @@ the page.
 - R-QY5R-PYDH: visiting the site's root URL renders the current count
   as a number, in plain server-rendered HTML. No authentication is
   required to view it.
+- R-HALR-NDM1: the index page renders "H.A.L." (with a period after
+  each letter, including a trailing period) as a banner heading, and
+  directly beneath it a single-line subtitle drawn from a fixed
+  server-side list of acronym expansions for the project name. The
+  pick is made server-side on each request, so a visitor with
+  JavaScript disabled still sees a rendered subtitle (consistent with
+  R-TK21-6AGY). The list is deliberately a mix of plausible
+  expansions and obvious jokes; no entry is the canonical meaning,
+  and the project does not document which expansions are "real."
+  Successive requests may show the same expansion (selection is
+  uniform at random, not round-robin), but every entry in the list is
+  reachable. The subtitle line ends with a clickable reroll
+  affordance: a plain anchor whose `href` is the index page itself,
+  so following it re-issues the request and yields a freshly-picked
+  expansion. The affordance does not require JavaScript; it is a
+  static `<a>` element. The exact contents of the list, the glyph
+  used for the affordance, and the page styling are HOW. The
+  properties under test are that the page shows "H.A.L." plus exactly
+  one expansion taken from the configured set on each request, and
+  that the subtitle line contains a `<a href="/">` reroll link.
 - R-SY3U-AF4G: the index page does not offer any in-page control to
   mutate the count. Mutation is the API/MCP path's job, and that path
   requires authentication.
