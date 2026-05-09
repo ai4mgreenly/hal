@@ -43,7 +43,7 @@ gem "image_processing", "1.14.0"
 # the already-loaded default-gem copy. Mismatched versions (e.g. an irb
 # upgrade pulling rdoc 7.2.0) trigger "already initialized constant
 # RDoc::*" duplicate-load warnings on every script invocation.
-gem "rdoc", "7.0.3"
+gem "rdoc", "7.2.0"
 
 group :development, :test do
   # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
