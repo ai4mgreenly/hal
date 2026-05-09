@@ -1,0 +1,40 @@
+# Rails — ignore artifacts produced at runtime; keep .keep markers so the
+# directory shape survives a fresh checkout.
+
+# Local secrets — config/master.key decrypts config/credentials.yml.enc
+# and never belongs in the repo.
+/config/master.key
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# SQLite databases (R-IPU6-RP6Q persistence is SQLite)
+/storage/*.sqlite3
+/storage/*.sqlite3-*
+/db/*.sqlite3
+/db/*.sqlite3-*
+
+# Logs and tempfiles
+/log/*
+!/log/.keep
+/tmp/*
+!/tmp/.keep
+!/tmp/pids
+/tmp/pids/*
+!/tmp/pids/.keep
+
+# Bundler / RubyGems
+/.bundle
+/vendor/bundle
+
+# Ralph run state
+/.ralph/
+
+# Editor / OS detritus
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

@@ -1,0 +1,8 @@
+# Omakase Ruby styling for Rails
+inherit_gem: { rubocop-rails-omakase: rubocop.yml }
+
+# R-7NWT-PODV: enable Layout/LineLength at 120 columns, the sole
+# project-wide deviation from the omakase ruleset (R-CQXC-KB48).
+Layout/LineLength:
+  Enabled: true
+  Max: 120

@@ -1,0 +1,69 @@
+source "https://rubygems.org"
+
+# R-HSFL-MBJK: every gem pinned to an exact version.
+# R-DE3F-TY7F: rubocop / rubocop-rails-omakase / rubocop-* extensions
+# are the explicit exception and carry no version constraint.
+
+# R-P4B7-2CBZ: Rails pinned to the 8.1.x line.
+gem "rails", "8.1.3"
+# The modern asset pipeline for Rails [https://github.com/rails/propshaft]
+gem "propshaft", "1.3.2"
+# Use sqlite3 as the database for Active Record
+gem "sqlite3", "2.9.4"
+# Use the Puma web server [https://github.com/puma/puma]
+gem "puma", "8.0.1"
+# Use JavaScript with ESM import maps [https://github.com/rails/importmap-rails]
+gem "importmap-rails", "2.2.3"
+# Hotwire's SPA-like page accelerator [https://turbo.hotwired.dev]
+gem "turbo-rails", "2.0.23"
+# Hotwire's modest JavaScript framework [https://stimulus.hotwired.dev]
+gem "stimulus-rails", "1.3.4"
+# Build JSON APIs with ease [https://github.com/rails/jbuilder]
+gem "jbuilder", "2.14.1"
+
+# Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
+# gem "bcrypt", "~> 3.1.7"
+
+# Windows does not include zoneinfo files, so bundle the tzinfo-data gem
+gem "tzinfo-data", "1.2026.2", platforms: %i[ windows jruby ]
+
+# Use the database-backed adapters for Rails.cache, Active Job, and Action Cable
+gem "solid_cache", "1.0.10"
+gem "solid_queue", "1.4.0"
+gem "solid_cable", "3.0.12"
+
+# Reduces boot times through caching; required in config/boot.rb
+gem "bootsnap", "1.24.3", require: false
+
+# Use Active Storage variants [https://guides.rubyonrails.org/active_storage_overview.html#transforming-images]
+gem "image_processing", "1.14.0"
+
+# R-F64T-WYOO: pin rdoc to the version shipped as a default gem in the
+# pinned Ruby (4.0.3 → rdoc 7.0.3) so Bundler's resolved version matches
+# the already-loaded default-gem copy. Mismatched versions (e.g. an irb
+# upgrade pulling rdoc 7.2.0) trigger "already initialized constant
+# RDoc::*" duplicate-load warnings on every script invocation.
+gem "rdoc", "7.0.3"
+
+group :development, :test do
+  # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
+  gem "debug", "1.11.1", platforms: %i[ mri windows ], require: "debug/prelude"
+
+  # Audits gems for known security defects (use config/bundler-audit.yml to ignore issues)
+  gem "bundler-audit", "0.9.3", require: false
+
+  # Static analysis for security vulnerabilities [https://brakemanscanner.org/]
+  gem "brakeman", "8.0.4", require: false
+
+  # Omakase Ruby styling [https://github.com/rails/rubocop-rails-omakase/]
+  # R-DE3F-TY7F: lint toolchain stays unpinned.
+  gem "rubocop-rails-omakase", require: false
+
+  # R-0MVV-UEZW: tests are written in RSpec, not Minitest.
+  gem "rspec-rails", "8.0.4"
+end
+
+group :development do
+  # Use console on exceptions pages [https://github.com/rails/web-console]
+  gem "web-console", "4.3.0"
+end

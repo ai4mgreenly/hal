@@ -1,0 +1,26 @@
+<%# R-QY5R-PYDH: render the current count as a number in plain HTML. %>
+<%# R-SY3U-AF4G: no in-page control to mutate the count. %>
+<%# R-TK21-6AGY: usable with JavaScript disabled — count is server-rendered. %>
+<h1>Ouroboros</h1>
+<p>Current count: <span id="count"><%= @count %></span></p>
+
+<%# R-BZQY-DN3B: copy-pasteable MCP client configuration. %>
+<%# R-VVRG-W2G2: no Google details, no client credentials, no internal paths beyond base URL. %>
+<section id="mcp-config">
+  <h2>Connect an MCP client</h2>
+
+  <%# R-5GQZ-KWCD: Claude Code uses `claude mcp add --transport http …`. %>
+  <h3>Claude Code</h3>
+  <pre id="claude-code-config"><code>claude mcp add --transport http ouroboros <%= @base_url %>/mcp</code></pre>
+
+  <%# R-5GQZ-KWCD: Claude Desktop uses a `mcpServers` block in claude_desktop_config.json. %>
+  <h3>Claude Desktop</h3>
+  <pre id="claude-desktop-config"><code>{
+  "mcpServers": {
+    "ouroboros": {
+      "type": "http",
+      "url": "<%= @base_url %>/mcp"
+    }
+  }
+}</code></pre>
+</section>
