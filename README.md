@@ -1,8 +1,8 @@
-# ouroboros-mcp
+# hal
 
 A small, deliberately-readable demo of an HTTP-transport **MCP server**
 with **real OAuth** in front of writes. Federates logins to Google
-Workspace and is deployed at <https://ouroboros.ai.metaspot.org>.
+Workspace and is deployed at <https://hal.ai.metaspot.org>.
 
 ## What this is
 

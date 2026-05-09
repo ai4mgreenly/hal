@@ -45,7 +45,7 @@ class McpController < ActionController::API
       reply(id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: "ouroboros-mcp", version: "0.1.0" }
+        serverInfo: { name: "hal", version: "0.1.0" }
       })
     when "tools/list"
       reply(id, { tools: TOOLS })

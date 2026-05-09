@@ -14,7 +14,7 @@ can read and increment the counter as MCP tools.
 ## Client configuration
 
 - R-VVRG-W2G2: an MCP client only needs the service's base URL
-  (https://ouroboros.ai.metaspot.org) to configure access. The client
+  (https://hal.ai.metaspot.org) to configure access. The client
   must not need to know about Google, about specific OAuth client
   credentials, or about any service-internal paths.
 - R-WHPN-RXSK: the same base URL works from every targeted client

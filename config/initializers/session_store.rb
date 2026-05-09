@@ -4,7 +4,7 @@
 # top-level navigation that must carry the session cookie for the
 # state-binding check.
 Rails.application.config.session_store :cookie_store,
-                                       key: "_ouroboros_mcp_session",
+                                       key: "_hal_session",
                                        secure: true,
                                        httponly: true,
                                        same_site: :lax

@@ -71,7 +71,7 @@ RSpec.describe "Home page", type: :request do
     end
 
     it "R-5GQZ-KWCD shows each client's instructions in that client's documented format" do
-      host! "ouroboros.ai.metaspot.org"
+      host! "hal.ai.metaspot.org"
       get "/"
 
       expect(response).to have_http_status(:ok)
@@ -79,7 +79,7 @@ RSpec.describe "Home page", type: :request do
 
       # Claude Code: the exact `claude mcp add --transport http <name> <base>/mcp` line.
       expect(body).to match(
-        %r{<pre[^>]*id=["']claude-code-config["'][^>]*>\s*<code[^>]*>\s*claude mcp add --transport http ouroboros http://ouroboros\.ai\.metaspot\.org/mcp\s*</code>\s*</pre>}m
+        %r{<pre[^>]*id=["']claude-code-config["'][^>]*>\s*<code[^>]*>\s*claude mcp add --transport http hal http://hal\.ai\.metaspot\.org/mcp\s*</code>\s*</pre>}m
       )
 
       # Claude Desktop: a `mcpServers` JSON block with type "http" and the URL.
@@ -89,10 +89,10 @@ RSpec.describe "Home page", type: :request do
       expect(desktop_match).not_to be_nil
       json = JSON.parse(desktop_match[:json])
       expect(json).to have_key("mcpServers")
-      expect(json["mcpServers"]).to have_key("ouroboros")
-      expect(json["mcpServers"]["ouroboros"]).to eq(
+      expect(json["mcpServers"]).to have_key("hal")
+      expect(json["mcpServers"]["hal"]).to eq(
         "type" => "http",
-        "url" => "http://ouroboros.ai.metaspot.org/mcp"
+        "url" => "http://hal.ai.metaspot.org/mcp"
       )
     end
 
@@ -104,23 +104,23 @@ RSpec.describe "Home page", type: :request do
       expect(body).to include("http://localhost:3000/mcp")
       expect(body).not_to include("www.example.com")
 
-      host! "ouroboros.ai.metaspot.org"
+      host! "hal.ai.metaspot.org"
       get "/"
       expect(response).to have_http_status(:ok)
       body = response.body
-      expect(body).to include("http://ouroboros.ai.metaspot.org/mcp")
+      expect(body).to include("http://hal.ai.metaspot.org/mcp")
       expect(body).not_to include("localhost:3000")
       expect(body).not_to include("www.example.com")
     end
 
     it "R-DA34-WX9P honors X-Forwarded-Proto from a TLS-terminating proxy" do
-      host! "ouroboros.ai.metaspot.org"
+      host! "hal.ai.metaspot.org"
       get "/", headers: { "X-Forwarded-Proto" => "https" }
 
       expect(response).to have_http_status(:ok)
       body = response.body
-      expect(body).to include("https://ouroboros.ai.metaspot.org/mcp")
-      expect(body).not_to include("http://ouroboros.ai.metaspot.org/mcp")
+      expect(body).to include("https://hal.ai.metaspot.org/mcp")
+      expect(body).not_to include("http://hal.ai.metaspot.org/mcp")
     end
 
     it "R-SY3U-AF4G offers no in-page control to mutate the count" do

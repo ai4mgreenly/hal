@@ -32,9 +32,9 @@ RSpec.describe "session cookie attributes (R-QGB5-EMOO)", type: :request do
     expect(set_cookie).to be_present, "expected a Set-Cookie header on a session-writing response"
 
     cookies = Array(set_cookie).flat_map { |h| h.split("\n") }
-    session_cookie = cookies.find { |c| c.start_with?("_ouroboros_mcp_session=") }
+    session_cookie = cookies.find { |c| c.start_with?("_hal_session=") }
     expect(session_cookie).to be_present,
-                              "expected a _ouroboros_mcp_session cookie; got: #{cookies.inspect}"
+                              "expected a _hal_session cookie; got: #{cookies.inspect}"
 
     attrs = session_cookie.split(/;\s*/).map(&:downcase)
     expect(attrs).to include("secure")

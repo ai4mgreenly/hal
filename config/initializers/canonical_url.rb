@@ -6,6 +6,6 @@
 default = case Rails.env
 when "test" then "http://www.example.com"
 when "development" then "http://localhost:3000"
-else "https://ouroboros.ai.metaspot.org"
+else "https://hal.ai.metaspot.org"
 end
-Rails.application.config.x.canonical_url = ENV.fetch("OUROBOROS_CANONICAL_URL", default)
+Rails.application.config.x.canonical_url = ENV.fetch("HAL_CANONICAL_URL", default)

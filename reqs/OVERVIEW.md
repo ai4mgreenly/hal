@@ -1,7 +1,7 @@
-# ouroboros-mcp
+# hal
 
 A small demo of an HTTP-transport MCP server with real OAuth, deployed
-at https://ouroboros.ai.metaspot.org. The point is to be readable
+at https://hal.ai.metaspot.org. The point is to be readable
 end-to-end in one sitting: a Rails app, a single shared counter, two
 MCP tools (read and increment), and OAuth-with-Google sitting in front
 of writes. The counter is a placeholder for "a tool that mutates
@@ -43,7 +43,7 @@ files pointing at it by ID rather than restating the rule.
 - R-IPU6-RP6Q: persistence is SQLite, accessed through Active Record.
   Other databases are out of scope unless this requirement is replaced.
 - R-JBSD-NKJ8: the deployment target is a single instance reachable at
-  https://ouroboros.ai.metaspot.org. Local development is also
+  https://hal.ai.metaspot.org. Local development is also
   supported.
 - R-K1E9-OR3T: the upstream identity provider is Google (Workspace).
   Access is restricted to a single Workspace domain, configured at

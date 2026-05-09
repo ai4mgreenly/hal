@@ -29,7 +29,7 @@ repo. Put them in your deployment's secret store and in a local
 
 Cloud Console → **top bar project picker** → **New project**.
 
-- **Name** — anything; e.g. `ouroboros-mcp`.
+- **Name** — anything; e.g. `hal`.
 - **Organization** — pick your Workspace organization (not "No
   organization"). This is what makes the Internal user type available
   in step 2 and what restricts the app to your Workspace.
@@ -49,12 +49,12 @@ and **Data Access** tabs.
 
 Fill in:
 
-- **App name** — `Ouroboros MCP` (or whatever you want users to see on
+- **App name** — `Hal` (or whatever you want users to see on
   the Google consent screen).
 - **User support email** — a real address from your Workspace.
 - **App logo** — optional. Internal apps don't get verified, so a logo
   isn't required.
-- **Application home page** — `https://ouroboros.ai.metaspot.org`.
+- **Application home page** — `https://hal.ai.metaspot.org`.
 - **Authorized domains** — `metaspot.org` (the registrable domain of
   the deployment URL). Localhost does not need to be listed.
 - **Developer contact email** — your address.
@@ -88,13 +88,13 @@ client** (or go directly to
 <https://console.developers.google.com/auth/clients>).
 
 - **Application type** — Web application.
-- **Name** — internal label only, e.g. `ouroboros-mcp-prod`. Not shown
+- **Name** — internal label only, e.g. `hal-prod`. Not shown
   to users.
 - **Authorized JavaScript origins** — leave empty. The service is a
   server-side OAuth client; no browser-side Google JS is loaded.
 - **Authorized redirect URIs** — add **exactly** these, byte-for-byte:
 
-  - `https://ouroboros.ai.metaspot.org/oauth/google/callback` (production)
+  - `https://hal.ai.metaspot.org/oauth/google/callback` (production)
   - `http://localhost:3000/oauth/google/callback` (local development;
     omit if the operator never runs the dev server against real
     Google)
@@ -146,7 +146,7 @@ secret in it.
 ## 5. Smoke test
 
 1. From a browser signed into a Workspace account in the allowed
-   domain, hit `https://ouroboros.ai.metaspot.org/oauth/authorize?...`
+   domain, hit `https://hal.ai.metaspot.org/oauth/authorize?...`
    (any spec-conformant authorize request — the easiest path is to
    point an MCP client at the service and let it run DCR + the
    authorize flow).

@@ -8,7 +8,7 @@ provider; clients never see Google directly.
 
 - R-1KML-5J0Q: the service exposes its own OAuth 2.1 authorization
   endpoints on the same origin as the MCP server
-  (https://ouroboros.ai.metaspot.org). Clients are configured with
+  (https://hal.ai.metaspot.org). Clients are configured with
   only this origin.
 - R-27SO-F63X: the service mints and signs its own access tokens.
   Tokens issued by Google are not propagated to MCP clients; clients

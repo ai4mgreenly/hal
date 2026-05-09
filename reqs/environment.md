@@ -109,7 +109,7 @@ They are the only things a developer or CI job has to know how to run.
   step; the launch script owns it.
 - R-PVA6-Q6OB: the locally-launched service speaks plain HTTP, not
   HTTPS. TLS termination is a deployment concern handled in front of
-  the service at https://ouroboros.ai.metaspot.org; the application
+  the service at https://hal.ai.metaspot.org; the application
   process itself does not terminate TLS, locally or in production.
   The test suite does not depend on TLS being available.
 - R-FUXB-TE9Z: `./test.sh` at the repo root runs the project's full

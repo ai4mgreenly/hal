@@ -15,7 +15,7 @@ RSpec.describe "Transport security headers", type: :request do
     end
 
     it "R-ID5L-BSJM emits HSTS with at least 1 year max-age and includeSubDomains when arrived via HTTPS proxy" do
-      host! "ouroboros.ai.metaspot.org"
+      host! "hal.ai.metaspot.org"
       get "/", headers: { "X-Forwarded-Proto" => "https" }
 
       hsts = response.headers["Strict-Transport-Security"]

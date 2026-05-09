@@ -29,7 +29,7 @@ the page.
 - R-CO4Y-11X7: the URLs shown in that configuration are derived
   from the request the visitor used to reach the page. Visiting
   `http://localhost:3000/` shows a `http://localhost:3000` base URL;
-  visiting `https://ouroboros.ai.metaspot.org/` shows that origin.
+  visiting `https://hal.ai.metaspot.org/` shows that origin.
   The page does not hard-code any specific host or scheme.
 - R-DA34-WX9P: when a visitor reaches the page through a TLS-
   terminating proxy (the production posture per R-PVA6-Q6OB), the
