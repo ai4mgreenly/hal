@@ -1,14 +1,7 @@
 <%# R-QY5R-PYDH: render the current count as a number in plain HTML. %>
 <%# R-SY3U-AF4G: no in-page control to mutate the count. %>
 <%# R-TK21-6AGY: usable with JavaScript disabled — count is server-rendered. %>
-<%# R-TFIQ-6805: H.A.L. banner + server-picked random subtitle. The
-    trailing anchor re-requests the index, which re-rolls the
-    subtitle server-side. No JavaScript needed. %>
-<h1>H.A.L.</h1>
-<p class="subtitle">
-  <%= @expansion %>
-  <a href="/" class="reroll" aria-label="reroll subtitle" title="reroll">&#x21bb;</a>
-</p>
+<h1>Hal</h1>
 <p>Current count: <span id="count"><%= @count %></span></p>
 
 <%# R-BZQY-DN3B: copy-pasteable MCP client configuration. %>

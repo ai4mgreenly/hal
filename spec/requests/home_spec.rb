@@ -123,26 +123,6 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to include("http://hal.ai.metaspot.org/mcp")
     end
 
-    it "R-TFIQ-6805 renders the H.A.L. banner with a subtitle from EXPANSIONS and a reroll link" do
-      get "/"
-
-      expect(response).to have_http_status(:ok)
-      body = response.body
-
-      # Banner heading is exactly "H.A.L." with periods.
-      expect(body).to match(%r{<h1[^>]*>\s*H\.A\.L\.\s*</h1>}i)
-
-      # Subtitle contains one of the configured expansions.
-      matched = HomeController::EXPANSIONS.any? { |e| body.include?(e) }
-      expect(matched).to be(true),
-                         "expected the page body to include one of HomeController::EXPANSIONS"
-
-      # The subtitle paragraph contains an anchor pointing back at "/" (the reroll affordance).
-      expect(body).to match(
-        %r{<p[^>]*class=["'][^"']*subtitle[^"']*["'][^>]*>.*<a[^>]*href=["']/["'].*</a>.*</p>}m
-      )
-    end
-
     it "R-SY3U-AF4G offers no in-page control to mutate the count" do
       get "/"
 
