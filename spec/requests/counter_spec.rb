@@ -163,7 +163,7 @@ RSpec.describe "Counter API", type: :request do
       post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
 
       expect(response).to have_http_status(:unauthorized)
-      expect(JSON.parse(response.body)).to eq("error" => "invalid_token")
+      expect(JSON.parse(response.body)).to include("error" => "invalid_token")
       expect(Counter.current.value).to eq(9)
     end
 
@@ -214,6 +214,74 @@ RSpec.describe "Counter API", type: :request do
       expect(refresh.resource).to eq(canonical)
     end
 
+    describe "R-DH2I-28CK resource equality is byte-for-byte — canonical URL bound token accepted at both endpoints; near-misses rejected" do
+      let(:canonical) { Rails.configuration.x.canonical_url }
+
+      it "R-DH2I-28CK accepts a token bound to the exact configured canonical URL at the counter endpoint" do
+        _record, plaintext = OauthToken.issue(
+          kind: "access",
+          owner: "user-1",
+          lifetime: 1.hour,
+          resource: canonical
+        )
+        Counter.current.update!(value: 4)
+
+        post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+        expect(response).to have_http_status(:ok)
+        expect(JSON.parse(response.body)).to eq("value" => 5)
+      end
+
+      it "R-DH2I-28CK rejects a token whose resource is the canonical URL with a trailing slash" do
+        _record, plaintext = OauthToken.issue(
+          kind: "access",
+          owner: "user-1",
+          lifetime: 1.hour,
+          resource: "#{canonical}/"
+        )
+        Counter.current.update!(value: 9)
+
+        post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+        expect(response).to have_http_status(:unauthorized)
+        expect(Counter.current.value).to eq(9)
+      end
+
+      it "R-DH2I-28CK rejects a token whose resource has a sub-path appended to the canonical URL" do
+        _record, plaintext = OauthToken.issue(
+          kind: "access",
+          owner: "user-1",
+          lifetime: 1.hour,
+          resource: "#{canonical}/counter"
+        )
+        Counter.current.update!(value: 9)
+
+        post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+        expect(response).to have_http_status(:unauthorized)
+        expect(Counter.current.value).to eq(9)
+      end
+
+      it "R-DH2I-28CK a token bound to the canonical URL is also accepted at the MCP endpoint — both share the same single resource identifier" do
+        _record, plaintext = OauthToken.issue(
+          kind: "access",
+          owner: "user-1",
+          lifetime: 1.hour,
+          resource: canonical
+        )
+        Counter.current.update!(value: 0)
+
+        post "/mcp",
+          params: { jsonrpc: "2.0", id: 1, method: "tools/call",
+                    params: { name: "counter_increment", arguments: {} } }.to_json,
+          headers: { "Content-Type" => "application/json",
+                     "Authorization" => "Bearer #{plaintext}" }
+
+        expect(response).to have_http_status(:ok)
+        expect(Counter.current.value).to eq(1)
+      end
+    end
+
     it "R-A26O-QBG9 reuse-detection cascade rejects access token from the revoked chain at increment" do
       verifier = SecureRandom.urlsafe_base64(64)
       challenge = Base64.urlsafe_encode64(Digest::SHA256.digest(verifier), padding: false)
@@ -256,7 +324,7 @@ RSpec.describe "Counter API", type: :request do
       pre_revoke_value = Counter.current.value
       post "/counter/increment", headers: { "Authorization" => "Bearer #{original_access}" }
       expect(response).to have_http_status(:unauthorized)
-      expect(JSON.parse(response.body)).to eq("error" => "invalid_token")
+      expect(JSON.parse(response.body)).to include("error" => "invalid_token")
       expect(Counter.current.value).to eq(pre_revoke_value)
     end
 
@@ -315,6 +383,87 @@ RSpec.describe "Counter API", type: :request do
 
       expect(evaluate.call("increment")).to be(true)
       expect(evaluate.call("show")).to be(false)
+    end
+  end
+
+  describe "R-EV2D-QTR1 error_description discriminates bearer-token rejection causes at POST /counter/increment" do
+    it "R-EV2D-QTR1 no token presented → error=invalid_request with distinct description" do
+      post "/counter/increment"
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_request")
+      expect(body["error_description"]).to be_present
+    end
+
+    it "R-EV2D-QTR1 malformed token → error=invalid_token with malformed-cause description" do
+      post "/counter/increment", headers: { "Authorization" => "Bearer bad-token!" }
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_token")
+      expect(body["error_description"]).to match(/malform/i)
+    end
+
+    it "R-EV2D-QTR1 token not in store → error=invalid_token with not-found-cause description" do
+      post "/counter/increment", headers: { "Authorization" => "Bearer #{"a" * 43}" }
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_token")
+      expect(body["error_description"]).to match(/not found/i)
+    end
+
+    it "R-EV2D-QTR1 expired token → error=invalid_token with expired-cause description (R-TNXJ-ZWQ0)" do
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      OauthToken.find_by(token_digest: OauthToken.digest_for(plaintext))
+                .update!(expires_at: 1.minute.ago)
+
+      post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_token")
+      expect(body["error_description"]).to match(/expir/i)
+    end
+
+    it "R-EV2D-QTR1 revoked token → error=invalid_token with revoked-cause description (R-9HGE-87UG / R-A26O-QBG9)" do
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      OauthToken.find_by(token_digest: OauthToken.digest_for(plaintext))
+                .update!(revoked_at: Time.current)
+
+      post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_token")
+      expect(body["error_description"]).to match(/revok/i)
+    end
+
+    it "R-EV2D-QTR1 wrong resource → error=invalid_token with resource-mismatch description (R-IS0W-S2H3 / R-DH2I-28CK)" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access", owner: "user-1", lifetime: 1.hour,
+        resource: "https://other.example.com"
+      )
+
+      post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body["error"]).to eq("invalid_token")
+      expect(body["error_description"]).to match(/resource/i)
+    end
+
+    it "R-EV2D-QTR1 the six error_description strings are all distinct" do
+      descriptions = [
+        "No bearer token presented",
+        "Token is malformed",
+        "Token not found",
+        "Token has expired",
+        "Token has been revoked",
+        "Token resource binding does not match"
+      ]
+      expect(descriptions.uniq.length).to eq(6)
     end
   end
 end

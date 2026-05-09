@@ -112,6 +112,24 @@ They are the only things a developer or CI job has to know how to run.
   the service at https://hal.ai.metaspot.org; the application
   process itself does not terminate TLS, locally or in production.
   The test suite does not depend on TLS being available.
+- R-1D56-BHLP: `./reset.sh` at the repo root brings the database
+  the locally-launched service uses (per R-IPU6-RP6Q) back to the
+  state of a fresh, never-launched checkout — every application
+  table gone, no schema present, no migrations applied. The first
+  `./launch.sh` after `./reset.sh` reaches the same end state it
+  reaches on a never-launched checkout per R-901W-IT88: pending
+  migrations applied, schema current, no application rows. The
+  script's scope is the local-development database only; it never
+  targets any deployed environment, and it does not touch the test
+  database, which the test suite manages on its own. Like the other
+  root-level scripts, `./reset.sh` is invocable from a fresh login
+  shell at the repo root without any prior `rvm use`, `bundle
+  exec`, `source .envrc`, or other manual environment activation —
+  the same property R-ELEJ-EV2V defines for `./launch.sh`,
+  `./test.sh`, and `./lint.sh`. The choice between deleting the
+  database file outright and truncating it in place is HOW; the
+  property is that the next launch sees the same starting state a
+  never-touched checkout sees.
 - R-FUXB-TE9Z: `./test.sh` at the repo root runs the project's full
   test suite and exits non-zero if any test fails.
 - R-GGVI-P9MH: `./lint.sh` at the repo root runs Rubocop against the

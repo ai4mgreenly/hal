@@ -22,27 +22,54 @@ class CounterController < ActionController::API
 
   private
 
-  # R-A26O-QBG9: a token whose `revoked_at` is set is rejected, so a
-  # chain revoked by reuse-detection cascade takes effect for newly
-  # arriving requests against this protected endpoint.
-  # R-27SO-F63X: bearer tokens are looked up exclusively in the
-  # service's own `oauth_tokens` table via the digest scheme — Google
-  # access tokens (or any externally-minted credential) cannot match,
-  # because only tokens this service minted and signed (digested) are
-  # storable here.
-  # R-IS0W-S2H3: the presented access token's recorded resource binding
-  # must equal this service's configured canonical URL. A token bound to
-  # any other resource — or carrying no recorded binding at all — is
-  # rejected, even though only one resource currently exists.
+  # R-A26O-QBG9 / R-27SO-F63X / R-IS0W-S2H3 / R-EV2D-QTR1: rejects
+  # invalid tokens with a distinct error_description for each of the six
+  # named failure causes: no token, malformed, not found, expired, revoked,
+  # wrong resource.
   def require_access_token
     presented = bearer_token_from_header
-    token = presented && OauthToken.find_by_presented_token(presented)
-    canonical = Rails.configuration.x.canonical_url
-    return if token && token.kind == "access" &&
-              token.revoked_at.nil? && token.expires_at > Time.current &&
-              token.resource.present? && token.resource == canonical
+    unless presented
+      render json: { error: "invalid_request",
+                     error_description: "No bearer token presented" },
+             status: :unauthorized
+      return
+    end
 
-    render json: { error: "invalid_token" }, status: :unauthorized
+    unless presented.match?(/\A[A-Za-z0-9_-]{43}\z/)
+      render json: { error: "invalid_token",
+                     error_description: "Token is malformed" },
+             status: :unauthorized
+      return
+    end
+
+    token = OauthToken.find_by_presented_token(presented)
+    unless token&.kind == "access"
+      render json: { error: "invalid_token",
+                     error_description: "Token not found" },
+             status: :unauthorized
+      return
+    end
+
+    if token.revoked_at.present?
+      render json: { error: "invalid_token",
+                     error_description: "Token has been revoked" },
+             status: :unauthorized
+      return
+    end
+
+    if token.expires_at <= Time.current
+      render json: { error: "invalid_token",
+                     error_description: "Token has expired" },
+             status: :unauthorized
+      return
+    end
+
+    canonical = Rails.configuration.x.canonical_url
+    return if token.resource.present? && token.resource == canonical
+
+    render json: { error: "invalid_token",
+                   error_description: "Token resource binding does not match" },
+           status: :unauthorized
   end
 
   def bearer_token_from_header

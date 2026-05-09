@@ -123,6 +123,70 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to include("http://hal.ai.metaspot.org/mcp")
     end
 
+    context "R-TFIQ-6805 banner and subtitle" do
+      let(:expansions) { HomeController::EXPANSIONS }
+
+      it "R-TFIQ-6805 shows H.A.L. as the banner heading" do
+        get "/"
+
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("H.A.L.")
+      end
+
+      it "R-TFIQ-6805 shows exactly one expansion from the fixed list as the subtitle" do
+        expansion = expansions.first
+        allow_any_instance_of(HomeController).to receive(:pick_subtitle).and_return(expansion)
+
+        get "/"
+
+        expect(response.body).to include(expansion)
+        # Only the one chosen expansion appears; the others do not.
+        (expansions - [ expansion ]).each do |other|
+          expect(response.body).not_to include(other)
+        end
+      end
+
+      it "R-TFIQ-6805 every expansion in the list can be shown as the subtitle" do
+        expansions.each do |expansion|
+          allow_any_instance_of(HomeController).to receive(:pick_subtitle).and_return(expansion)
+          get "/"
+          expect(response.body).to include(expansion), "expected #{expansion.inspect} to appear when sampled"
+        end
+      end
+
+      it "R-TFIQ-6805 successive requests can produce different subtitles" do
+        call_count = 0
+        allow_any_instance_of(HomeController).to receive(:pick_subtitle) do
+          call_count += 1
+          call_count == 1 ? expansions[0] : expansions[1]
+        end
+
+        get "/"
+        first_body = response.body
+        get "/"
+        second_body = response.body
+
+        expect(first_body).to include(expansions[0])
+        expect(second_body).to include(expansions[1])
+      end
+
+      it "R-TFIQ-6805 provides a re-roll control that is a link to the root path" do
+        get "/"
+
+        expect(response).to have_http_status(:ok)
+        reroll_pattern = %r{<a[^>]*href=["']/["'][^>]*id=["']reroll["']|<a[^>]*id=["']reroll["'][^>]*href=["']/["']}
+        expect(response.body).to match(reroll_pattern)
+      end
+
+      it "R-TFIQ-6805 the re-roll control works without JavaScript (plain link)" do
+        get "/"
+
+        # No JavaScript needed: the control is an <a> link, not a JS-driven widget.
+        expect(response.body).to match(/<a[^>]*id=["']reroll["']/)
+        expect(response.body).not_to match(/<script\b/i)
+      end
+    end
+
     it "R-SY3U-AF4G offers no in-page control to mutate the count" do
       get "/"
 
@@ -139,6 +203,15 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to match(/<button\b/i)
       # No <input type=submit> either.
       expect(body).not_to match(/<input[^>]*type=["']submit["']/i)
+    end
+  end
+
+  # R-052Y-EKE0
+  describe "R-052Y-EKE0 anonymous visitors cannot post comments" do
+    it "R-052Y-EKE0 returns 404 when an anonymous visitor attempts to post a comment" do
+      post "/comments", params: { body: "test comment" }
+
+      expect(response).to have_http_status(404)
     end
   end
 end

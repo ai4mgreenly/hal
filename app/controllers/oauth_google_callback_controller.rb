@@ -27,18 +27,25 @@ class OauthGoogleCallbackController < ApplicationController
 
     callback_uri = "#{request.base_url}/oauth/google/callback"
     provider = Rails.configuration.x.google_identity_provider
-    payload = provider.exchange_code(code: params[:code], redirect_uri: callback_uri)
+    # R-T0B2-A4E5: the seam returns an Identity carrying the four claims
+    # the callback consumes; callers do not branch on which implementation
+    # is wired and do not look for extras either side may incidentally expose.
+    identity = provider.exchange_code(code: params[:code], redirect_uri: callback_uri)
 
-    claims = payload["id_token_claims"] || {}
     allowed_domain = Rails.configuration.x.google_workspace_domain
 
-    if allowed_domain.blank? || claims["hd"] != allowed_domain
+    if allowed_domain.blank? || identity.hosted_domain != allowed_domain
       @allowed_domain = allowed_domain
-      @presented_domain = claims["hd"]
-      @presented_email = claims["email"]
+      @presented_domain = identity.hosted_domain
+      @presented_email = identity.email
       render "oauth_google_callback/domain_rejected", status: :forbidden
       return
     end
+
+    # R-AYLJ-8SYX: rotate the session identifier on successful federated
+    # login so any session ID an attacker may have planted in the victim's
+    # browser before the flow began is no longer valid afterwards.
+    reset_session
 
     # R-ZPE1-0DV8: mint a service-issued authorization code bound to
     # the originating authorize request's client_id, redirect_uri, and
@@ -54,7 +61,7 @@ class OauthGoogleCallbackController < ApplicationController
       redirect_uri: pending["redirect_uri"],
       code_challenge: pending["code_challenge"].to_s,
       code_challenge_method: pending["code_challenge_method"].to_s,
-      owner: claims["sub"].to_s
+      owner: identity.sub.to_s
     }
     issue_kwargs[:resource] = pending["resource"] if pending["resource"].present?
     _, code_plaintext = OauthAuthorizationCode.issue(**issue_kwargs)

@@ -186,6 +186,126 @@ RSpec.describe "MCP server", type: :request do
     end
   end
 
+  describe "R-DH2I-28CK resource binding at the MCP endpoint — byte-for-byte equality against the single configured canonical URL" do
+    let(:canonical) { Rails.configuration.x.canonical_url }
+
+    it "R-DH2I-28CK rejects a token whose resource is the canonical URL with a trailing slash" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access",
+        owner: "user-1",
+        lifetime: 1.hour,
+        resource: "#{canonical}/"
+      )
+      Counter.current.update!(value: 9)
+
+      post "/mcp",
+        params: { jsonrpc: "2.0", id: 1, method: "tools/call",
+                  params: { name: "counter_increment", arguments: {} } }.to_json,
+        headers: { "Content-Type" => "application/json",
+                   "Authorization" => "Bearer #{plaintext}" }
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(9)
+    end
+
+    it "R-DH2I-28CK rejects a token whose resource has the /mcp sub-path appended to the canonical URL" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access",
+        owner: "user-1",
+        lifetime: 1.hour,
+        resource: "#{canonical}/mcp"
+      )
+      Counter.current.update!(value: 9)
+
+      post "/mcp",
+        params: { jsonrpc: "2.0", id: 1, method: "tools/call",
+                  params: { name: "counter_increment", arguments: {} } }.to_json,
+        headers: { "Content-Type" => "application/json",
+                   "Authorization" => "Bearer #{plaintext}" }
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(9)
+    end
+  end
+
+  describe "R-EV2D-QTR1 error_description discriminates bearer-token rejection causes at MCP counter_increment" do
+    def mcp_increment(token: nil)
+      headers = { "Content-Type" => "application/json" }
+      headers["Authorization"] = "Bearer #{token}" if token
+      post "/mcp",
+        params: { jsonrpc: "2.0", id: 1, method: "tools/call",
+                  params: { name: "counter_increment", arguments: {} } }.to_json,
+        headers: headers
+    end
+
+    it "R-EV2D-QTR1 no token presented → error=invalid_request with distinct description" do
+      mcp_increment
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_request")
+      expect(body.dig("error", "data", "error_description")).to be_present
+    end
+
+    it "R-EV2D-QTR1 malformed token → error=invalid_token with malformed-cause description" do
+      mcp_increment(token: "bad-token!")
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_token")
+      expect(body.dig("error", "data", "error_description")).to match(/malform/i)
+    end
+
+    it "R-EV2D-QTR1 token not in store → error=invalid_token with not-found-cause description" do
+      mcp_increment(token: "a" * 43)
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_token")
+      expect(body.dig("error", "data", "error_description")).to match(/not found/i)
+    end
+
+    it "R-EV2D-QTR1 expired token → error=invalid_token with expired-cause description (R-TNXJ-ZWQ0)" do
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      OauthToken.find_by(token_digest: OauthToken.digest_for(plaintext))
+                .update!(expires_at: 1.minute.ago)
+
+      mcp_increment(token: plaintext)
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_token")
+      expect(body.dig("error", "data", "error_description")).to match(/expir/i)
+    end
+
+    it "R-EV2D-QTR1 revoked token → error=invalid_token with revoked-cause description (R-9HGE-87UG / R-A26O-QBG9)" do
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      OauthToken.find_by(token_digest: OauthToken.digest_for(plaintext))
+                .update!(revoked_at: Time.current)
+
+      mcp_increment(token: plaintext)
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_token")
+      expect(body.dig("error", "data", "error_description")).to match(/revok/i)
+    end
+
+    it "R-EV2D-QTR1 wrong resource → error=invalid_token with resource-mismatch description (R-IS0W-S2H3 / R-DH2I-28CK)" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access", owner: "user-1", lifetime: 1.hour,
+        resource: "https://other.example.com"
+      )
+
+      mcp_increment(token: plaintext)
+
+      body = JSON.parse(response.body)
+      expect(response).to have_http_status(:unauthorized)
+      expect(body.dig("error", "message")).to eq("invalid_token")
+      expect(body.dig("error", "data", "error_description")).to match(/resource/i)
+    end
+  end
+
   describe "transport (R-UK7D-Z0IZ)" do
     it "responds to JSON-RPC initialize over Streamable HTTP POST (R-UK7D-Z0IZ)" do
       jsonrpc("initialize", params: { protocolVersion: "2025-06-18", capabilities: {} })

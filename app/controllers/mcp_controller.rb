@@ -73,7 +73,8 @@ class McpController < ActionController::API
       value = Counter.current.value
       reply_tool(id, value)
     when "counter_increment"
-      return challenge_unauthorized(id) unless valid_access_token?
+      failure = token_auth_failure
+      return challenge_unauthorized(id, failure) if failure
 
       value = Counter.current.increment!
       reply_tool(id, value)
@@ -90,16 +91,24 @@ class McpController < ActionController::API
     })
   end
 
-  # Mirrors CounterController#require_access_token (R-IS0W-S2H3,
-  # R-A26O-QBG9, R-27SO-F63X): only this service's own access tokens,
-  # not revoked, not expired, bound to the canonical URL.
-  def valid_access_token?
+  # R-EV2D-QTR1 / R-IS0W-S2H3 / R-A26O-QBG9 / R-27SO-F63X: returns
+  # [error_code, error_description] for each of the six distinct failure
+  # causes, or nil when the token is valid.
+  def token_auth_failure
     presented = bearer_token_from_header
-    token = presented && OauthToken.find_by_presented_token(presented)
+    return ["invalid_request", "No bearer token presented"] unless presented
+    return ["invalid_token", "Token is malformed"] unless presented.match?(/\A[A-Za-z0-9_-]{43}\z/)
+
+    token = OauthToken.find_by_presented_token(presented)
+    return ["invalid_token", "Token not found"] unless token&.kind == "access"
+    return ["invalid_token", "Token has been revoked"] if token.revoked_at.present?
+    return ["invalid_token", "Token has expired"] if token.expires_at <= Time.current
+
     canonical = Rails.configuration.x.canonical_url
-    token && token.kind == "access" &&
-      token.revoked_at.nil? && token.expires_at > Time.current &&
+    return ["invalid_token", "Token resource binding does not match"] unless
       token.resource.present? && token.resource == canonical
+
+    nil
   end
 
   def bearer_token_from_header
@@ -109,19 +118,19 @@ class McpController < ActionController::API
     value.empty? ? nil : value
   end
 
-  # R-0YOE-9NO8: when an MCP client invokes a tool that needs auth
-  # without valid credentials, respond with HTTP 401 and a
-  # WWW-Authenticate challenge that points at this server's
-  # OAuth 2.0 Protected Resource Metadata document. A conformant MCP
-  # client treats that pair as the signal to start the OAuth flow.
-  def challenge_unauthorized(id)
+  # R-0YOE-9NO8 / R-EV2D-QTR1: 401 with a WWW-Authenticate Bearer
+  # challenge and a JSON-RPC error body carrying the OAuth error_code and
+  # a distinct error_description for the failure cause.
+  def challenge_unauthorized(id, auth_error = nil)
+    error_code, error_description = auth_error || ["invalid_token", "Token validation failed"]
     base = "#{request.protocol}#{request.host_with_port}"
     metadata_url = "#{base}/.well-known/oauth-protected-resource"
     response.headers["WWW-Authenticate"] =
       %(Bearer resource_metadata="#{metadata_url}")
     render status: :unauthorized,
       json: { jsonrpc: "2.0", id: id,
-              error: { code: -32001, message: "invalid_token" } }
+              error: { code: -32001, message: error_code,
+                       data: { error_description: error_description } } }
   end
 
   def reply(id, result)

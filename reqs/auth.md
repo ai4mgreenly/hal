@@ -86,34 +86,58 @@ provider; clients never see Google directly.
   where an attacker pre-initiates a flow and induces a victim to
   complete the Google step on their behalf.
 
-## Google federation is faked this iteration
+## Provider wiring
 
-Real Google Workspace setup (OAuth client credentials, allowed
-Workspace domain) has not been performed yet, and is deferred to a
-later iteration of the spec. In the meantime, the test suite stands
-in for Google with a test double — most naturally a fake (a working
-in-memory stand-in that returns realistic OAuth payloads), though
-fakes, stubs, mocks, or whatever the implementation finds convenient
-all qualify. Tests against the double are expected to pass, including
-the ones that cover the Google-redirect and domain-enforcement
-requirements above. This whole section is transient: when real Google
-setup lands, retire these requirements (mint fresh IDs for any
-replacement claims).
-
-- R-CL63-P202: in this iteration, all interaction the service has
-  with Google's OAuth endpoints is served by a test double rather
-  than the real Google. The double returns payloads whose shape
-  matches Google's documented OAuth/OIDC responses, so the service
-  code exercises the same code paths it will use against the real
-  Google. RSpec examples covering the Google-dependent requirements
-  — notably R-4SH1-HQGP (redirect to Google) and R-5LQM-O89D
-  (Workspace-domain enforcement) — drive the service against this
-  double and are expected to pass.
-- R-DBZW-40BC: live integration tests against the real Google are
-  out of scope for this iteration. The seam between "the service's
-  Google client" and "Google" is structured so that, when real
-  Google setup lands, swapping the double for a real-Google
-  integration does not require rewriting the specs that consume it.
+- R-VF61-2Y6I: in the test environment,
+  `Rails.configuration.x.google_identity_provider` is the test double,
+  and the automated test suite makes no outbound network calls to
+  Google. The double returns payloads whose shape matches Google's
+  documented OAuth/OIDC responses, so service code under test exercises
+  the same code paths it uses against real Google. The property is
+  verified by checking the configured provider in the test environment
+  and by exercising the double's behavior; it is **not** verified by
+  asserting that any "not yet implemented" sentinel
+  (`NotImplementedError` or equivalent) exists in the real-Google code
+  path. A test that pins the real provider's methods to a sentinel
+  couples the test to a transient implementation state and will break
+  in lockstep with R-W3K0-QD0E being satisfied — that coupling is
+  itself a defect.
+- R-T0B2-A4E5: the seam between the service's Google client and
+  Google is narrow — `#authorization_url` and `#exchange_code` are
+  its only operations — and the two implementations (test double,
+  real-Google) return values of identical shape, so callers of the
+  seam do not branch on which is in use. `#authorization_url`
+  returns the URL string the user-agent should be redirected to;
+  `#exchange_code` returns an `Identity` value carrying the four
+  claims the callback consumes — `sub`, `email`, `hosted_domain`,
+  `email_verified` — drawn from the resulting OIDC ID token.
+  Callers depend only on this contract; they do not look for extras
+  one implementation may incidentally expose (e.g. a raw OAuth
+  token-endpoint hash, the unparsed ID token JWT, or a pre-parsed
+  claims map), because the other implementation may not surface
+  them. There is no automated test tier that exercises real Google;
+  end-to-end verification against real Google is performed manually
+  by running the service in development and driving the flow
+  through a browser.
+- R-W3K0-QD0E: in development and production environments,
+  `Rails.configuration.x.google_identity_provider` is an instance of
+  the real `GoogleIdentityProvider` class (not the test double). Its
+  two seam methods (`#authorization_url` and `#exchange_code`) are
+  fully implemented — neither raises `NotImplementedError` or any
+  equivalent "not yet implemented" sentinel, and neither returns a
+  fixture or stub value. `#authorization_url` builds a URL on Google's
+  documented OAuth 2.0 / OIDC authorization endpoint, parameterized
+  with the client ID from `GOOGLE_CLIENT_ID`, the supplied redirect
+  URI, the supplied state, the OIDC scopes the service needs
+  (`openid email profile`), and the `hd` parameter set to the
+  configured Workspace domain (R-5LQM-O89D). `#exchange_code` performs
+  an HTTPS POST to Google's documented token endpoint, authenticating
+  with `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` per R-68WP-XVCK,
+  and returns an `Identity` carrying the `sub`, `email`,
+  `hosted_domain`, and `email_verified` claims from the resulting ID
+  token. The implementations satisfy the surrounding Google-federation
+  requirements (R-4SH1-HQGP, R-5LQM-O89D, R-68WP-XVCK, R-ETP6-60VA)
+  when reached in deployed environments.
 
 ## Tokens
 
@@ -158,20 +182,47 @@ replacement claims).
 - R-A26O-QBG9: revocation triggered by reuse detection takes effect
   immediately for newly arriving requests. Any access token from the
   revoked chain that is presented after revocation is rejected.
-- R-IS0W-S2H3: the service has a single configured resource
+- R-3UT3-IKZG: the service has a single configured resource
   identifier — the canonical external URL it is reached at — and
   honors the `resource` parameter (RFC 8707) on its authorize and
-  token endpoints. Each issued access token's server-side row
-  records the resource identifier the token was bound to at issue
-  time. The MCP tool-call endpoint and the HTTP API accept a
-  presented bearer token only when its recorded resource binding
-  equals this service's identifier; a token whose binding is for
-  any other resource, or that has no recorded binding, is rejected.
-  This holds even though only one resource currently exists, so a
-  token minted for some future second resource cannot be replayed
-  against this one (and vice versa) the moment such a resource is
+  token endpoints. The canonical identifier is published verbatim,
+  byte-for-byte, in the OAuth 2.0 Protected Resource Metadata
+  document at `/.well-known/oauth-protected-resource` (the value of
+  the `resource` field there is the same string that bearer-side
+  validation compares against). For a service whose protected
+  endpoints sit at the root path of the host, the canonical form
+  includes a single trailing `/` (e.g. `http://localhost:3000/`,
+  `https://hal.ai.metaspot.org/`); the slash is part of the
+  identifier, not an optional decoration, and the same string is
+  used in the metadata document, the bound `resource` value
+  recorded on each issued token, and the validation comparison.
+  Each issued access token's server-side row records the resource
+  identifier the token was bound to at issue time. The MCP
+  tool-call endpoint and the HTTP API accept a presented bearer
+  token only when its recorded resource binding equals this
+  service's identifier; a token whose binding is for any other
+  resource, or that has no recorded binding, is rejected. This
+  holds even though only one resource currently exists, so a token
+  minted for some future second resource cannot be replayed against
+  this one (and vice versa) the moment such a resource is
   introduced.
-- R-DH2I-28CK: "matches" in R-IS0W-S2H3 means byte-for-byte equality
+- R-4GRA-EGBY: the authorize endpoint and the token endpoint
+  reject any request whose `resource` parameter is present and is
+  not byte-equal to the configured canonical resource identifier
+  R-3UT3-IKZG defines. Rejection happens at the endpoint itself,
+  before any code or token is issued, and uses the standard OAuth
+  signaling RFC 8707 §3.2 prescribes (`error="invalid_target"`).
+  The user-agent is not redirected anywhere using the offending
+  `resource` value. This is the issue-time mirror of the
+  presentation-time check R-DH2I-28CK defines: without it, a
+  client that sends a `resource` value the service cannot accept
+  (a different trailing-slash discipline, a different scheme, an
+  extra path segment, etc.) silently obtains a token that every
+  subsequent presentation will reject for resource-binding
+  mismatch, with no obvious signal of what went wrong. Closing
+  the loop at issuance turns that silent failure into a loud,
+  diagnosable one.
+- R-DH2I-28CK: "matches" in R-3UT3-IKZG means byte-for-byte equality
   against the one configured resource-identifier string the service
   was started with. The protected endpoints — the MCP transport
   endpoint (R-UK7D-Z0IZ) and `POST /counter/increment` (R-340Z-T6K2)
@@ -207,7 +258,7 @@ replacement claims).
   failure causes the spec separately defines: no token presented,
   token malformed, token not found in the store, token expired
   (R-TNXJ-ZWQ0), token chain revoked (R-9HGE-87UG / R-A26O-QBG9),
-  and token's recorded resource binding does not match (R-IS0W-S2H3
+  and token's recorded resource binding does not match (R-3UT3-IKZG
   / R-DH2I-28CK). Each cause yields its own distinct
   `error_description` string; the service does not collapse two or
   more causes into a single placeholder reason such as `"expired"`.
@@ -216,21 +267,33 @@ replacement claims).
   causes fired, and a conformant client can decide between
   refreshing (genuinely expired) and restarting the auth flow
   (revoked, wrong resource, unknown).
-- R-QGB5-EMOO: any cookie the service uses to identify a browser
+- R-AYLJ-8SYX: any cookie the service uses to identify a browser
   session — including the one R-ETP6-60VA binds `state` against —
-  is set with `Secure`, `HttpOnly`, and `SameSite=Lax` attributes.
-  `SameSite=Lax` (rather than `Strict`) is required because the
-  callback from Google is a cross-site top-level navigation that
-  must carry the session cookie for the state-binding check to
-  succeed. The session identifier is rotated when authentication
-  state changes, in particular on successful completion of the
-  federated Google login, so a session ID an attacker may have
-  planted in the victim's browser before the flow began is no
-  longer valid afterwards. Without these attributes, the browser-
-  session premise R-ETP6-60VA depends on does not hold: a non-
-  `HttpOnly` cookie is reachable from page-level script, a non-
-  `Secure` cookie can travel in plaintext, and a missing `SameSite`
-  lets cross-site requests ride the session.
+  is set with `HttpOnly` and `SameSite=Lax`. The cookie additionally
+  carries `Secure` when the response is served over HTTPS — detected
+  via the same forwarded-protocol signal R-ID5L-BSJM uses to gate
+  HSTS. The local-development service, which speaks plain HTTP per
+  R-PVA6-Q6OB and is not reached through the production TLS-
+  terminating proxy, omits `Secure` so the session cookie can survive
+  the OAuth round-trip; without this dispensation, modern browsers
+  refuse to store a `Secure` cookie set over `http://`, the session
+  evaporates between the authorize redirect and the Google callback,
+  and the state-binding check (R-ETP6-60VA) rejects every callback
+  in dev. The `Secure` property is therefore conditional on having
+  actually been served over HTTPS, exactly the way R-ID5L-BSJM
+  treats HSTS: present in production, absent locally. `SameSite=Lax`
+  (rather than `Strict`) is required because the callback from
+  Google is a cross-site top-level navigation that must carry the
+  session cookie for the state-binding check to succeed. The
+  session identifier is rotated when authentication state changes,
+  in particular on successful completion of the federated Google
+  login, so a session ID an attacker may have planted in the
+  victim's browser before the flow began is no longer valid
+  afterwards. Without these attributes, the browser-session premise
+  R-ETP6-60VA depends on does not hold: a non-`HttpOnly` cookie is
+  reachable from page-level script; under HTTPS, a non-`Secure`
+  cookie can travel in plaintext; a missing `SameSite` lets
+  cross-site requests ride the session.
 - R-SAK8-WB9W: bearer token plaintext (access and refresh tokens)
   appears in exactly one place outside the client's own memory: the
   response body of the token endpoint that issued it. The service

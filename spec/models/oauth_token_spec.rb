@@ -50,6 +50,33 @@ RSpec.describe OauthToken, type: :model do
     end
   end
 
+  # R-E5GH-PN6G: expires_at - issued_at must equal the configured lifetime exactly,
+  # and both timestamps come from the same clock source so a fresh token is never
+  # immediately expired.
+  describe "R-E5GH-PN6G token timestamps use a single clock source and equal the configured lifetime exactly" do
+    it "R-E5GH-PN6G access token expires_at minus issued_at equals one hour exactly" do
+      record, _ = OauthToken.issue(kind: "access", owner: "clock-test@example.com", lifetime: 1.hour)
+      record.reload
+      expect(record.expires_at - record.issued_at).to be_within(0.001).of(1.hour.to_f)
+    end
+
+    it "R-E5GH-PN6G refresh token expires_at minus issued_at equals thirty days exactly" do
+      record, _ = OauthToken.issue(kind: "refresh", owner: "clock-test@example.com", lifetime: 30.days)
+      record.reload
+      expect(record.expires_at - record.issued_at).to be_within(0.001).of(30.days.to_f)
+    end
+
+    it "R-E5GH-PN6G a freshly issued access token is not already expired" do
+      record, _ = OauthToken.issue(kind: "access", owner: "clock-test@example.com", lifetime: 1.hour)
+      expect(record.expires_at).to be > Time.current
+    end
+
+    it "R-E5GH-PN6G a freshly issued refresh token is not already expired" do
+      record, _ = OauthToken.issue(kind: "refresh", owner: "clock-test@example.com", lifetime: 30.days)
+      expect(record.expires_at).to be > Time.current
+    end
+  end
+
   describe "R-CUUP-REQT the row stores a SHA-256 digest, not the plaintext" do
     it "persists the SHA-256 digest of the plaintext, never the plaintext itself" do
       record, plaintext = OauthToken.issue(kind: "access", owner: "alice@example.com", lifetime: 1.hour)

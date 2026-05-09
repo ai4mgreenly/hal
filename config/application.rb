@@ -44,5 +44,12 @@ module Hal
     # R-DA34-WX9P).
     require Rails.root.join("lib/security_headers")
     config.middleware.use SecurityHeaders
+
+    # R-AYLJ-8SYX: add `Secure` to the session cookie only when the response
+    # was served over HTTPS, using the same forwarded-protocol signal as HSTS.
+    require Rails.root.join("lib/conditional_secure_session_cookie")
+    config.middleware.insert_before ActionDispatch::Cookies,
+                                    ConditionalSecureSessionCookie,
+                                    key: "_hal_session"
   end
 end

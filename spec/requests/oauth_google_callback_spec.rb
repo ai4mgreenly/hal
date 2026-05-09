@@ -18,7 +18,7 @@ RSpec.describe "OAuth Google Callback", type: :request do
       token_endpoint_auth_method: "none"
     )
     # Hit the authorize endpoint over https so the Secure session
-    # cookie set by R-QGB5-EMOO will travel back on the subsequent
+    # cookie set by R-AYLJ-8SYX will travel back on the subsequent
     # callback request (Rack::Test refuses to send Secure cookies on
     # http URLs).
     get "https://www.example.com/oauth/authorize",
