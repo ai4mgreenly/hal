@@ -123,7 +123,7 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to include("http://hal.ai.metaspot.org/mcp")
     end
 
-    it "R-HALR-NDM1 renders the H.A.L. banner with a subtitle from EXPANSIONS and a reroll link" do
+    it "R-TFIQ-6805 renders the H.A.L. banner with a subtitle from EXPANSIONS and a reroll link" do
       get "/"
 
       expect(response).to have_http_status(:ok)

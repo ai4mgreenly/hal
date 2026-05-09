@@ -7,7 +7,7 @@ the page.
 - R-QY5R-PYDH: visiting the site's root URL renders the current count
   as a number, in plain server-rendered HTML. No authentication is
   required to view it.
-- R-HALR-NDM1: the index page renders "H.A.L." (with a period after
+- R-TFIQ-6805: the index page renders "H.A.L." (with a period after
   each letter, including a trailing period) as a banner heading, and
   directly beneath it a single-line subtitle drawn from a fixed
   server-side list of acronym expansions for the project name. The
