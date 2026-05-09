@@ -10,24 +10,37 @@ the page.
 - R-TFIQ-6805: the index page presents the project name as "H.A.L."
   (with a period after each letter, including a trailing period) as
   a banner heading, and directly beneath it a one-line subtitle that
-  is one entry chosen from a fixed list of acronym expansions for
-  the project name. The list is deliberately a mix of plausible
-  readings and obvious jokes; no entry is canonical, and the project
-  does not document which expansions are "real." The choice is made
-  per request — successive page loads can show different
-  expansions — and the page is consistent with R-TK21-6AGY (a
-  visitor with JavaScript disabled sees a fully-rendered subtitle on
-  the first request). Selection is uniform at random over the list
-  (not round-robin), but every entry is reachable. The page also
-  provides a control by which the visitor can re-roll the subtitle
-  without leaving the page; activating the control yields a freshly-
-  picked expansion. This control is also consistent with R-TK21-6AGY
-  (it works with JavaScript disabled). The exact contents of the
-  list, the glyph or label of the re-roll control, and any page
-  styling are HOW. The properties under test: the page shows
-  "H.A.L." and exactly one of the configured expansions on each
-  request; the page exposes a re-roll control whose activation
-  produces a freshly-picked expansion.
+  is one entry chosen from the following fixed list of acronym
+  expansions for the project name:
+
+      - Holistic Access Layer
+      - Human Augmentation Layer
+      - Heuristic Agent Liaison
+      - Home, APIs, Library
+      - Heuristically programmed ALgorithm
+      - Helpful Autonomous Liaison
+      - Hyperlocal Agent Layer
+      - Host Agent Liaison
+      - Has Always Listened
+      - House Always Loses
+
+  The list is deliberately a mix of plausible readings and obvious
+  jokes; no entry is canonical, and the project does not document
+  which expansions are "real." The choice is made per request —
+  successive page loads can show different expansions — and the
+  page is consistent with R-TK21-6AGY (a visitor with JavaScript
+  disabled sees a fully-rendered subtitle on the first request).
+  Selection is uniform at random over the list (not round-robin),
+  but every entry is reachable. The page also provides a control by
+  which the visitor can re-roll the subtitle without leaving the
+  page; activating the control yields a freshly-picked expansion.
+  This control is also consistent with R-TK21-6AGY (it works with
+  JavaScript disabled). The glyph or label of the re-roll control,
+  the markup used for the banner and subtitle, and any page styling
+  are HOW. The properties under test: the page shows "H.A.L." and
+  exactly one of the listed expansions on each request; the page
+  exposes a re-roll control whose activation produces a freshly-
+  picked expansion from the list.
 - R-SY3U-AF4G: the index page does not offer any in-page control to
   mutate the count. Mutation is the API/MCP path's job, and that path
   requires authentication.
