@@ -5,10 +5,10 @@ RSpec.describe "OAuth Google Callback", type: :request do
   let(:provider) { Rails.configuration.x.google_identity_provider }
 
   around do |example|
-    previous_domain = Rails.configuration.x.google_workspace_domain
-    Rails.configuration.x.google_workspace_domain = "allowed.example"
+    previous_domain = Rails.configuration.x.auth.workspace_domain
+    Rails.configuration.x.auth.workspace_domain = "allowed.example"
     example.run
-    Rails.configuration.x.google_workspace_domain = previous_domain
+    Rails.configuration.x.auth.workspace_domain = previous_domain
   end
 
   def initiate_authorize

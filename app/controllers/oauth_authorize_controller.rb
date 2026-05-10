@@ -20,6 +20,7 @@ class OauthAuthorizeController < ApplicationController
   STATE_TTL_SECONDS = 600
 
   def show
+    auth = Rails.configuration.x.auth
     # R-1ERW-YD9G: validate redirect_uri is byte-for-byte registered
     # for the requesting client before doing anything else. A
     # mismatched redirect_uri is refused here — never used as a
@@ -27,6 +28,19 @@ class OauthAuthorizeController < ApplicationController
     client = OauthClient.find_by(client_id: params[:client_id].to_s)
     if client.nil? || !client.redirect_uris.include?(params[:redirect_uri].to_s)
       render plain: "invalid_request: redirect_uri is not registered for this client",
+             status: :bad_request
+      return
+    end
+
+    # R-4GRA-EGBY: issue-time canonical-resource check. If the client sent a
+    # `resource` parameter at all, it must be byte-equal to the configured
+    # canonical resource identifier (R-3UT3-IKZG). Reject here, before any
+    # state is recorded or the user-agent is redirected anywhere — the
+    # offending value never reaches Google and never appears in a Location
+    # header. Mirror RFC 8707 §3.2 with `error="invalid_target"`.
+    if params[:resource].present? &&
+       params[:resource].to_s != auth.canonical_url
+      render plain: "invalid_target: resource does not match this service's canonical resource identifier",
              status: :bad_request
       return
     end
@@ -50,7 +64,14 @@ class OauthAuthorizeController < ApplicationController
 
     callback_uri = "#{request.base_url}/oauth/google/callback"
     provider = Rails.configuration.x.google_identity_provider
-    redirect_to provider.authorization_url(state: upstream_state, redirect_uri: callback_uri),
+    # R-126C-AM1E: the MCP authorize redirect to Google does not pass
+    # prompt/max_age/etc. — MCP federation rides Google's default
+    # silent-SSO behavior; only the web /login flow forces re-auth.
+    redirect_to provider.authorization_url(
+                  state: upstream_state,
+                  redirect_uri: callback_uri,
+                  prompt: auth.mcp_login_prompt
+                ),
                 allow_other_host: true
   end
 end

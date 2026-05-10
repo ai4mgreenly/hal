@@ -15,27 +15,30 @@ class GoogleIdentityProvider
 
   AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth".freeze
   TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token".freeze
-  DEFAULT_SCOPE = "openid email profile".freeze
 
-  def authorization_url(state:, redirect_uri:, scope: DEFAULT_SCOPE)
+  def authorization_url(state:, redirect_uri:, scope: nil, prompt: nil)
+    auth = Rails.configuration.x.auth
+    scope ||= auth.google_scopes.join(" ")
     params = {
-      client_id: ENV["GOOGLE_CLIENT_ID"],
+      client_id: auth.google_client_id,
       redirect_uri: redirect_uri,
       response_type: "code",
       scope: scope,
       state: state,
-      hd: Rails.configuration.x.google_workspace_domain
+      hd: auth.workspace_domain
     }
+    params[:prompt] = prompt if prompt
     "#{AUTHORIZATION_ENDPOINT}?#{URI.encode_www_form(params)}"
   end
 
   def exchange_code(code:, redirect_uri:)
+    auth = Rails.configuration.x.auth
     response = Net::HTTP.post_form(URI.parse(TOKEN_ENDPOINT), {
       "grant_type"    => "authorization_code",
       "code"          => code,
       "redirect_uri"  => redirect_uri,
-      "client_id"     => ENV["GOOGLE_CLIENT_ID"],
-      "client_secret" => ENV["GOOGLE_CLIENT_SECRET"]
+      "client_id"     => auth.google_client_id,
+      "client_secret" => auth.google_client_secret
     })
     body = JSON.parse(response.body)
     id_token = body.fetch("id_token")

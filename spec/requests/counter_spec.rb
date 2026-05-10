@@ -208,14 +208,14 @@ RSpec.describe "Counter API", type: :request do
       body = JSON.parse(response.body)
       access = OauthToken.find_by_presented_token(body["access_token"])
       refresh = OauthToken.find_by_presented_token(body["refresh_token"])
-      canonical = Rails.configuration.x.canonical_url
+      canonical = Rails.configuration.x.auth.canonical_url
 
       expect(access.resource).to eq(canonical)
       expect(refresh.resource).to eq(canonical)
     end
 
     describe "R-DH2I-28CK resource equality is byte-for-byte — canonical URL bound token accepted at both endpoints; near-misses rejected" do
-      let(:canonical) { Rails.configuration.x.canonical_url }
+      let(:canonical) { Rails.configuration.x.auth.canonical_url }
 
       it "R-DH2I-28CK accepts a token bound to the exact configured canonical URL at the counter endpoint" do
         _record, plaintext = OauthToken.issue(
@@ -383,6 +383,117 @@ RSpec.describe "Counter API", type: :request do
 
       expect(evaluate.call("increment")).to be(true)
       expect(evaluate.call("show")).to be(false)
+    end
+  end
+
+  describe "R-OCH3-8FQ8 the mutation endpoints accept either bearer or web-session-cookie auth" do
+    let(:provider) { Rails.configuration.x.google_identity_provider }
+    let(:email) { "och3@allowed.example" }
+
+    around do |example|
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
+      example.run
+      Rails.configuration.x.auth.workspace_domain = previous_domain
+    end
+
+    def establish_web_session!(email:)
+      get "https://www.example.com/login"
+      upstream_state = URI.decode_www_form(URI.parse(response.location).query).to_h["state"]
+      provider.stub_code(
+        "code-och3-#{email}",
+        sub: "google-#{email}",
+        email: email,
+        hosted_domain: "allowed.example"
+      )
+      get "https://www.example.com/oauth/google/callback",
+          params: { code: "code-och3-#{email}", state: upstream_state },
+          headers: { "X-Forwarded-Proto" => "https" }
+    end
+
+    it "R-OCH3-8FQ8 a valid web session cookie alone authenticates POST /counter/increment" do
+      establish_web_session!(email: email)
+      Counter.current.update!(value: 2)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body)).to eq("value" => 3)
+      expect(Counter.current.value).to eq(3)
+    end
+
+    it "R-OCH3-8FQ8 a valid session + invalid bearer still succeeds (either mode sufficient)" do
+      establish_web_session!(email: email)
+      Counter.current.update!(value: 0)
+
+      post "https://www.example.com/counter/increment",
+           headers: { "Authorization" => "Bearer not-a-real-token" }
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body)).to eq("value" => 1)
+    end
+
+    it "R-OCH3-8FQ8 no auth at all returns 401 and does not change the counter (R-53Z2-DNB1)" do
+      Counter.current.update!(value: 5)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(5)
+    end
+
+    it "R-OCH3-8FQ8 an invalid (revoked) session cookie alone returns 401" do
+      establish_web_session!(email: email)
+      WebSession.last.revoke!
+      Counter.current.update!(value: 5)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(5)
+    end
+
+    it "R-OCH3-8FQ8 a session-cookie mutation does not consult the OAuth token store" do
+      establish_web_session!(email: email)
+      Counter.current.update!(value: 0)
+
+      # No find/find_by on OauthToken is invoked during the mutation.
+      allow(OauthToken).to receive(:find_by_presented_token).and_call_original
+      expect(OauthToken).not_to receive(:find_by_presented_token)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:ok)
+      expect(Counter.current.value).to eq(1)
+    end
+
+    it "R-OCH3-8FQ8 a session-cookie mutation does not revoke or touch any OauthToken row " \
+       "(R-93PJ-FRPY lifetime independence at the mutation path)" do
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      access_row = OauthToken.find_by(token_digest: OauthToken.digest_for(plaintext))
+      pre_updated = access_row.updated_at
+
+      establish_web_session!(email: email)
+      Counter.current.update!(value: 0)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:ok)
+      access_row.reload
+      expect(access_row.revoked_at).to be_nil
+      expect(access_row.updated_at).to eq(pre_updated)
+    end
+
+    it "R-OCH3-8FQ8 a bearer-token mutation (no web session) does not insert or touch a WebSession row " \
+       "(R-93PJ-FRPY lifetime independence at the mutation path)" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access", owner: "user-1", lifetime: 1.hour
+      )
+
+      expect {
+        post "/counter/increment", headers: { "Authorization" => "Bearer #{plaintext}" }
+      }.not_to change(WebSession, :count)
+      expect(response).to have_http_status(:ok)
     end
   end
 

@@ -38,6 +38,25 @@ RSpec.describe "OAuth Authorize", type: :request do
       expect(params["client_id"]).to be_present
     end
 
+    it "R-126C-AM1E omits forced-reauthentication parameters on the MCP redirect to Google" do
+      get "/oauth/authorize", params: {
+        client_id: client_record.client_id,
+        redirect_uri: registered_redirect,
+        response_type: "code",
+        scope: "openid",
+        state: "client-state",
+        code_challenge: "abc",
+        code_challenge_method: "S256"
+      }
+
+      expect(response).to have_http_status(:found)
+      params = URI.decode_www_form(URI.parse(response.location).query).to_h
+      expect(params).not_to have_key("prompt")
+      expect(params).not_to have_key("max_age")
+      expect(params).not_to have_key("login_hint")
+      expect(params).not_to have_key("approval_prompt")
+    end
+
     it "R-4SH1-HQGP issues a fresh upstream state per authorize request" do
       get "/oauth/authorize", params: {
         client_id: client_record.client_id, redirect_uri: registered_redirect, state: "s1"
@@ -112,6 +131,69 @@ RSpec.describe "OAuth Authorize", type: :request do
       }
 
       expect(response).to have_http_status(:bad_request)
+    end
+
+    it "R-4GRA-EGBY rejects a non-canonical resource without redirecting and without recording state" do
+      get "/oauth/authorize", params: {
+        client_id: client_record.client_id,
+        redirect_uri: registered_redirect,
+        response_type: "code",
+        state: "s",
+        code_challenge: "abc",
+        code_challenge_method: "S256",
+        resource: "https://wrong.example.org/"
+      }
+
+      expect(response).to have_http_status(:bad_request)
+      expect(response.headers["Location"]).to be_nil
+      expect(response.body).to include("invalid_target")
+      # The offending value must not be echoed into any redirect target,
+      # and no pending-authorization entry should have been written.
+      expect(session[:pending_authorizations].to_h).to be_empty
+    end
+
+    it "R-4GRA-EGBY rejects a canonical-but-trailing-slash-mismatched resource" do
+      mismatched = Rails.configuration.x.auth.canonical_url.chomp("/")
+      get "/oauth/authorize", params: {
+        client_id: client_record.client_id,
+        redirect_uri: registered_redirect,
+        response_type: "code",
+        state: "s",
+        resource: mismatched
+      }
+
+      expect(response).to have_http_status(:bad_request)
+      expect(response.headers["Location"]).to be_nil
+      expect(response.body).to include("invalid_target")
+    end
+
+    it "R-4GRA-EGBY accepts an exact canonical resource and still redirects to Google" do
+      get "/oauth/authorize", params: {
+        client_id: client_record.client_id,
+        redirect_uri: registered_redirect,
+        response_type: "code",
+        state: "s",
+        code_challenge: "abc",
+        code_challenge_method: "S256",
+        resource: Rails.configuration.x.auth.canonical_url
+      }
+
+      expect(response).to have_http_status(:found)
+      expect(URI.parse(response.location).host).to eq("accounts.google.com")
+    end
+
+    it "R-4GRA-EGBY redirects to Google when no resource parameter is supplied (the parameter is optional)" do
+      get "/oauth/authorize", params: {
+        client_id: client_record.client_id,
+        redirect_uri: registered_redirect,
+        response_type: "code",
+        state: "s",
+        code_challenge: "abc",
+        code_challenge_method: "S256"
+      }
+
+      expect(response).to have_http_status(:found)
+      expect(URI.parse(response.location).host).to eq("accounts.google.com")
     end
 
     it "R-1ERW-YD9G rejects a request with no redirect_uri at all" do

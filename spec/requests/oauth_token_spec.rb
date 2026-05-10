@@ -191,6 +191,77 @@ RSpec.describe "OAuth Token Endpoint", type: :request do
       expect(new_refresh.chain_id).to eq(old_refresh_row.chain_id)
     end
 
+    it "R-4GRA-EGBY rejects authorization_code grant when resource is not canonical, before any token is issued" do
+      verifier = SecureRandom.urlsafe_base64(64)
+      client, _ = OauthClient.register(
+        client_name: "R-4GRA-EGBY auth_code Client",
+        redirect_uris: [ "https://client.example.com/cb" ],
+        token_endpoint_auth_method: "none"
+      )
+      _, code_plain = OauthAuthorizationCode.issue(
+        client_id: client.client_id,
+        redirect_uri: "https://client.example.com/cb",
+        code_challenge: s256(verifier),
+        code_challenge_method: "S256",
+        owner: "google-sub-rga-acode"
+      )
+
+      before_count = OauthToken.count
+      post "/oauth/token", params: {
+        grant_type: "authorization_code",
+        code: code_plain,
+        client_id: client.client_id,
+        redirect_uri: "https://client.example.com/cb",
+        code_verifier: verifier,
+        resource: "https://wrong.example.org/"
+      }
+
+      expect(response).to have_http_status(:bad_request)
+      expect(JSON.parse(response.body)["error"]).to eq("invalid_target")
+      expect(OauthToken.count).to eq(before_count)
+    end
+
+    it "R-4GRA-EGBY rejects refresh_token grant when resource is not canonical" do
+      first = issue_chain("google-sub-rga-refresh")
+
+      post "/oauth/token", params: {
+        grant_type: "refresh_token",
+        refresh_token: first["refresh_token"],
+        resource: "https://wrong.example.org/"
+      }
+
+      expect(response).to have_http_status(:bad_request)
+      expect(JSON.parse(response.body)["error"]).to eq("invalid_target")
+    end
+
+    it "R-4GRA-EGBY accepts a token request whose resource is byte-equal to the canonical identifier" do
+      verifier = SecureRandom.urlsafe_base64(64)
+      client, _ = OauthClient.register(
+        client_name: "R-4GRA-EGBY canonical-ok Client",
+        redirect_uris: [ "https://client.example.com/cb" ],
+        token_endpoint_auth_method: "none"
+      )
+      _, code_plain = OauthAuthorizationCode.issue(
+        client_id: client.client_id,
+        redirect_uri: "https://client.example.com/cb",
+        code_challenge: s256(verifier),
+        code_challenge_method: "S256",
+        owner: "google-sub-rga-ok",
+        resource: Rails.configuration.x.auth.canonical_url
+      )
+
+      post "/oauth/token", params: {
+        grant_type: "authorization_code",
+        code: code_plain,
+        client_id: client.client_id,
+        redirect_uri: "https://client.example.com/cb",
+        code_verifier: verifier,
+        resource: Rails.configuration.x.auth.canonical_url
+      }
+
+      expect(response).to have_http_status(:ok)
+    end
+
     it "R-9HGE-87UG rejects a replayed refresh token and revokes the entire chain" do
       first = issue_chain("google-sub-replay")
       original_refresh = first["refresh_token"]

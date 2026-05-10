@@ -3,8 +3,6 @@
 # is added only when the request actually arrived over HTTPS, detected via
 # the same forwarded-protocol signal R-DA34-WX9P honors from a trusted proxy.
 class SecurityHeaders
-  HSTS_VALUE = "max-age=31536000; includeSubDomains".freeze
-
   def initialize(app)
     @app = app
   end
@@ -12,7 +10,10 @@ class SecurityHeaders
   def call(env)
     status, headers, body = @app.call(env)
     headers["X-Content-Type-Options"] = "nosniff"
-    headers["Strict-Transport-Security"] = HSTS_VALUE if ssl_request?(env)
+    if ssl_request?(env)
+      max_age = Rails.configuration.x.auth.hsts_max_age
+      headers["Strict-Transport-Security"] = "max-age=#{max_age}; includeSubDomains"
+    end
     [ status, headers, body ]
   end
 

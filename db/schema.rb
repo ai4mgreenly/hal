@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_08_200000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_09_000000) do
   create_table "counters", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
@@ -63,5 +63,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_08_200000) do
     t.datetime "used_at"
     t.index ["chain_id"], name: "index_oauth_tokens_on_chain_id"
     t.index ["token_digest"], name: "index_oauth_tokens_on_token_digest", unique: true
+  end
+
+  create_table "web_sessions", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "expires_at"
+    t.datetime "issued_at", null: false
+    t.string "owner", null: false
+    t.datetime "revoked_at"
+    t.string "session_digest", null: false
+    t.datetime "updated_at", null: false
+    t.index ["owner"], name: "index_web_sessions_on_owner"
+    t.index ["session_digest"], name: "index_web_sessions_on_session_digest", unique: true
   end
 end

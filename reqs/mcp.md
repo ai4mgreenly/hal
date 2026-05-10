@@ -22,12 +22,29 @@ can read and increment the counter as MCP tools.
 
 ## Tools
 
-- R-X4VR-1KVR: the server advertises exactly two tools, one for each
-  counter operation: a read tool and an increment tool.
+- R-FUB4-KWWB: the server advertises exactly three tools, one per
+  counter operation (R-ECNJ-R09R): a read tool (R-XS1U-B7YY), an
+  increment tool (R-YHNQ-CEJJ), and a decrement tool
+  (R-GG9B-GS8T). No other tools are exposed. This requirement
+  supersedes the earlier two-tool posture; the decrement tool was
+  added alongside the counter's decrement operation.
 - R-XS1U-B7YY: the read tool accepts no arguments and returns the
   current counter value as a non-negative integer.
 - R-YHNQ-CEJJ: the increment tool accepts no arguments. On success it
   adds one to the counter and returns the post-increment value.
+- R-GG9B-GS8T: the decrement tool accepts no arguments. When the
+  current counter value is greater than zero, on success it
+  subtracts one from the counter and returns the post-decrement
+  value, consistent with R-F5X4-XI2F. When the current counter
+  value is exactly zero, the tool returns the standard MCP
+  tool-error signal — the counter is not modified, and the error
+  message names the cause (the counter cannot go below zero). A
+  request that invokes the decrement tool requires a valid bearer
+  access token issued by this service, by the same rule
+  R-ZQS0-HWZ8 establishes for increment. When an MCP client
+  presents no credentials and decrement needs them, the server
+  responds with the standard signal that prompts the conformant
+  client to start the OAuth flow per R-0YOE-9NO8.
 - R-Z3LX-89W1: tool names and descriptions are written for a model
   audience: a model reading them should be able to choose the right
   tool without further context.

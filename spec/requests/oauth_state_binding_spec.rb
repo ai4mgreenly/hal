@@ -9,10 +9,10 @@ RSpec.describe "OAuth upstream state binding", type: :request do
   let(:registered_redirect) { "https://client.example.com/cb" }
 
   around do |example|
-    previous_domain = Rails.configuration.x.google_workspace_domain
-    Rails.configuration.x.google_workspace_domain = "allowed.example"
+    previous_domain = Rails.configuration.x.auth.workspace_domain
+    Rails.configuration.x.auth.workspace_domain = "allowed.example"
     example.run
-    Rails.configuration.x.google_workspace_domain = previous_domain
+    Rails.configuration.x.auth.workspace_domain = previous_domain
   end
 
   def register_client

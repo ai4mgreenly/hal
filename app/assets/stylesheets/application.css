@@ -8,3 +8,191 @@
  *
  * Consider organizing styles into separate files for maintainability.
  */
+
+/* R-LRSQ-5VDG: page-level design tokens pinned by the spec — warm
+   off-white background, dark ink, HAL-lens accent, Inter for UI,
+   JetBrains Mono for code. Type-scale anchors (88px title, 11px mono
+   badge) live with the elements they style. */
+:root {
+  --bg:      #f6f5f1;
+  --ink:     #14130f;
+  --accent:  #d4361e;
+}
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* R-N3CT-2XAJ: banner card with HAL-9000-evoking lens dot, tag, title, and re-roll. */
+.banner {
+  position: relative;
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  padding: 56px 40px 48px;
+  text-align: center;
+  overflow: hidden;
+}
+.banner .lens {
+  position: absolute;
+  top: 22px;
+  left: 24px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #ff7a5a 0%, #d4361e 45%, #6a0e00 100%);
+  box-shadow:
+    0 0 0 3px rgba(212, 54, 30, 0.08),
+    0 0 18px rgba(212, 54, 30, 0.45);
+  animation: hal-lens-pulse 2.6s ease-in-out infinite;
+}
+@keyframes hal-lens-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(212, 54, 30, 0.08), 0 0 14px rgba(212, 54, 30, 0.35); }
+  50%      { box-shadow: 0 0 0 4px rgba(212, 54, 30, 0.12), 0 0 24px rgba(212, 54, 30, 0.65); }
+}
+.banner .tag {
+  position: absolute;
+  top: 22px;
+  right: 24px;
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #8a8a8a;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.banner .title {
+  font-size: 88px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+  margin: 0;
+}
+.banner .subtitle-row {
+  margin-top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #bdbdbd;
+  font-size: 18px;
+}
+.banner .subtitle {
+  font-style: italic;
+}
+.banner .refresh {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #2a2a2a;
+  color: #bdbdbd;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  text-decoration: none;
+}
+@media (max-width: 639px) {
+  .banner { padding: 56px 22px 38px; }
+  .banner .title { font-size: 64px; }
+  .banner .lens { top: 16px; left: 16px; }
+  .banner .tag { top: 16px; right: 16px; }
+}
+
+/* R-RLJF-YEWW: honor prefers-reduced-motion — suppress the lens-dot
+   pulse glow and instant-on hover/transition states. Counter-flash
+   and subtitle fade-swap suppressions land with R-NRQS-QC4F /
+   R-DRX9-8WNY when those animations exist. */
+@media (prefers-reduced-motion: reduce) {
+  .banner .lens {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(212, 54, 30, 0.08);
+  }
+  .banner .refresh,
+  .banner .subtitle {
+    transition: none;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* R-PLLD-DY5X: instructions area — area header + stacked section cards with
+   dark-background code blocks and semantic token coloring. */
+.instructions-head {
+  margin: 48px 0 16px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.instructions-head h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.instructions-head .instructions-subhead {
+  margin: 0;
+  color: #8a8a8a;
+  font-size: 13px;
+}
+.instructions-head .mono,
+#mcp-config .mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+#mcp-config .section {
+  border: 1px solid #2a2a2a;
+  background: #1a1916;
+  border-radius: 10px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+#mcp-config .section-head {
+  padding: 16px 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #232220;
+}
+#mcp-config .section-head .num {
+  font: 500 11px/1 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #8a8a8a;
+  padding: 3px 7px;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  background: #14130f;
+}
+#mcp-config .section-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+#mcp-config .section-head .desc {
+  margin-left: auto;
+  color: #8a8a8a;
+  font-size: 13px;
+}
+#mcp-config .section-body {
+  padding: 18px 22px 22px;
+}
+#mcp-config pre.code {
+  background: #14130f;
+  color: #d9d4c8;
+  border: 1px solid #1f1d18;
+  border-radius: 8px;
+  padding: 14px 16px;
+  font: 500 13px/1.55 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-x: auto;
+  margin: 0;
+}
+#mcp-config pre.code .prompt { color: #8c8a82; user-select: none; }
+#mcp-config pre.code .flag   { color: #e0a96d; }
+#mcp-config pre.code .arg    { color: #a8c8ff; }
+#mcp-config pre.code .url    { color: #79d4a9; }
+#mcp-config pre.code .key    { color: #e0a96d; }
+#mcp-config pre.code .str    { color: #79d4a9; }
+#mcp-config pre.code .punct  { color: #8c8a82; }

@@ -60,11 +60,60 @@ provider; clients never see Google directly.
   expired code is likewise rejected. Without these bindings, PKCE
   is decorative and a leaked code is exchangeable by an attacker.
 
+## Configuration surface
+
+- R-LWCN-ZBXO: every numeric and string value that governs the
+  service's authentication posture — including (but not limited to)
+  the token lifetimes named in R-TNXJ-ZWQ0 and R-8UAA-YKR9, the
+  web-session ceilings in R-KJ15-9P17, the authorization-code TTL
+  in R-ZPE1-0DV8, the Google OIDC scopes named in R-W3K0-QD0E, the
+  forced-authentication posture in R-3BKZ-L7R4 and the deliberate
+  non-use of forced-authentication parameters in R-126C-AM1E, the
+  configured workspace domain in R-5LQM-O89D, the canonical resource
+  identifier in R-3UT3-IKZG, and the HSTS max-age in R-ID5L-BSJM —
+  is sourced from a single configuration surface:
+  `Rails.configuration.x.auth.*`, populated by
+  `config/initializers/auth.rb`. Secrets (the Google client
+  credentials R-68WP-XVCK names) are read from environment variables
+  inside that initializer; the initializer fails loudly (raises) if
+  a required environment variable is missing, rather than
+  substituting a default or a sentinel. Non-secret tunables are
+  Ruby-typed values in the same initializer — durations as
+  `1.hour` / `30.days`, scopes as `%w[openid email profile]`,
+  booleans for the per-flow prompt-forcing posture. Code that
+  consumes any of these values reads it from
+  `Rails.configuration.x.auth.*` and does not duplicate the literal
+  anywhere else in the codebase: changing the access-token
+  lifetime, the web idle ceiling, the Google scope list, etc., is a
+  single-file edit in `config/initializers/auth.rb`. This extends
+  the convention R-VF61-2Y6I already establishes for
+  `Rails.configuration.x.google_identity_provider` across the rest
+  of the auth surface. The intent: an operator reading the auth
+  posture finds every value that governs it in one file; a magic
+  number buried in a controller or model is itself a defect.
+
 ## Google federation
 
 - R-4SH1-HQGP: when a user reaches the service's authorize endpoint,
   the service redirects them to Google so that Google performs the
   actual login.
+- R-126C-AM1E: the redirect R-4SH1-HQGP sends to Google for the MCP
+  authorization flow does **not** include `prompt=login`,
+  `prompt=consent`, `max_age=0`, or any other parameter that demands
+  fresh re-authentication. MCP federation uses Google's default
+  behavior, which permits silent SSO when Google has an active
+  session for the user. The forced-authentication posture
+  R-3BKZ-L7R4 establishes is the web-flow analog and does not
+  extend to MCP — the two contexts have asymmetric trust postures
+  by deliberate choice. The intent: MCP refresh is expensive (it
+  requires a browser pop and a human present), so an MCP token
+  chain is allowed to ride a long-lived Google session within its
+  R-8UAA-YKR9 refresh-chain ceiling rather than being forced to
+  collect credentials on each refresh's federation step. Browsers
+  are the higher-risk vector and have their own tight cadence
+  pinned in R-KJ15-9P17 / R-3BKZ-L7R4; MCP clients are local,
+  longer-lived, and operate with the looser cadence pinned in
+  R-TNXJ-ZWQ0 / R-8UAA-YKR9.
 - R-5LQM-O89D: the service is configured at deploy time with the
   single Workspace domain whose users are allowed. A user whose
   Google identity is outside that domain is rejected with a clear
@@ -85,6 +134,105 @@ provider; clients never see Google directly.
   `state` values are single-use. This closes the login-CSRF window
   where an attacker pre-initiates a flow and induces a victim to
   complete the Google step on their behalf.
+
+## Web sessions
+
+- R-8GJG-64MR: the service offers a browser-facing login flow distinct
+  from the MCP authorization flow. A human reaches it through a stable
+  web entry point and is taken through the same Google Workspace
+  federation Google federation defines — including the same workspace-
+  domain check (R-5LQM-O89D); a Google identity outside the configured
+  domain is rejected with a clear error and no web session is
+  established. On successful federation the service records a web
+  session that identifies the human by their Google email; that email
+  is the identity the rest of the application sees for the signed-in
+  visitor.
+- R-CXJ2-R3BN: the only code path that establishes a web session is
+  the successful completion of the Google federation round-trip
+  R-8GJG-64MR defines: the visitor's user-agent must reach Google's
+  authorization endpoint, the human must complete the Google login
+  screen, and the service must accept Google's callback (with `state`
+  validated per R-ETP6-60VA and the workspace-domain check applied per
+  R-5LQM-O89D) before any web session exists. The service does not
+  synthesize a web session by any other means — not from an active MCP
+  token chain belonging to the same email, not from a development-mode
+  auto-sign-in, not from a "remember me" cookie that revives a session
+  without re-running federation. The observable property: in any
+  environment that uses the real Google identity provider
+  (R-W3K0-QD0E), every transition from "not signed in" to "signed in"
+  produces a network round-trip to Google's authorization endpoint. A
+  login flow that completes without ever reaching Google is a defect.
+- R-SLGL-B5B4: web sessions are persisted as rows in a dedicated
+  table distinct from the OAuth token store R-Z955-CD0I defines. Each
+  row records at minimum: the owner (the Google email recorded at
+  sign-in time per R-8GJG-64MR), a cryptographic hash of the opaque
+  session identifier the cookie carries, issued-at, expires-at, and
+  revoked-at. The plaintext session identifier appears in exactly one
+  place outside the user-agent's cookie store: the `Set-Cookie`
+  response that established the session; the service never persists
+  it — mirroring the posture R-CUUP-REQT defines for OAuth token
+  plaintext. Validation of an inbound session cookie is a single
+  lookup against this store: hash the presented value, find the row,
+  accept iff the row is un-expired and un-revoked. Logout
+  (R-AE1P-Z1WC) is the act of writing revoked-at on the matching
+  row; once revoked, the same cookie value cannot be redeemed again.
+  The web-session table and the OAuth-token table do not share rows
+  and have no foreign-key relationship; lifecycle operations on one
+  (issue, revoke, rotate, expire) do not read or write rows in the
+  other, reinforcing R-93PJ-FRPY at the schema level.
+- R-KJ15-9P17: a web session is bounded by two ceilings beyond
+  explicit revocation. (1) **Idle:** a session that has gone 1 hour
+  without a successful authenticated request from its bearer is
+  treated as expired; the 1-hour clock restarts on each successful
+  authenticated request that presents the session cookie. (2)
+  **Absolute:** regardless of activity, a session is treated as
+  expired 12 hours after its issued-at timestamp. The earlier of
+  the two bounds governs at any given moment. An expired session
+  validates as expired per R-SLGL-B5B4 and the user must complete a
+  fresh federation round-trip per R-CXJ2-R3BN — and re-enter
+  credentials at Google per R-3BKZ-L7R4 — to obtain a new session.
+  The expires-at column R-SLGL-B5B4 names is the natural place to
+  materialize the effective deadline (the min of the two bounds),
+  updated on each successful request; how the row stores the two
+  bounds is HOW, but the two observable ceilings — 1 hour idle, 12
+  hours absolute — are the property. Logout still terminates a
+  session immediately by writing revoked-at; these ceilings are
+  upper bounds on how long a session can survive without explicit
+  termination. The intent: an active user enjoys a workday-length
+  session up to 12 hours; an abandoned tab dies after 1 hour;
+  neither path lets a web session linger past the bounds.
+- R-3BKZ-L7R4: every web /login redirect (R-9PNQ-BN2G) to Google's
+  authorization endpoint includes whatever parameter Google's OIDC
+  contract requires to demand a fresh authentication of the user —
+  Google must actually re-authenticate the human (collect
+  credentials, complete MFA if configured) rather than satisfy the
+  request from an existing Google session via silent SSO. The exact
+  parameter (today: `prompt=login`, `max_age=0`, or both) is HOW;
+  the observable property is that on every web sign-in the user
+  must complete Google's authentication UI, regardless of any
+  active Google cookie in their browser. This applies uniformly to
+  every web sign-in: the first sign-in, the sign-in after a HAL
+  logout (R-AE1P-Z1WC), the sign-in after a HAL session has
+  expired by the idle or absolute ceiling (R-KJ15-9P17), and the
+  sign-in after any HAL-side revocation. A web sign-in flow that
+  completes without the user having entered credentials at Google is
+  a defect. The intent: a HAL web session can only be established by
+  a deliberate act of human authentication at Google, not by a
+  transparent cookie handshake. This is the web-side analog of the
+  defense-in-depth posture R-CXJ2-R3BN establishes for the federation
+  round-trip itself; together they say a web session requires both a
+  network round-trip to Google and a fresh credential collection on
+  every issuance.
+- R-93PJ-FRPY: a web session and an MCP token chain are independent
+  identity contexts that do not share lifetime or revocation. A human
+  who is signed in to the web UI and also has live MCP tokens issued
+  for the same email is in two separate states: ending the web session
+  (logout) does not revoke any MCP token, and revoking or expiring an
+  MCP token chain does not end the web session. A future permission
+  layer may relate them — for example, letting a signed-in user force-
+  expire MCP token chains issued to their own email — but no such
+  cross-action is part of the current spec, and the build agent must
+  not invent one.
 
 ## Provider wiring
 

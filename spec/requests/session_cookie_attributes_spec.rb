@@ -58,10 +58,10 @@ RSpec.describe "Session cookie attributes (R-AYLJ-8SYX)", type: :request do
 
   describe "R-AYLJ-8SYX session identifier rotates on successful federated login" do
     around do |example|
-      previous_domain = Rails.configuration.x.google_workspace_domain
-      Rails.configuration.x.google_workspace_domain = "allowed.example"
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
       example.run
-      Rails.configuration.x.google_workspace_domain = previous_domain
+      Rails.configuration.x.auth.workspace_domain = previous_domain
     end
 
     it "R-AYLJ-8SYX the session cookie value differs after a successful Google callback" do

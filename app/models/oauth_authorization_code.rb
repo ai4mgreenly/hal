@@ -7,8 +7,6 @@
 require "digest"
 
 class OauthAuthorizationCode < ApplicationRecord
-  LIFETIME = 60.seconds
-
   validates :code_digest, :client_id, :redirect_uri, :code_challenge,
             :code_challenge_method, :owner, :chain_id, :issued_at,
             :expires_at, presence: true
@@ -20,10 +18,11 @@ class OauthAuthorizationCode < ApplicationRecord
 
   def self.issue(client_id:, redirect_uri:, code_challenge:,
                  code_challenge_method:, owner:, chain_id: nil,
-                 lifetime: LIFETIME, resource: :default)
+                 lifetime: nil, resource: :default)
+    lifetime ||= Rails.configuration.x.auth.authorization_code_ttl
     # R-IS0W-S2H3: record the RFC 8707 resource binding at code-issue time
     # so the token endpoint can propagate it onto the issued tokens.
-    resource = Rails.configuration.x.canonical_url if resource == :default
+    resource = Rails.configuration.x.auth.canonical_url if resource == :default
     chain_id ||= SecureRandom.uuid
     now = Time.current
     plaintext = SecureRandom.urlsafe_base64(32)

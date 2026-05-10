@@ -33,6 +33,17 @@ Rails.application.routes.draw do
   # that Google performs the actual login.
   get "/oauth/authorize" => "oauth_authorize#show"
 
+  # R-8GJG-64MR: browser-facing login flow distinct from the MCP
+  # authorization flow. /login is the stable web entry point; it
+  # runs the same Google Workspace federation (R-5LQM-O89D) and on
+  # success records a web session keyed by the visitor's email.
+  get "/login" => "web_login#show"
+
+  # R-AE1P-Z1WC: /logout ends the current web session and redirects
+  # to /. Unauthenticated visits are a no-op redirect, not an error.
+  # Does not touch any MCP token chain (R-93PJ-FRPY).
+  get "/logout" => "web_logout#show"
+
   # R-5LQM-O89D: Google redirects back here with an authorization
   # code. The service exchanges the code, enforces the configured
   # Workspace domain, and rejects users from any other domain.

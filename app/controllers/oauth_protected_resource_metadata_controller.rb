@@ -7,11 +7,15 @@ class OauthProtectedResourceMetadataController < ActionController::API
   # that an MCP client receiving a 401 + WWW-Authenticate challenge from
   # /mcp can resolve the authorization server and begin the OAuth flow
   # defined in the MCP authorization specification.
+  # R-3UT3-IKZG: publish the configured canonical resource identifier
+  # verbatim (byte-for-byte) — the same string tokens are bound to and
+  # the validation check compares against. Not derived from the
+  # request, because the identifier is a single configured value.
   def show
-    base = "#{request.protocol}#{request.host_with_port}"
+    canonical = Rails.configuration.x.auth.canonical_url
     render json: {
-      resource: base,
-      authorization_servers: [ base ],
+      resource: canonical,
+      authorization_servers: [ canonical ],
       bearer_methods_supported: [ "header" ]
     }
   end

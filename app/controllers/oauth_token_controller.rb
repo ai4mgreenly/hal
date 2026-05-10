@@ -7,10 +7,19 @@
 require "base64"
 
 class OauthTokenController < ActionController::API
-  ACCESS_LIFETIME = 1.hour
-  REFRESH_LIFETIME = 30.days
-
   def create
+    # R-4GRA-EGBY: issue-time canonical-resource check. If the request carries
+    # a `resource` parameter, it must be byte-equal to the configured
+    # canonical resource identifier (R-3UT3-IKZG). Reject before any grant
+    # handler runs and before any token is minted. Use RFC 8707 §3.2's
+    # `invalid_target`. The auth-code-bound match (R-IS0W-S2H3) below still
+    # applies once we've cleared this gate.
+    if params[:resource].present? &&
+       params[:resource].to_s != Rails.configuration.x.auth.canonical_url
+      render_error("invalid_target")
+      return
+    end
+
     case params[:grant_type].to_s
     when "authorization_code"
       handle_authorization_code
@@ -67,17 +76,19 @@ class OauthTokenController < ActionController::API
   end
 
   def issue_chain_tokens(owner:, chain_id:, resource:)
+    access_lifetime = Rails.configuration.x.auth.access_token_lifetime
+    refresh_lifetime = Rails.configuration.x.auth.refresh_token_lifetime
     _, access_plain = OauthToken.issue(
-      kind: "access", owner: owner, chain_id: chain_id, lifetime: ACCESS_LIFETIME, resource: resource
+      kind: "access", owner: owner, chain_id: chain_id, lifetime: access_lifetime, resource: resource
     )
     _, refresh_plain = OauthToken.issue(
-      kind: "refresh", owner: owner, chain_id: chain_id, lifetime: REFRESH_LIFETIME, resource: resource
+      kind: "refresh", owner: owner, chain_id: chain_id, lifetime: refresh_lifetime, resource: resource
     )
 
     render json: {
       access_token: access_plain,
       token_type: "Bearer",
-      expires_in: ACCESS_LIFETIME.to_i,
+      expires_in: access_lifetime.to_i,
       refresh_token: refresh_plain
     }
   end

@@ -51,17 +51,18 @@ RSpec.describe GoogleIdentityProvider do
     let(:redirect_uri) { "https://service.example.com/oauth/google/callback" }
 
     around do |example|
-      original_client_id = ENV["GOOGLE_CLIENT_ID"]
-      original_client_secret = ENV["GOOGLE_CLIENT_SECRET"]
-      original_domain = Rails.configuration.x.google_workspace_domain
-      ENV["GOOGLE_CLIENT_ID"] = "real-client-id.apps.googleusercontent.com"
-      ENV["GOOGLE_CLIENT_SECRET"] = "real-client-secret"
-      Rails.configuration.x.google_workspace_domain = "workspace.example"
+      auth = Rails.configuration.x.auth
+      original_client_id = auth.google_client_id
+      original_client_secret = auth.google_client_secret
+      original_domain = auth.workspace_domain
+      auth.google_client_id = "real-client-id.apps.googleusercontent.com"
+      auth.google_client_secret = "real-client-secret"
+      auth.workspace_domain = "workspace.example"
       example.run
     ensure
-      ENV["GOOGLE_CLIENT_ID"] = original_client_id
-      ENV["GOOGLE_CLIENT_SECRET"] = original_client_secret
-      Rails.configuration.x.google_workspace_domain = original_domain
+      auth.google_client_id = original_client_id
+      auth.google_client_secret = original_client_secret
+      auth.workspace_domain = original_domain
     end
 
     it "R-W3K0-QD0E #authorization_url builds a URL on Google's documented authorization endpoint" do

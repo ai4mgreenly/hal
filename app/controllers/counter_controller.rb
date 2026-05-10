@@ -26,7 +26,14 @@ class CounterController < ActionController::API
   # invalid tokens with a distinct error_description for each of the six
   # named failure causes: no token, malformed, not found, expired, revoked,
   # wrong resource.
+  # R-OCH3-8FQ8: the mutation endpoints accept either of two auth modes
+  # per request — a valid bearer access token (the bearer-path below)
+  # or a valid web session cookie. A valid session cookie short-circuits
+  # the bearer path so a session-only client never touches the token
+  # store, preserving the lifetime/revocation independence R-93PJ-FRPY
+  # pins between web sessions and MCP token chains.
   def require_access_token
+    return if authenticated_via_web_session?
     presented = bearer_token_from_header
     unless presented
       render json: { error: "invalid_request",
@@ -64,12 +71,29 @@ class CounterController < ActionController::API
       return
     end
 
-    canonical = Rails.configuration.x.canonical_url
+    canonical = Rails.configuration.x.auth.canonical_url
     return if token.resource.present? && token.resource == canonical
 
     render json: { error: "invalid_token",
                    error_description: "Token resource binding does not match" },
            status: :unauthorized
+  end
+
+  # R-OCH3-8FQ8: a request carrying a valid web-session cookie (per
+  # R-SLGL-B5B4 / R-KJ15-9P17) authenticates the mutation without
+  # consulting the OAuth token store. An invalid or missing session
+  # cookie returns false here so the bearer path runs and produces
+  # its own 401 with the R-EV2D-QTR1 error_description.
+  def authenticated_via_web_session?
+    raw = begin
+      request.session[:web_session_id]
+    rescue StandardError
+      nil
+    end
+    return false if raw.blank?
+    row = WebSession.find_by_presented_token(raw)
+    return false unless row
+    row.touch_expiry!
   end
 
   def bearer_token_from_header

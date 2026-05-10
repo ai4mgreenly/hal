@@ -19,7 +19,7 @@ class OauthToken < ApplicationRecord
   end
 
   def self.issue(kind:, owner:, lifetime:, chain_id: nil, resource: :default)
-    resource = Rails.configuration.x.canonical_url if resource == :default
+    resource = Rails.configuration.x.auth.canonical_url if resource == :default
     chain_id ||= SecureRandom.uuid
     now = Time.current
     plaintext = SecureRandom.urlsafe_base64(32)

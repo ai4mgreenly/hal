@@ -1,29 +1,114 @@
 <%# R-QY5R-PYDH: render the current count as a number in plain HTML. %>
 <%# R-SY3U-AF4G: no in-page control to mutate the count. %>
 <%# R-TK21-6AGY: usable with JavaScript disabled — count is server-rendered. %>
-<%# R-TFIQ-6805: banner heading, random subtitle, and re-roll link. %>
-<h1>H.A.L.</h1>
-<p id="subtitle"><%= @subtitle %></p>
-<p><a href="/" id="reroll">&#x21BA;</a></p>
+<%# R-N3CT-2XAJ: banner card with lens dot, tag, HAL title, subtitle row, re-roll.
+    R-MG6P-TA7C supplies the subtitle bank that @subtitle is drawn from. %>
+<section class="banner">
+  <span class="lens" aria-hidden="true"></span>
+  <span class="tag">MCP · demo</span>
+  <h1 class="title">HAL</h1>
+  <div class="subtitle-row">
+    <span class="subtitle" id="subtitle"><%= @subtitle %></span>
+    <a class="refresh" id="reroll" href="/" aria-label="New subtitle" role="button">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <polyline points="1 20 1 14 7 14"></polyline>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
+        <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"></path>
+      </svg>
+    </a>
+  </div>
+</section>
+
+<%# R-AZZW-UX8U: the index page reflects web-session state. %>
+<section id="web-session">
+  <% if @web_email %>
+    <p>Signed in as <span id="web-email"><%= @web_email %></span></p>
+    <p><a href="/logout" id="web-logout">Sign out</a></p>
+  <% else %>
+    <p><a href="/login" id="web-login">Sign in</a></p>
+  <% end %>
+</section>
+
 <p>Current count: <span id="count"><%= @count %></span></p>
 
 <%# R-BZQY-DN3B: copy-pasteable MCP client configuration. %>
 <%# R-VVRG-W2G2: no Google details, no client credentials, no internal paths beyond base URL. %>
+<%# R-PLLD-DY5X: instructions area — header (h2 + right-aligned muted subhead),
+    two stacked section cards (01 Claude Code / 02 Claude Desktop) with numeric
+    badge, title, and right-aligned kind description; dark-background code
+    blocks with semantic token coloring. The "copy" affordance the spec also
+    pins is JS-driven and the index page is currently script-free
+    (R-TK21-6AGY); leaving the copy button out of this iteration. %>
 <section id="mcp-config">
-  <h2>Connect an MCP client</h2>
+  <div class="instructions-head">
+    <h2>Connect an MCP client</h2>
+    <p class="instructions-subhead">Point a client at <span class="mono"><%= @base_url %>/mcp</span></p>
+  </div>
 
   <%# R-5GQZ-KWCD: Claude Code uses `claude mcp add --transport http …`. %>
-  <h3>Claude Code</h3>
-  <pre id="claude-code-config"><code>claude mcp add --transport http hal <%= @base_url %>/mcp</code></pre>
+  <%# R-JV1V-OF3W: two examples distinguished by --scope (project vs user). %>
+  <%# R-OZN6-I2TF: scope examples rendered in a tab layout with WAI-ARIA
+      tablist/tab/tabpanel semantics. Project tab is active by default.
+      With JS disabled (R-TK21-6AGY) both panels remain visible — visitors
+      see both scope examples without clicking. %>
+  <article class="section" id="section-claude-code">
+    <header class="section-head">
+      <span class="num">01</span>
+      <h3>Claude Code</h3>
+      <span class="desc">CLI · adds a server entry to a scope</span>
+    </header>
+    <div class="section-body">
+      <div id="claude-code-tabs" class="claude-code-tabs">
+        <div role="tablist" aria-label="Claude Code scope">
+          <a role="tab" id="claude-code-tab-project" href="#claude-code-panel-project"
+             aria-controls="claude-code-panel-project" aria-selected="true" tabindex="0">Project scope <code data-pre="claude-code-config-project">.mcp.json</code></a>
+          <a role="tab" id="claude-code-tab-user" href="#claude-code-panel-user"
+             aria-controls="claude-code-panel-user" aria-selected="false" tabindex="-1">User scope <code data-pre="claude-code-config-user">~/.claude.json</code></a>
+        </div>
+        <div role="tabpanel" id="claude-code-panel-project" aria-labelledby="claude-code-tab-project">
+          <span class="visually-hidden" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">Project scope:</span>
+          <p class="scope-meta">Commits the server to <code>.mcp.json</code> at the repo root — everyone on the project gets it.</p>
+          <pre class="code" id="claude-code-config-project"><code><span class="prompt">$ </span><span class="arg">claude</span> mcp add <span class="flag">--transport</span> http <span class="flag">--scope</span> project hal <span class="url"><%= @base_url %>/mcp</span></code></pre>
+        </div>
+        <div role="tabpanel" id="claude-code-panel-user" aria-labelledby="claude-code-tab-user">
+          <span class="visually-hidden" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">User scope:</span>
+          <p class="scope-meta">Records the server in <code>~/.claude.json</code> — available in every project you open.</p>
+          <pre class="code" id="claude-code-config-user"><code><span class="prompt">$ </span><span class="arg">claude</span> mcp add <span class="flag">--transport</span> http <span class="flag">--scope</span> user hal <span class="url"><%= @base_url %>/mcp</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </article>
 
   <%# R-5GQZ-KWCD: Claude Desktop uses a `mcpServers` block in claude_desktop_config.json. %>
-  <h3>Claude Desktop</h3>
-  <pre id="claude-desktop-config"><code>{
-  "mcpServers": {
-    "hal": {
-      "type": "http",
-      "url": "<%= @base_url %>/mcp"
-    }
-  }
-}</code></pre>
+  <article class="section" id="section-claude-desktop">
+    <header class="section-head">
+      <span class="num">02</span>
+      <h3>Claude Desktop</h3>
+      <span class="desc">JSON · add to your <span class="mono">claude_desktop_config.json</span></span>
+    </header>
+    <div class="section-body">
+      <pre class="code" id="claude-desktop-config"><code><span class="punct">{</span>
+  <span class="key">"mcpServers"</span><span class="punct">:</span> <span class="punct">{</span>
+    <span class="key">"hal"</span><span class="punct">:</span> <span class="punct">{</span>
+      <span class="key">"type"</span><span class="punct">:</span> <span class="str">"http"</span><span class="punct">,</span>
+      <span class="key">"url"</span><span class="punct">:</span> <span class="str">"<%= @base_url %>/mcp"</span>
+    <span class="punct">}</span>
+  <span class="punct">}</span>
+<span class="punct">}</span></code></pre>
+    </div>
+  </article>
 </section>
+
+<%# R-QKYG-HAO2: footer below the instructions area, separated by a top
+    border. Left: a decorative green status dot followed by the textual
+    phrase "MCP server live" (the text carries the meaning; the listening
+    port is deliberately omitted as a deployment-internal detail). Right:
+    the literal "v0.1.0· open my pod bay doors" version + flavor line. %>
+<footer id="page-footer" style="border-top:1px solid #2a2a2a;display:flex;justify-content:space-between;align-items:center;padding:8px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#8a8a8a;margin-top:24px">
+  <span class="footer-left" style="display:flex;align-items:center;gap:8px">
+    <span class="status-dot" aria-hidden="true" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#3ddc84;box-shadow:0 0 6px rgba(61,220,132,0.7)"></span>
+    <span>MCP server live</span>
+  </span>
+  <span class="footer-right">v0.1.0 · open my pod bay doors</span>
+</footer>

@@ -180,14 +180,51 @@ RSpec.describe "MCP server", type: :request do
 
       expect(response).to have_http_status(:ok)
       doc = JSON.parse(response.body)
-      expect(doc["resource"]).to eq("http://www.example.com")
-      expect(doc["authorization_servers"]).to eq([ "http://www.example.com" ])
+      expect(doc["resource"]).to eq("http://www.example.com/")
+      expect(doc["authorization_servers"]).to eq([ "http://www.example.com/" ])
       expect(doc["bearer_methods_supported"]).to include("header")
     end
   end
 
+  describe "R-3UT3-IKZG single configured canonical resource identifier" do
+    it "R-3UT3-IKZG canonical identifier carries the trailing slash for a root-path service" do
+      expect(Rails.configuration.x.auth.canonical_url).to eq("http://www.example.com/")
+    end
+
+    it "R-3UT3-IKZG metadata document publishes the canonical identifier verbatim, byte-for-byte" do
+      get "/.well-known/oauth-protected-resource"
+
+      doc = JSON.parse(response.body)
+      expect(doc["resource"]).to eq(Rails.configuration.x.auth.canonical_url)
+    end
+
+    it "R-3UT3-IKZG issued tokens record the same canonical string the metadata publishes" do
+      get "/.well-known/oauth-protected-resource"
+      published = JSON.parse(response.body)["resource"]
+
+      _record, plaintext = OauthToken.issue(kind: "access", owner: "user-1", lifetime: 1.hour)
+      token = OauthToken.find_by_presented_token(plaintext)
+      expect(token.resource).to eq(published)
+    end
+
+    it "R-3UT3-IKZG a token bound to the canonical identifier is accepted at the MCP endpoint" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access", owner: "user-1", lifetime: 1.hour,
+        resource: Rails.configuration.x.auth.canonical_url
+      )
+
+      post "/mcp",
+        params: { jsonrpc: "2.0", id: 1, method: "tools/call",
+                  params: { name: "counter_increment", arguments: {} } }.to_json,
+        headers: { "Content-Type" => "application/json",
+                   "Authorization" => "Bearer #{plaintext}" }
+
+      expect(response).to have_http_status(:ok)
+    end
+  end
+
   describe "R-DH2I-28CK resource binding at the MCP endpoint — byte-for-byte equality against the single configured canonical URL" do
-    let(:canonical) { Rails.configuration.x.canonical_url }
+    let(:canonical) { Rails.configuration.x.auth.canonical_url }
 
     it "R-DH2I-28CK rejects a token whose resource is the canonical URL with a trailing slash" do
       _record, plaintext = OauthToken.issue(

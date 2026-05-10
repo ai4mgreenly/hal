@@ -24,16 +24,20 @@ class GoogleIdentityProvider
       )
     end
 
-    def authorization_url(state:, redirect_uri:, scope: DEFAULT_SCOPE)
+    # R-126C-AM1E: callers that need to force fresh re-authentication
+    # (the web /login flow per R-3BKZ-L7R4) pass prompt explicitly; the
+    # provider does not bake it in, so the MCP authorize redirect rides
+    # Google's default silent-SSO behavior.
+    def authorization_url(state:, redirect_uri:, scope: nil, prompt: nil)
+      scope ||= Rails.configuration.x.auth.google_scopes.join(" ")
       params = {
         client_id: CLIENT_ID,
         redirect_uri: redirect_uri,
         response_type: "code",
         scope: scope,
-        state: state,
-        access_type: "offline",
-        prompt: "consent"
+        state: state
       }
+      params[:prompt] = prompt if prompt
       "#{AUTHORIZATION_ENDPOINT}?#{URI.encode_www_form(params)}"
     end
 

@@ -11,8 +11,3 @@ Rails.application.config.x.google_identity_provider =
   else
     GoogleIdentityProvider.new
   end
-
-# R-5LQM-O89D: the single Workspace domain whose users are allowed.
-# Operators set this at deploy time via GOOGLE_WORKSPACE_DOMAIN. Tests
-# override `Rails.configuration.x.google_workspace_domain` directly.
-Rails.application.config.x.google_workspace_domain = ENV["GOOGLE_WORKSPACE_DOMAIN"]

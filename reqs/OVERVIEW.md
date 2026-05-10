@@ -2,11 +2,11 @@
 
 A small demo of an HTTP-transport MCP server with real OAuth, deployed
 at https://hal.ai.metaspot.org. The point is to be readable
-end-to-end in one sitting: a Rails app, a single shared counter, two
-MCP tools (read and increment), and OAuth-with-Google sitting in front
-of writes. The counter is a placeholder for "a tool that mutates
-state" so the moving parts on display are the MCP transport, the auth
-flow, and the Rails wiring — not a domain model.
+end-to-end in one sitting: a Rails app, a single shared counter, three
+MCP tools (read, increment, decrement), and OAuth-with-Google sitting
+in front of writes. The counter is a placeholder for "a tool that
+mutates state" so the moving parts on display are the MCP transport,
+the auth flow, and the Rails wiring — not a domain model.
 
 Audience: developers learning to build MCP servers, or to wire
 agent-style clients (Claude Desktop, Claude Code, GPT desktop apps) to
@@ -53,9 +53,15 @@ files pointing at it by ID rather than restating the rule.
 
 - R-KPS9-C5XP: per-user counters or any namespacing. Exactly one
   counter, shared by every caller.
-- R-LBQG-81A7: history, audit log, decrement, or reset operations. The
-  counter only goes up via increment. Direct database access is the
-  only way to alter or reset it.
+- R-I219-0C8A: history, audit log, or reset operations on the
+  counter. The counter supports the three operations R-ECNJ-R09R
+  pins (read, increment, decrement) and nothing else; resetting it
+  to zero, querying past values, or recovering its history are out
+  of scope. Direct database access is the only way to alter the
+  stored value outside the three named operations. (Decrement was
+  previously listed here as out-of-scope; it has since been
+  brought in-scope and is pinned by R-ECNJ-R09R / R-F5X4-XI2F /
+  R-GG9B-GS8T / R-H3FE-QFC0.)
 - R-M04F-VG43: rate limiting, quotas, abuse protection.
 - R-MOIF-IUXZ: high availability, multi-instance, or clustered
   deployment. One process is the supported topology.

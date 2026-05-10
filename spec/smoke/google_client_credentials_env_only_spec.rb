@@ -29,7 +29,10 @@ RSpec.describe "Google client credentials posture" do
         File.read(path).each_line.with_index do |line, idx|
           next unless line =~ /google_client_(id|secret)/i
           next if line.lstrip.start_with?("#")
-          offenders << "#{path}:#{idx + 1}" unless line.include?("ENV[")
+          ok = line.include?("ENV[") ||
+               line.include?("ENV.fetch(") ||
+               line =~ /\bauth\.google_client_(id|secret)\b/
+          offenders << "#{path}:#{idx + 1}" unless ok
         end
       end
       expect(offenders).to eq([])

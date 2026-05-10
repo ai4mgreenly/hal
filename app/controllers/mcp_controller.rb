@@ -96,16 +96,16 @@ class McpController < ActionController::API
   # causes, or nil when the token is valid.
   def token_auth_failure
     presented = bearer_token_from_header
-    return ["invalid_request", "No bearer token presented"] unless presented
-    return ["invalid_token", "Token is malformed"] unless presented.match?(/\A[A-Za-z0-9_-]{43}\z/)
+    return [ "invalid_request", "No bearer token presented" ] unless presented
+    return [ "invalid_token", "Token is malformed" ] unless presented.match?(/\A[A-Za-z0-9_-]{43}\z/)
 
     token = OauthToken.find_by_presented_token(presented)
-    return ["invalid_token", "Token not found"] unless token&.kind == "access"
-    return ["invalid_token", "Token has been revoked"] if token.revoked_at.present?
-    return ["invalid_token", "Token has expired"] if token.expires_at <= Time.current
+    return [ "invalid_token", "Token not found" ] unless token&.kind == "access"
+    return [ "invalid_token", "Token has been revoked" ] if token.revoked_at.present?
+    return [ "invalid_token", "Token has expired" ] if token.expires_at <= Time.current
 
-    canonical = Rails.configuration.x.canonical_url
-    return ["invalid_token", "Token resource binding does not match"] unless
+    canonical = Rails.configuration.x.auth.canonical_url
+    return [ "invalid_token", "Token resource binding does not match" ] unless
       token.resource.present? && token.resource == canonical
 
     nil
@@ -122,7 +122,7 @@ class McpController < ActionController::API
   # challenge and a JSON-RPC error body carrying the OAuth error_code and
   # a distinct error_description for the failure cause.
   def challenge_unauthorized(id, auth_error = nil)
-    error_code, error_description = auth_error || ["invalid_token", "Token validation failed"]
+    error_code, error_description = auth_error || [ "invalid_token", "Token validation failed" ]
     base = "#{request.protocol}#{request.host_with_port}"
     metadata_url = "#{base}/.well-known/oauth-protected-resource"
     response.headers["WWW-Authenticate"] =
