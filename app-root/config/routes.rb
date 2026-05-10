@@ -58,10 +58,17 @@ Rails.application.routes.draw do
   # JSON-RPC 2.0 messages over POST.
   post "/mcp" => "mcp#handle"
 
+  # R-DRX9-8WNY: SSE live-update channel. No authentication required;
+  # streams the current counter value on subscribe and on every change.
+  get "counter/stream" => "counter_stream#show"
+
   # JSON HTTP API (reqs/api.md).
   # R-2I2S-XB7K: GET /counter returns the current value.
   get "counter" => "counter#show"
   # R-340Z-T6K2: POST /counter/increment adds one and returns the
   # post-increment value.
   post "counter/increment" => "counter#increment"
+  # R-H3FE-QFC0: POST /counter/decrement subtracts one and returns the
+  # post-decrement value; 409 when the counter is at zero.
+  post "counter/decrement" => "counter#decrement"
 end

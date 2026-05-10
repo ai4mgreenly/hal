@@ -1,5 +1,4 @@
 <%# R-QY5R-PYDH: render the current count as a number in plain HTML. %>
-<%# R-SY3U-AF4G: no in-page control to mutate the count. %>
 <%# R-TK21-6AGY: usable with JavaScript disabled — count is server-rendered. %>
 <%# R-N3CT-2XAJ: banner card with lens dot, tag, HAL title, subtitle row, re-roll.
     R-MG6P-TA7C supplies the subtitle bank that @subtitle is drawn from. %>
@@ -30,7 +29,96 @@
   <% end %>
 </section>
 
-<p>Current count: <span id="count"><%= @count %></span></p>
+<%# R-NRQS-QC4F: counter card below the banner. Contains label, value,
+    decrement/increment buttons, and a session-aware hint line. When the
+    visitor has an active web session (R-AZZW-UX8U), the buttons submit
+    standard HTML forms to /counter/decrement and /counter/increment;
+    the endpoints reply with a 303 redirect to / so the page reloads
+    with the new value when JavaScript is disabled (R-TK21-6AGY). When
+    no session is active, the buttons render visibly disabled. %>
+<section class="counter-card" id="counter-card">
+  <p class="counter-label">CURRENT COUNT</p>
+  <div class="counter-row">
+    <% if @web_email %>
+      <%# R-OCH3-8FQ8: the web-session cookie alone authenticates the
+          POST; no bearer token needed. %>
+      <form action="/counter/decrement" method="post" class="counter-form">
+        <input type="hidden" name="from" value="index">
+<button type="submit" class="counter-button" aria-label="Decrement">−</button>
+      </form>
+    <% else %>
+      <button type="button" class="counter-button" aria-label="Decrement" disabled
+              style="opacity:0.4;cursor:not-allowed">−</button>
+    <% end %>
+    <%# R-RLJF-YEWW: aria-live="polite" wrapper so live-channel updates
+        (R-DRX9-8WNY) are announced to assistive tech. %>
+    <span aria-live="polite"><span class="counter-value" id="count"><%= @count %></span></span>
+    <% if @web_email %>
+      <form action="/counter/increment" method="post" class="counter-form">
+        <input type="hidden" name="from" value="index">
+<button type="submit" class="counter-button" aria-label="Increment">+</button>
+      </form>
+    <% else %>
+      <button type="button" class="counter-button" aria-label="Increment" disabled
+              style="opacity:0.4;cursor:not-allowed">+</button>
+    <% end %>
+  </div>
+  <p class="counter-hint">
+    <% if @web_email %>
+      Signed in. The MCP server can read &amp; mutate this counter on your behalf.
+    <% else %>
+      Sign in to manipulate the counter from the browser. The MCP server can read &amp; mutate it for any signed-in user.
+    <% end %>
+  </p>
+</section>
+
+<%# R-DRX9-8WNY: SSE live-update bootstrap. The page works fine without
+    JS (R-TK21-6AGY) — the count is server-rendered above. With JS enabled
+    we open a no-auth EventSource to /counter/stream and update #count in
+    place on every change, with the R-NRQS-QC4F flash + delta animation
+    suppressed when prefers-reduced-motion is set (R-RLJF-YEWW). %>
+<script>
+(function () {
+  if (typeof EventSource === "undefined") return;
+  var countEl = document.getElementById("count");
+  if (!countEl) return;
+
+  var es = new EventSource("/counter/stream");
+  var lastShown = parseInt(countEl.textContent, 10);
+  if (isNaN(lastShown)) lastShown = null;
+
+  function reduceMotion() {
+    return window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function flashAndDelta(prev, next) {
+    if (prev === null || prev === next) return;
+    if (reduceMotion()) return;
+    countEl.classList.add("counter-flash");
+    setTimeout(function () { countEl.classList.remove("counter-flash"); }, 600);
+
+    var delta = document.createElement("span");
+    delta.className = "counter-delta";
+    delta.textContent = (next > prev ? "+" : "−") + Math.abs(next - prev);
+    countEl.parentNode.appendChild(delta);
+    setTimeout(function () {
+      if (delta.parentNode) delta.parentNode.removeChild(delta);
+    }, 900);
+  }
+
+  es.onmessage = function (event) {
+    try {
+      var msg = JSON.parse(event.data);
+      if (typeof msg.value !== "number") return;
+      var prev = lastShown;
+      countEl.textContent = String(msg.value);
+      flashAndDelta(prev, msg.value);
+      lastShown = msg.value;
+    } catch (_e) { /* ignore malformed events */ }
+  };
+})();
+</script>
 
 <%# R-BZQY-DN3B: copy-pasteable MCP client configuration. %>
 <%# R-VVRG-W2G2: no Google details, no client credentials, no internal paths beyond base URL. %>

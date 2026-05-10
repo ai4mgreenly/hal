@@ -16,9 +16,13 @@ RSpec.describe "Legacy HTTP+SSE transport absence" do
 
   describe "R-V65K-UVVH no SSE-shaped routes are defined" do
     it "no route path matches /sse, /events, or /stream segments" do
+      # R-DRX9-8WNY's /counter/stream is the live counter channel —
+      # an unrelated SSE feature, not the legacy MCP transport that
+      # R-V65K-UVVH forbids.
       sse_paths = Rails.application.routes.routes.map { |r| r.path.spec.to_s }.select do |path|
         path.match?(%r{/(sse|events|event-stream|stream)(\(|/|$)})
       end
+      sse_paths -= [ "/counter/stream(.:format)" ]
       expect(sse_paths).to eq([])
     end
   end
@@ -36,11 +40,16 @@ RSpec.describe "Legacy HTTP+SSE transport absence" do
   describe "R-V65K-UVVH no source file emits or negotiates text/event-stream" do
     it "tracked controller/view/lib files contain no text/event-stream literal" do
       roots = %w[app/controllers app/views lib]
+      # R-DRX9-8WNY's CounterStreamController serves SSE for the live
+      # counter channel — not the legacy MCP transport R-V65K-UVVH
+      # forbids — so it is exempt from this scan.
+      allowed = [ Rails.root.join("app/controllers/counter_stream_controller.rb").to_s ]
       offenders = roots.flat_map do |root|
         Dir.glob(Rails.root.join(root, "**", "*")).select { |p| File.file?(p) }
       end.select do |path|
         File.read(path).include?("text/event-stream")
       end
+      offenders -= allowed
       expect(offenders).to eq([])
     end
   end

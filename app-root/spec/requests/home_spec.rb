@@ -34,13 +34,17 @@ RSpec.describe "Home page", type: :request do
       # The count is present in the server-rendered body without needing JS.
       expect(body).to match(/>\s*7\s*</)
 
-      # No <script> tags on the page — the index page does not depend on JS.
-      expect(body).not_to match(/<script\b/i)
       # No JS module imports or importmap references.
       expect(body).not_to match(/type=["']module["']/i)
       expect(body).not_to match(/importmap/i)
       # No data-turbo-driven mutation hooks tied to the count.
       expect(body).not_to match(/data-turbo-stream/i)
+
+      # The R-DRX9-8WNY live-update bootstrap is the only permitted
+      # script and is a progressive enhancement: the count above is
+      # already rendered by the server, the +/- forms function via
+      # POST + 303 redirect (R-NRQS-QC4F), and the script merely
+      # subscribes to the SSE channel for in-place updates.
     end
 
     it "R-BZQY-DN3B displays MCP client config for Claude Code and Desktop with copy-pasteable instructions" do
@@ -235,9 +239,11 @@ RSpec.describe "Home page", type: :request do
       it "R-TFIQ-6805 the re-roll control works without JavaScript (plain link)" do
         get "/"
 
-        # No JavaScript needed: the control is an <a> link, not a JS-driven widget.
+        # No JavaScript needed: the control is an <a> link, not a JS-driven
+        # widget. (The page may carry the R-DRX9-8WNY SSE bootstrap script
+        # for live counter updates, but the re-roll itself does not depend
+        # on JS — it is a plain anchor.)
         expect(response.body).to match(/<a[^>]*id=["']reroll["']/)
-        expect(response.body).not_to match(/<script\b/i)
       end
     end
 
@@ -390,23 +396,6 @@ RSpec.describe "Home page", type: :request do
       end
     end
 
-    it "R-SY3U-AF4G offers no in-page control to mutate the count" do
-      get "/"
-
-      expect(response).to have_http_status(:ok)
-      body = response.body
-
-      # No <form> targeting any counter mutation route.
-      expect(body).not_to match(/<form[^>]*action=["'][^"']*counter[^"']*["']/i)
-      # No method=post forms at all on the index page.
-      expect(body).not_to match(/<form[^>]*method=["']post["']/i)
-      # No buttons or links pointing at the increment endpoint.
-      expect(body).not_to match(%r{counter/increment}i)
-      # No <button> elements (mutation controls).
-      expect(body).not_to match(/<button\b/i)
-      # No <input type=submit> either.
-      expect(body).not_to match(/<input[^>]*type=["']submit["']/i)
-    end
   end
 
   describe "R-AZZW-UX8U index page reflects web-session state" do
@@ -456,6 +445,119 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to match(%r{<a[^>]*href=["']/logout["']}i)
       expect(body).not_to match(/guest/i)
       expect(body).not_to match(/anonymous/i)
+    end
+  end
+
+  describe "R-NRQS-QC4F counter card with +/- buttons" do
+    let(:provider) { Rails.configuration.x.google_identity_provider }
+
+    around do |example|
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
+      example.run
+      Rails.configuration.x.auth.workspace_domain = previous_domain
+    end
+
+    def establish_web_session!(email:)
+      get "https://www.example.com/login"
+      upstream_state = URI.decode_www_form(URI.parse(response.location).query).to_h["state"]
+      provider.stub_code(
+        "code-nrqs-#{email}",
+        sub: "google-#{email}",
+        email: email,
+        hosted_domain: "allowed.example"
+      )
+      get "https://www.example.com/oauth/google/callback",
+          params: { code: "code-nrqs-#{email}", state: upstream_state },
+          headers: { "X-Forwarded-Proto" => "https" }
+    end
+
+    it "R-NRQS-QC4F renders a counter card with CURRENT COUNT label, the value, and decrement/increment buttons" do
+      Counter.current.update!(value: 42)
+
+      get "/"
+
+      expect(response).to have_http_status(:ok)
+      body = response.body
+
+      card = body[%r{<section[^>]*id=["']counter-card["'][^>]*>.*?</section>}m]
+      expect(card).not_to be_nil, "expected a counter card section"
+      expect(card).to match(/CURRENT COUNT/)
+      expect(card).to match(/>\s*42\s*</)
+      expect(card).to match(/aria-label=["']Decrement["']/i)
+      expect(card).to match(/aria-label=["']Increment["']/i)
+    end
+
+    it "R-NRQS-QC4F renders functional +/- forms posting to the mutation endpoints when signed in" do
+      establish_web_session!(email: "signed-in@allowed.example")
+
+      get "https://www.example.com/"
+
+      expect(response).to have_http_status(:ok)
+      body = response.body
+
+      card = body[%r{<section[^>]*id=["']counter-card["'][^>]*>.*?</section>}m]
+      expect(card).to match(%r{<form[^>]*action=["']/counter/increment["'][^>]*method=["']post["']}i)
+      expect(card).to match(%r{<form[^>]*action=["']/counter/decrement["'][^>]*method=["']post["']}i)
+      # Buttons are not disabled when signed in.
+      expect(card).not_to match(/aria-label=["']Increment["'][^>]*disabled/i)
+      expect(card).not_to match(/aria-label=["']Decrement["'][^>]*disabled/i)
+    end
+
+    it "R-NRQS-QC4F renders disabled +/- buttons and no mutation forms when not signed in" do
+      get "/"
+
+      body = response.body
+      card = body[%r{<section[^>]*id=["']counter-card["'][^>]*>.*?</section>}m]
+
+      # No mutation forms on the card.
+      expect(card).not_to match(%r{<form[^>]*action=["'][^"']*counter[^"']*["']}i)
+      # Both buttons carry the HTML disabled attribute.
+      expect(card).to match(/<button[^>]*aria-label=["']Increment["'][^>]*disabled/i)
+      expect(card).to match(/<button[^>]*aria-label=["']Decrement["'][^>]*disabled/i)
+    end
+
+    it "R-NRQS-QC4F shows a signed-in hint line when there is an active web session" do
+      establish_web_session!(email: "signed-in@allowed.example")
+
+      get "https://www.example.com/"
+      expect(response.body).to include("Signed in. The MCP server can read")
+    end
+
+    it "R-NRQS-QC4F shows a sign-in hint line when there is no active web session" do
+      get "/"
+      expect(response.body).to include("Sign in to manipulate the counter from the browser.")
+    end
+
+    it "R-NRQS-QC4F a browser form submission to /counter/increment redirects to / with 303 and updates the counter" do
+      establish_web_session!(email: "signed-in@allowed.example")
+      Counter.current.update!(value: 7)
+
+      post "https://www.example.com/counter/increment", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(response.location).to match(%r{/\z})
+      expect(Counter.current.value).to eq(8)
+    end
+
+    it "R-NRQS-QC4F a browser form submission to /counter/decrement redirects to / with 303 and updates the counter" do
+      establish_web_session!(email: "signed-in@allowed.example")
+      Counter.current.update!(value: 7)
+
+      post "https://www.example.com/counter/decrement", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(Counter.current.value).to eq(6)
+    end
+
+    it "R-NRQS-QC4F a browser form decrement against a zero counter redirects without changing the value" do
+      establish_web_session!(email: "signed-in@allowed.example")
+      Counter.current.update!(value: 0)
+
+      post "https://www.example.com/counter/decrement", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(Counter.current.value).to eq(0)
     end
   end
 
@@ -522,12 +624,9 @@ RSpec.describe "Home page", type: :request do
       expect(user_panel).to include("claude-code-config-user")
     end
 
-    it "R-OZN6-I2TF degrades to both panels visible with JS disabled (no <script> on the page)" do
+    it "R-OZN6-I2TF degrades to both panels visible with JS disabled" do
       get "/"
       body = response.body
-
-      # R-TK21-6AGY: no JS on the page.
-      expect(body).not_to match(/<script\b/i)
 
       # With no JS and no hiding CSS, both panels (and their code blocks) are present in the body.
       expect(body).to match(%r{<pre[^>]*id=["']claude-code-config-project["']})

@@ -3,7 +3,7 @@
 
 # Local secrets — config/master.key decrypts config/credentials.yml.enc
 # and never belongs in the repo.
-/config/master.key
+/app-root/config/master.key
 
 # Local environment overrides
 .env
@@ -11,26 +11,26 @@
 !.env.example
 
 # SQLite databases (R-IPU6-RP6Q persistence is SQLite)
-/storage/*.sqlite3
-/storage/*.sqlite3-*
-/db/*.sqlite3
-/db/*.sqlite3-*
+/app-root/storage/*.sqlite3
+/app-root/storage/*.sqlite3-*
+/app-root/db/*.sqlite3
+/app-root/db/*.sqlite3-*
 
 # Logs and tempfiles
-/log/*
-!/log/.keep
-/tmp/*
-!/tmp/.keep
-!/tmp/pids
-/tmp/pids/*
-!/tmp/pids/.keep
+/app-root/log/*
+!/app-root/log/.keep
+/app-root/tmp/*
+!/app-root/tmp/.keep
+!/app-root/tmp/pids
+/app-root/tmp/pids/*
+!/app-root/tmp/pids/.keep
 
 # Bundler / RubyGems
-/.bundle
-/vendor/bundle
+/app-root/.bundle
+/app-root/vendor/bundle
 
 # Ralph run state
-/.ralph/
+/app-root/.ralph/
 
 # Editor / OS detritus
 .DS_Store

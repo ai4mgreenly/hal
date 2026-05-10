@@ -13,7 +13,7 @@ RSpec.describe "Bootstrap" do
     end
 
     it "documents the setup command in README.md" do
-      readme = File.read(root.join("README.md"))
+      readme = File.read(root.parent.join("README.md"))
       expect(readme).to match(/bin\/setup/)
     end
 

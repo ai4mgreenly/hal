@@ -7,17 +7,7 @@ RSpec.describe "MCP server", type: :request do
       headers: { "Content-Type" => "application/json" }
   end
 
-  describe "tools/list (R-X4VR-1KVR R-XS1U-B7YY R-YHNQ-CEJJ R-Z3LX-89W1)" do
-    it "advertises exactly two tools, one for read and one for increment (R-X4VR-1KVR)" do
-      jsonrpc("tools/list")
-
-      expect(response).to have_http_status(:ok)
-      body = JSON.parse(response.body)
-      tools = body.dig("result", "tools")
-      expect(tools).to be_an(Array)
-      expect(tools.length).to eq(2)
-    end
-
+  describe "tools/list (R-XS1U-B7YY R-YHNQ-CEJJ R-GG9B-GS8T R-Z3LX-89W1)" do
     it "exposes the read tool with an empty argument schema (R-XS1U-B7YY)" do
       jsonrpc("tools/list")
 
@@ -36,6 +26,15 @@ RSpec.describe "MCP server", type: :request do
       expect(inc.dig("inputSchema", "properties")).to eq({})
     end
 
+    it "exposes the decrement tool with an empty argument schema (R-GG9B-GS8T)" do
+      jsonrpc("tools/list")
+
+      tools = JSON.parse(response.body).dig("result", "tools")
+      dec = tools.find { |t| t["name"] == "counter_decrement" }
+      expect(dec).not_to be_nil
+      expect(dec.dig("inputSchema", "properties")).to eq({})
+    end
+
     it "names and describes each tool so a model can choose without further context (R-Z3LX-89W1)" do
       jsonrpc("tools/list")
 
@@ -44,6 +43,15 @@ RSpec.describe "MCP server", type: :request do
         expect(t["description"].to_s.length).to be >= 40
         expect(t["name"]).to match(/\Acounter_/)
       end
+    end
+
+    it "advertises exactly three tools, one per counter operation (R-FUB4-KWWB)" do
+      jsonrpc("tools/list")
+
+      tools = JSON.parse(response.body).dig("result", "tools")
+      expect(tools.map { |t| t["name"] }).to contain_exactly(
+        "counter_read", "counter_increment", "counter_decrement"
+      )
     end
   end
 
@@ -147,6 +155,76 @@ RSpec.describe "MCP server", type: :request do
       body = JSON.parse(response.body)
       expect(body["error"]).to be_present
       expect(Counter.current.value).to eq(9)
+    end
+  end
+
+  describe "tools/call counter_decrement (R-GG9B-GS8T)" do
+    let(:access_token) do
+      _record, plaintext = OauthToken.issue(
+        kind: "access",
+        owner: "user-1",
+        lifetime: 1.hour,
+        resource: Rails.configuration.x.auth.canonical_url
+      )
+      plaintext
+    end
+
+    def jsonrpc_with_auth(method, token, params: {}, id: 1)
+      post "/mcp",
+        params: { jsonrpc: "2.0", id: id, method: method, params: params }.to_json,
+        headers: {
+          "Content-Type" => "application/json",
+          "Authorization" => "Bearer #{token}"
+        }
+    end
+
+    it "decrements the counter and returns the post-decrement value (R-GG9B-GS8T)" do
+      Counter.current.update!(value: 4)
+
+      jsonrpc_with_auth("tools/call", access_token,
+                        params: { name: "counter_decrement", arguments: {} })
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      result = body["result"]
+      expect(result["isError"]).to eq(false)
+      expect(result.dig("content", 0, "text")).to eq("3")
+      expect(result.dig("structuredContent", "value")).to eq(3)
+      expect(Counter.current.value).to eq(3)
+    end
+
+    it "returns an MCP tool error when the counter is zero, leaving it unchanged (R-GG9B-GS8T)" do
+      Counter.current.update!(value: 0)
+
+      jsonrpc_with_auth("tools/call", access_token,
+                        params: { name: "counter_decrement", arguments: {} })
+
+      expect(response).to have_http_status(:ok)
+      body = JSON.parse(response.body)
+      result = body["result"]
+      expect(result["isError"]).to eq(true)
+      expect(result.dig("content", 0, "text")).to match(/zero|below/i)
+      expect(Counter.current.value).to eq(0)
+    end
+
+    it "rejects counter_decrement without a bearer token (R-GG9B-GS8T)" do
+      Counter.current.update!(value: 5)
+
+      jsonrpc("tools/call", params: { name: "counter_decrement" })
+
+      expect(response).to have_http_status(:unauthorized)
+      body = JSON.parse(response.body)
+      expect(body["error"]).to be_present
+      expect(Counter.current.value).to eq(5)
+    end
+
+    it "issues a Bearer challenge when an unauthenticated client invokes counter_decrement (R-GG9B-GS8T R-0YOE-9NO8)" do
+      jsonrpc("tools/call", params: { name: "counter_decrement" })
+
+      expect(response).to have_http_status(:unauthorized)
+      challenge = response.headers["WWW-Authenticate"].to_s
+      expect(challenge).to start_with("Bearer ")
+      expect(challenge).to include("resource_metadata=")
     end
   end
 

@@ -1,9 +1,9 @@
 # R-UC3P-Z0IX: there is exactly one counter, shared by all callers.
 # R-WD9O-X90L: on a fresh database the counter is zero.
 # R-UZ9T-8NM4: the counter is a non-negative integer.
-# R-WZ7V-T4D3: exactly two operations — read and increment.
 # R-XMDZ-2RGA: increment takes no arguments and adds exactly one.
 # R-RQZQ-81ZC: increment returns the post-increment value.
+# R-F5X4-XI2F: decrement takes no arguments; refuses at zero.
 # R-VNNS-W2G0: the counter persists across process restarts.
 # R-TOI0-0Z8X: concurrent increments do not lose updates.
 require "rails_helper"
@@ -78,27 +78,74 @@ RSpec.describe Counter, type: :model do
     end
   end
 
-  describe "R-WZ7V-T4D3 exactly two operations: read and increment" do
-    it "exposes a value reader (read operation)" do
-      counter = Counter.current
-      expect(counter).to respond_to(:value)
-      expect(counter.value).to be_a(Integer)
-    end
-
-    it "exposes increment! (write operation)" do
-      expect(Counter.current).to respond_to(:increment!)
-    end
-
-    it "defines no instance methods on Counter beyond increment!" do
-      expect(Counter.instance_methods(false)).to contain_exactly(:increment!)
-    end
-  end
-
   describe "R-RQZQ-81ZC increment returns the post-increment value" do
     it "returns the value after the increment is applied" do
       counter = Counter.current
       counter.update!(value: 10)
       expect(counter.increment!).to eq(11)
+    end
+  end
+
+  describe "R-F5X4-XI2F decrement takes no arguments; refuses at zero" do
+    it "subtracts exactly one when value is greater than zero" do
+      counter = Counter.current
+      counter.update!(value: 5)
+      counter.decrement!
+      expect(counter.reload.value).to eq(4)
+    end
+
+    it "returns the post-decrement value" do
+      counter = Counter.current
+      counter.update!(value: 7)
+      expect(counter.decrement!).to eq(6)
+    end
+
+    it "takes no arguments" do
+      expect(Counter.instance_method(:decrement!).arity).to eq(0)
+    end
+
+    it "refuses to decrement below zero, raising and leaving the value unchanged" do
+      counter = Counter.current
+      counter.update!(value: 0)
+      expect { counter.decrement! }.to raise_error(Counter::DecrementBelowZero)
+      expect(counter.reload.value).to eq(0)
+    end
+  end
+
+  describe "R-DRX9-8WNY change notifications go out on the live-update channel" do
+    before { CounterBroadcaster.reset! }
+    after { CounterBroadcaster.reset! }
+
+    it "broadcasts the post-increment value on increment!" do
+      counter = Counter.current
+      counter.update!(value: 4)
+      received = []
+      CounterBroadcaster.subscribe { |v| received << v }
+
+      counter.increment!
+
+      expect(received).to eq([ 5 ])
+    end
+
+    it "broadcasts the post-decrement value on decrement!" do
+      counter = Counter.current
+      counter.update!(value: 4)
+      received = []
+      CounterBroadcaster.subscribe { |v| received << v }
+
+      counter.decrement!
+
+      expect(received).to eq([ 3 ])
+    end
+
+    it "does not broadcast when a decrement is refused at zero" do
+      counter = Counter.current
+      counter.update!(value: 0)
+      received = []
+      CounterBroadcaster.subscribe { |v| received << v }
+
+      expect { counter.decrement! }.to raise_error(Counter::DecrementBelowZero)
+      expect(received).to be_empty
     end
   end
 

@@ -386,6 +386,108 @@ RSpec.describe "Counter API", type: :request do
     end
   end
 
+  describe "POST /counter/decrement" do
+    let(:access_token) do
+      _record, plaintext = OauthToken.issue(
+        kind: "access",
+        owner: "user-1",
+        lifetime: 1.hour
+      )
+      plaintext
+    end
+    let(:auth_headers) { { "Authorization" => "Bearer #{access_token}" } }
+
+    it "R-H3FE-QFC0 returns 200 with a JSON object containing the post-decrement value" do
+      Counter.current.update!(value: 5)
+
+      post "/counter/decrement", headers: auth_headers
+
+      expect(response).to have_http_status(:ok)
+      expect(response.media_type).to eq("application/json")
+      body = JSON.parse(response.body)
+      expect(body).to be_a(Hash)
+      expect(body).to have_key("value")
+      expect(body["value"]).to eq(4)
+      expect(Counter.current.value).to eq(4)
+    end
+
+    it "R-H3FE-QFC0 returns 409 with a JSON error body when the counter is zero; stored value unchanged" do
+      Counter.current.update!(value: 0)
+
+      post "/counter/decrement", headers: auth_headers
+
+      expect(response).to have_http_status(:conflict)
+      expect(response.media_type).to eq("application/json")
+      body = JSON.parse(response.body)
+      expect(body["error"]).to be_present
+      expect(body["error_description"]).to be_present
+      expect(Counter.current.value).to eq(0)
+    end
+
+    it "R-H3FE-QFC0 R-53Z2-DNB1 returns 401 and does not change the counter without auth" do
+      Counter.current.update!(value: 9)
+
+      post "/counter/decrement"
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(9)
+    end
+
+    it "R-H3FE-QFC0 R-OCH3-8FQ8 a valid web session cookie alone authenticates decrement" do
+      provider = Rails.configuration.x.google_identity_provider
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
+      begin
+        get "https://www.example.com/login"
+        upstream_state = URI.decode_www_form(URI.parse(response.location).query).to_h["state"]
+        provider.stub_code(
+          "code-h3fe-decrement",
+          sub: "google-h3fe",
+          email: "h3fe@allowed.example",
+          hosted_domain: "allowed.example"
+        )
+        get "https://www.example.com/oauth/google/callback",
+            params: { code: "code-h3fe-decrement", state: upstream_state },
+            headers: { "X-Forwarded-Proto" => "https" }
+
+        Counter.current.update!(value: 3)
+
+        post "https://www.example.com/counter/decrement"
+
+        expect(response).to have_http_status(:ok)
+        expect(JSON.parse(response.body)).to eq("value" => 2)
+        expect(Counter.current.value).to eq(2)
+      ensure
+        Rails.configuration.x.auth.workspace_domain = previous_domain
+      end
+    end
+
+    it "R-H3FE-QFC0 R-MHYT-TIF7 the protected decrement endpoint emits no CORS headers" do
+      Counter.current.update!(value: 1)
+
+      post "/counter/decrement", headers: auth_headers.merge("Origin" => "https://evil.example")
+
+      expect(response).to have_http_status(:ok)
+      expect(response.headers).not_to have_key("Access-Control-Allow-Origin")
+      expect(response.headers["Access-Control-Allow-Credentials"]).not_to eq("true")
+    end
+
+    it "R-H3FE-QFC0 R-DH2I-28CK rejects a bearer token bound to a different resource" do
+      _record, plaintext = OauthToken.issue(
+        kind: "access",
+        owner: "user-1",
+        lifetime: 1.hour,
+        resource: "https://other.example.com"
+      )
+      Counter.current.update!(value: 5)
+
+      post "/counter/decrement", headers: { "Authorization" => "Bearer #{plaintext}" }
+
+      expect(response).to have_http_status(:unauthorized)
+      expect(Counter.current.value).to eq(5)
+    end
+  end
+
   describe "R-OCH3-8FQ8 the mutation endpoints accept either bearer or web-session-cookie auth" do
     let(:provider) { Rails.configuration.x.google_identity_provider }
     let(:email) { "och3@allowed.example" }

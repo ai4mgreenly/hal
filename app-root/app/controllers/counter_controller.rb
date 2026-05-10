@@ -4,7 +4,7 @@ class CounterController < ActionController::API
   # token issued by this service, presented as `Authorization: Bearer
   # <token>`. R-53Z2-DNB1: an unauthenticated or invalid-token request
   # returns 401 and does not change the counter.
-  before_action :require_access_token, only: :increment
+  before_action :require_access_token, only: [ :increment, :decrement ]
 
   # R-2I2S-XB7K: returns the current count as a non-negative integer
   # under the "value" key. R-3R73-2TN9: no authentication required.
@@ -17,7 +17,41 @@ class CounterController < ActionController::API
   # R-6UUW-TQP2: any issued access token grants permission to call
   # this tool; there are no finer-grained scopes.
   def increment
-    render json: { value: Counter.current.increment! }
+    value = Counter.current.increment!
+    if browser_form_post?
+      # R-NRQS-QC4F: index-page form submission — redirect to / so the
+      # page reloads with the new value when JS is disabled.
+      redirect_to root_path, status: :see_other
+    else
+      render json: { value: value }
+    end
+  end
+
+  # R-H3FE-QFC0: POST /counter/decrement subtracts one and returns the
+  # post-decrement value as JSON `{ "value": <int> }`, consistent with
+  # R-F5X4-XI2F. On a zero counter the request fails with HTTP 409
+  # (Conflict) and a JSON error body naming the cause; the stored
+  # value is unchanged.
+  def decrement
+    value = Counter.current.decrement!
+    if browser_form_post?
+      # R-NRQS-QC4F: index-page form submission — redirect to / so the
+      # page reloads with the new value when JS is disabled.
+      redirect_to root_path, status: :see_other
+    else
+      render json: { value: value }
+    end
+  rescue Counter::DecrementBelowZero
+    if browser_form_post?
+      # R-NRQS-QC4F: rejected decrement against a zero counter — page
+      # reloads without changing the displayed value; the no-JS path
+      # does not need to surface a flash message in this iteration.
+      redirect_to root_path, status: :see_other
+    else
+      render json: { error: "counter_at_zero",
+                     error_description: "Counter is at zero and cannot be decremented" },
+             status: :conflict
+    end
   end
 
   private
@@ -94,6 +128,14 @@ class CounterController < ActionController::API
     row = WebSession.find_by_presented_token(raw)
     return false unless row
     row.touch_expiry!
+  end
+
+  # R-NRQS-QC4F: distinguish browser HTML form submissions from API/JSON
+  # callers so the index page's +/- forms get a 303 redirect to / while
+  # bearer-token API requests continue to receive JSON. The index-page
+  # forms carry a `from=index` parameter; API callers don't.
+  def browser_form_post?
+    params[:from] == "index"
   end
 
   def bearer_token_from_header
