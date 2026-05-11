@@ -58,7 +58,7 @@ Rails.application.routes.draw do
   # JSON-RPC 2.0 messages over POST.
   post "/mcp" => "mcp#handle"
 
-  # R-DRX9-8WNY: SSE live-update channel. No authentication required;
+  # R-K65O-80SH: SSE live-update channel. No authentication required;
   # streams the current counter value on subscribe and on every change.
   get "counter/stream" => "counter_stream#show"
 

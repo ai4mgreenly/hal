@@ -14,7 +14,7 @@ RSpec.describe "GET /counter/stream", type: :request do
       end
   end
 
-  it "R-DRX9-8WNY responds with text/event-stream and emits the current value on subscribe" do
+  it "R-K65O-80SH responds with text/event-stream and emits the current value on subscribe" do
     Counter.current.update!(value: 17)
     stub_hold_open!
 
@@ -25,7 +25,7 @@ RSpec.describe "GET /counter/stream", type: :request do
     expect(response.body).to include('data: {"value":17}')
   end
 
-  it "R-DRX9-8WNY requires no authentication" do
+  it "R-K65O-80SH requires no authentication" do
     Counter.current.update!(value: 3)
     stub_hold_open!
 
@@ -35,7 +35,7 @@ RSpec.describe "GET /counter/stream", type: :request do
     expect(response.body).to include('data: {"value":3}')
   end
 
-  it "R-DRX9-8WNY emits later counter changes to a connected subscriber" do
+  it "R-K65O-80SH emits later counter changes to a connected subscriber" do
     Counter.current.update!(value: 0)
     stub_hold_open! do |controller, queue|
       CounterBroadcaster.broadcast(42)

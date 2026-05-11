@@ -135,6 +135,61 @@ They are the only things a developer or CI job has to know how to run.
 - R-GGVI-P9MH: `./lint.sh` at the repo root runs Rubocop against the
   project and exits non-zero if Rubocop reports any offense.
 
+## Operational baseline
+
+These properties apply to the running service and to the build
+agent's iteration discipline as a whole, not to any single feature.
+They close the class of "the spec didn't spell it out, so the build
+didn't do it" defects that would otherwise live in the seams between
+feature requirements.
+
+- R-K7DK-LSJ6: when the locally-launched service receives SIGINT
+  or SIGTERM, the process exits within 1 second, regardless of
+  what requests are in flight. Open responses — including any
+  long-lived connection the live-update channel R-K65O-80SH
+  maintains — are dropped; the client's connection simply closes.
+  Any transport the build agent picks for any feature must remain
+  compatible with this deadline; a transport whose handler blocks
+  process exit on an in-flight request is disqualified. The
+  operator experience: Ctrl-C in the launching terminal returns a
+  prompt promptly, every time. The intent: a graceful shutdown
+  that waits for long-lived connections cannot complete on its
+  own — the system explicitly opts out of that posture in favor
+  of fast termination, on the understanding that dropped clients
+  reconnect on their next attempt.
+
+- R-K8LG-ZK9V: when more than one implementation approach can
+  satisfy a requirement, the build agent prefers the approach
+  that is canonical for the pinned Rails version (R-P4B7-2CBZ) —
+  what `rails new` would generate, what the Rails guides
+  recommend, what Rails ships in-box rather than what a
+  third-party gem or a hand-rolled implementation provides. This
+  is a tiebreaker, applied only when the spec doesn't otherwise
+  constrain the choice. Requirements that name a specific
+  approach (e.g. R-IPU6-RP6Q's choice of Active Record + SQLite,
+  R-CQXC-KB48's choice of `rubocop-rails-omakase`) take
+  precedence over this default. The intent: code that a Rails
+  developer recognizes immediately is a property worth
+  preserving; novel mechanisms with no Rails precedent are a
+  last resort, and the spec biases away from them.
+
+- R-K9TD-DC0K: every R-XXXX-XXXX requirement in the spec is
+  satisfied by at least one automated test that fails when the
+  requirement is violated, identified per R-GJY8-Y9C8. A
+  requirement is considered complete only when such a test
+  exists, runs against the currently-built service, and passes.
+  Once a requirement is complete, no subsequent iteration is
+  allowed to land code that causes its test to fail again; an
+  iteration whose changes red any previously-green
+  requirement-tagged test is rolled back on that iteration, not
+  committed. The intent: the test suite is the spec's enforcement
+  surface. "I added a feature but broke another" is a defect, not
+  an acceptable trade. This extends R-GJY8-Y9C8 and R-H74C-7WFF —
+  the ID-tagging convention they pin remains, and helper /
+  fixture / exploratory specs are still allowed to be un-tagged;
+  this requirement adds coverage and no-regression on top of the
+  one-way trace.
+
 ## Dependencies
 
 - R-H6HE-QG72: Ruby dependencies are managed with Bundler. The

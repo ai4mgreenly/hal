@@ -4,7 +4,7 @@ RSpec.describe CounterBroadcaster do
   before { described_class.reset! }
   after { described_class.reset! }
 
-  it "R-DRX9-8WNY delivers each broadcast value to every active subscriber" do
+  it "R-K65O-80SH delivers each broadcast value to every active subscriber" do
     received_a = []
     received_b = []
     described_class.subscribe { |v| received_a << v }
@@ -17,7 +17,7 @@ RSpec.describe CounterBroadcaster do
     expect(received_b).to eq([ 1, 2 ])
   end
 
-  it "R-DRX9-8WNY stops delivering once a subscription is unsubscribed" do
+  it "R-K65O-80SH stops delivering once a subscription is unsubscribed" do
     received = []
     id = described_class.subscribe { |v| received << v }
 
@@ -28,7 +28,7 @@ RSpec.describe CounterBroadcaster do
     expect(received).to eq([ 1 ])
   end
 
-  it "R-DRX9-8WNY isolates subscriber failures from each other" do
+  it "R-K65O-80SH isolates subscriber failures from each other" do
     received = []
     described_class.subscribe { |_| raise "boom" }
     described_class.subscribe { |v| received << v }
@@ -37,7 +37,7 @@ RSpec.describe CounterBroadcaster do
     expect(received).to eq([ 7 ])
   end
 
-  it "R-DRX9-8WNY requires a block on subscribe" do
+  it "R-K65O-80SH requires a block on subscribe" do
     expect { described_class.subscribe }.to raise_error(ArgumentError)
   end
 end

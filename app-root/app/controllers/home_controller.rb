@@ -43,7 +43,7 @@ class HomeController < ApplicationController
     @base_url = request.base_url
     # R-MG6P-TA7C: choose one expansion uniformly at random per render.
     @subtitle = pick_subtitle
-    # R-AZZW-UX8U: reflect web-session state. When a web session is
+    # R-YLFY-6A8V: reflect web-session state. When a web session is
     # active, the page identifies the visitor by the recorded Google
     # email and exposes a /logout affordance; otherwise it exposes a
     # /login affordance and renders no placeholder identity.

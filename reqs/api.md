@@ -4,7 +4,7 @@ A small JSON API that mirrors the MCP tools, so the counter can also
 be driven from curl, scripts, or any non-MCP HTTP client. The auth
 posture matches MCP: read is open, mutations require an authenticated
 caller. The mutation endpoints also accept a valid web session cookie
-so that the index page's `+` / `−` buttons (R-NRQS-QC4F) can drive
+so that the index page's `+` / `−` buttons (R-NG6O-94I2) can drive
 the same endpoints without bearer tokens.
 
 - R-2I2S-XB7K: `GET /counter` returns HTTP 200 with a JSON object

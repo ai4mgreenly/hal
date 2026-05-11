@@ -23,6 +23,10 @@
   </head>
 
   <body>
-    <%= yield %>
+    <%# R-YFCG-9FJE: centered content container with the design reference's
+        ~880px max-width — page content is not rendered full-bleed. %>
+    <main class="page">
+      <%= yield %>
+    </main>
   </body>
 </html>

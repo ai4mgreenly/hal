@@ -1,4 +1,4 @@
-# R-DRX9-8WNY: in-process pub/sub for counter changes. Subscribers
+# R-K65O-80SH: in-process pub/sub for counter changes. Subscribers
 # receive every value passed to .broadcast(value); the SSE controller
 # uses one subscription per connected browser.
 class CounterBroadcaster

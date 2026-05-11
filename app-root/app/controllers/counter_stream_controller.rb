@@ -1,4 +1,4 @@
-# R-DRX9-8WNY: SSE endpoint streaming counter values to any connected
+# R-K65O-80SH: SSE endpoint streaming counter values to any connected
 # browser. No authentication required (the counter value is already
 # public per R-SE5T-HP2J / R-3R73-2TN9 / R-0CQ7-DSBQ); the connection
 # carries only the integer counter value.

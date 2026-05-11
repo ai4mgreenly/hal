@@ -9,7 +9,7 @@
  * Consider organizing styles into separate files for maintainability.
  */
 
-/* R-LRSQ-5VDG: page-level design tokens pinned by the spec — warm
+/* R-JWEH-5UUX: page-level design tokens pinned by the spec — warm
    off-white background, dark ink, HAL-lens accent, Inter for UI,
    JetBrains Mono for code. Type-scale anchors (88px title, 11px mono
    badge) live with the elements they style. */
@@ -26,6 +26,44 @@ body {
   font-size: 15px;
   line-height: 1.5;
 }
+
+/* R-YFCG-9FJE: centered content container with the design reference's
+   ~880px max-width — page content is not rendered full-bleed. */
+.page {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+/* R-YLFY-6A8V: top-bar row above the banner card. Auth affordance is
+   anchored to the top-right in both signed-in and signed-out states and
+   renders as a pill — never as a bare text link. */
+.top-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 0 0 16px;
+}
+.web-session { margin: 0; display: inline-flex; align-items: center; gap: 8px; }
+.auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid #2a2a2a;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+a.auth-pill:hover { background: rgba(20, 19, 15, 0.04); }
+/* R-NJUD-EFQ5: the email pill is inert — it is a label, not a control. */
+.auth-pill--signed-in { cursor: default; user-select: text; }
+.auth-pill--signed-in.auth-pill__email { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
 /* R-N3CT-2XAJ: banner card with HAL-9000-evoking lens dot, tag, title, and re-roll. */
 .banner {
@@ -79,6 +117,9 @@ body {
 }
 .banner .subtitle {
   font-style: italic;
+  /* R-K7QI-9YW4: subtitle cross-fade for the re-roll control. */
+  transition: opacity 220ms ease-in-out;
+  opacity: 1;
 }
 .banner .refresh {
   appearance: none;
@@ -100,10 +141,10 @@ body {
   .banner .tag { top: 16px; right: 16px; }
 }
 
-/* R-RLJF-YEWW: honor prefers-reduced-motion — suppress the lens-dot
+/* R-K4XR-U91S: honor prefers-reduced-motion — suppress the lens-dot
    pulse glow and instant-on hover/transition states. Counter-flash
-   and subtitle fade-swap suppressions land with R-NRQS-QC4F /
-   R-DRX9-8WNY when those animations exist. */
+   and subtitle fade-swap suppressions land with R-YJ05-EQRH /
+   R-K65O-80SH when those animations exist. */
 @media (prefers-reduced-motion: reduce) {
   .banner .lens {
     animation: none;
@@ -120,7 +161,118 @@ body {
   }
 }
 
-/* R-PLLD-DY5X: instructions area — area header + stacked section cards with
+/* R-YJ05-EQRH: counter card below the banner. Horizontal row at ≥640px
+   with label/value on the left and −/+ grouped on the right; vertical
+   column at <640px. Pinned chrome: 1px border, 8px radius on buttons,
+   ~42×42 icon buttons with 20px glyph, 56px display-weight value
+   (44px at <640px), small uppercase mono label in muted ink, 12px
+   muted-ink hint line beneath. */
+.counter-card {
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  padding: 22px 24px;
+  margin: 24px 0 0;
+  background: transparent;
+}
+.counter-card .counter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.counter-card .counter-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.counter-card .counter-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.counter-card .counter-label {
+  margin: 0;
+  font: 500 11px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #8a8a8a;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.counter-card .counter-value {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 56px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+.counter-card .counter-button {
+  width: 42px;
+  height: 42px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+.counter-card .counter-button[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.counter-card .counter-form { margin: 0; }
+.counter-card .counter-hint {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: #8a8a8a;
+}
+/* R-NIMH-0NZG: transient rejection conveyance for a `−` click against
+   a zero counter — flipped visible by JS for ~1.4s. */
+.counter-card .counter-reject {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #f08a8a;
+}
+/* R-NG6O-94I2: visual transition on counter value change — the displayed
+   value flashes in the accent color for ~600ms, and a small mint-green
+   delta indicator (`+1` / `−1`) slides in a few pixels and fades out
+   over ~900ms. Both are suppressed in reduced-motion mode (the bootstrap
+   short-circuits the call) and the universal `*` rule above also zeroes
+   their durations. */
+.counter-card .counter-value.counter-flash {
+  color: var(--accent);
+  transition: color 200ms ease-out;
+}
+.counter-card .counter-delta {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: #79d4a9;
+  opacity: 0;
+  transform: translateY(0);
+  animation: counter-delta-slide 900ms ease-out forwards;
+}
+@keyframes counter-delta-slide {
+  0%   { opacity: 0; transform: translateY(6px); }
+  20%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+@media (max-width: 639px) {
+  .counter-card .counter-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+  }
+  .counter-card .counter-controls { justify-content: flex-start; }
+  .counter-card .counter-value { font-size: 44px; }
+}
+
+/* R-YHS9-0Z0S: instructions area — area header + stacked section cards with
    dark-background code blocks and semantic token coloring. */
 .instructions-head {
   margin: 48px 0 16px;
@@ -145,8 +297,8 @@ body {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 #mcp-config .section {
-  border: 1px solid #2a2a2a;
-  background: #1a1916;
+  border: 1px solid #e3e0d6;
+  background: #fbfaf6;
   border-radius: 10px;
   margin-bottom: 14px;
   overflow: hidden;
@@ -156,15 +308,15 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid #232220;
+  border-bottom: 1px solid #ece9df;
 }
 #mcp-config .section-head .num {
   font: 500 11px/1 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: #8a8a8a;
+  color: #6f6d65;
   padding: 3px 7px;
-  border: 1px solid #2a2a2a;
+  border: 1px solid #d8d4c8;
   border-radius: 4px;
-  background: #14130f;
+  background: #f0ede4;
 }
 #mcp-config .section-head h3 {
   margin: 0;
@@ -173,12 +325,45 @@ body {
 }
 #mcp-config .section-head .desc {
   margin-left: auto;
-  color: #8a8a8a;
+  color: #6f6d65;
   font-size: 13px;
 }
 #mcp-config .section-body {
   padding: 18px 22px 22px;
 }
+/* R-9T1D-KJ2W: Claude Code scope tab interface — two side-by-side
+   triggers above a single tabpanel. Active trigger carries a 2px
+   accent-red bottom border; inactive carries a transparent one. */
+#mcp-config .scope-tabs {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #e6e3da;
+}
+#mcp-config .scope-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 8px 2px;
+  margin-bottom: -1px;
+  font: 500 13px/1.2 "Inter", system-ui, sans-serif;
+  color: #6f6d65;
+  cursor: pointer;
+}
+#mcp-config .scope-tab .mono {
+  font: 500 12px/1.2 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  margin-left: 6px;
+  color: #8c8a82;
+}
+#mcp-config .scope-tab--active {
+  color: #1a1a1a;
+  border-bottom-color: var(--accent);
+}
+#mcp-config .code-block {
+  position: relative;
+  margin: 0 0 12px;
+}
+#mcp-config .code-block:last-child { margin-bottom: 0; }
 #mcp-config pre.code {
   background: #14130f;
   color: #d9d4c8;
@@ -189,6 +374,24 @@ body {
   overflow-x: auto;
   margin: 0;
 }
+#mcp-config .copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font: 500 11px/1 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #d9d4c8;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid #2a2824;
+  border-radius: 5px;
+  cursor: pointer;
+}
+#mcp-config .copy:hover { background: rgba(255,255,255,0.10); }
+#mcp-config .copy.copied { color: #79d4a9; border-color: #79d4a9; }
+#mcp-config .copy svg { width: 11px; height: 11px; }
 #mcp-config pre.code .prompt { color: #8c8a82; user-select: none; }
 #mcp-config pre.code .flag   { color: #e0a96d; }
 #mcp-config pre.code .arg    { color: #a8c8ff; }

@@ -3,13 +3,13 @@
 The browser-facing surface of the service. A landing page that
 demonstrates the MCP-mutable counter primitive and provides copy-paste
 configuration for connecting agent clients. The visual chrome follows a
-specific design reference (R-LRSQ-5VDG); the requirements below pin the
+specific design reference (R-9U99-YATL); the requirements below pin the
 observable properties and call out where the codebase's behavior
 deliberately differs from the reference.
 
 ## Visual reference
 
-- R-LRSQ-5VDG: the index page is rendered at high visual fidelity to
+- R-9U99-YATL: the index page is rendered at high visual fidelity to
   the design reference checked into `reqs/design/HAL.html`, with the
   annotated walkthrough in `reqs/design/README.md`. The reference
   defines the color tokens, typography scale, page layout, card
@@ -20,9 +20,20 @@ deliberately differs from the reference.
   warm off-white background (`#f6f5f1`), dark ink (`#14130f`), red
   HAL-lens accent (`#d4361e`), JetBrains Mono for code, Inter for UI,
   and the type scale running from the 88px HAL title down to the 11px
-  mono badge — are the property and are pinned here. Exact padding,
-  gap, breakpoint, and radius values are HOW and live in the
-  reference. Deliberate deviations from the reference are enumerated
+  mono badge — are the property and are pinned here. Equally load-
+  bearing, and equally part of this requirement: the page content is
+  **centered with a max content width on the order of 880px** (not
+  rendered full-bleed across the viewport), and the index is
+  **visibly card-grouped** — the banner, the counter, and each MCP
+  client section render inside distinct bordered, rounded cards
+  separated by negative space, not as flat full-width sections of the
+  page. Exact padding, gap, breakpoint, and radius values are HOW and
+  live in the reference. Verifying this requirement means comparing
+  the rendered page to the reference at a layout level — confirming
+  the centered container, the card grouping, and the type/color
+  tokens are actually realized in the rendered output — not just
+  asserting that the tokens are declared somewhere in the
+  stylesheet. Deliberate deviations from the reference are enumerated
   by the surrounding requirements: the reference's localStorage-based
   auth is replaced by real Google federation (R-CXJ2-R3BN /
   R-3BKZ-L7R4); the reference's localStorage counter is replaced by
@@ -30,7 +41,7 @@ deliberately differs from the reference.
   reference's static MCP base URL is replaced by the request-derived
   URL (R-CO4Y-11X7 / R-DA34-WX9P); the reference's footer status
   text is rephrased to avoid disclosing the listening port
-  (R-QKYG-HAO2); the reference's subtitle list is replaced by the
+  (R-K3PV-GHB3); the reference's subtitle list is replaced by the
   merged bank in R-MG6P-TA7C.
 
 ## Baseline
@@ -38,18 +49,9 @@ deliberately differs from the reference.
 - R-QY5R-PYDH: visiting the site's root URL renders the current count
   as a number, in plain server-rendered HTML. No authentication is
   required to view it.
-- R-TK21-6AGY: the index page is usable with JavaScript disabled. All
-  the page's primary affordances — the re-roll control (R-N3CT-2XAJ),
-  the `+` / `−` counter buttons when signed in (R-NRQS-QC4F), the
-  Claude Code scope tabs (R-OZN6-I2TF), and the sign-in / sign-out
-  affordance (R-AZZW-UX8U) — function via standard HTML form
-  submission plus same-page reload when JS is unavailable. JS-driven
-  enhancements (live counter updates, in-place animation, tab
-  switching without reload) are additive and degrade gracefully.
-
 ## Banner card
 
-- R-N3CT-2XAJ: the page presents the project name as a banner card
+- R-K7QI-9YW4: the page presents the project name as a banner card
   near the top with the chrome the design reference pins. The card
   contains, in fixed positions:
   - **Lens dot** (top-left, absolutely positioned, ~14×14): a radial-
@@ -58,7 +60,7 @@ deliberately differs from the reference.
     loop. This is the only piece of non-hover motion on the page
     and is load-bearing; it is decorative (`aria-hidden="true"`)
     and degrades to a static dot under `prefers-reduced-motion`
-    per R-RLJF-YEWW.
+    per R-9VH6-C2KA.
   - **Tag** (top-right, absolutely positioned): mono 11px uppercase
     muted ink with content `MCP · demo`.
   - **Title**: the literal text `HAL`, rendered in the display
@@ -72,12 +74,30 @@ deliberately differs from the reference.
     italic 18px in soft-ink color, followed inline by the re-roll
     control.
   - **Re-roll control**: a small circular button (~28×28, 1px
-    border, transparent fill) with a refresh icon glyph.
-    Activating it produces a freshly-picked subtitle per
-    R-MG6P-TA7C. With JS enabled, the swap fades the old subtitle
-    out and the new one in over ~220ms. With JS disabled
-    (R-TK21-6AGY), activating the control issues a same-page
-    request that re-renders the page with a different subtitle.
+    border, transparent fill) with a refresh icon glyph,
+    rendered as a `<button>` element (or another non-navigating
+    control) — **not as an `<a>` whose `href` would navigate the
+    browser away from the current page**. Activating it produces
+    a freshly-picked subtitle per R-MG6P-TA7C, swapped into the
+    existing subtitle element in place with a ~220ms cross-fade.
+
+    The activation MUST be observable as a perceivable change to
+    the visible subtitle text without a page reload: the URL bar
+    does not change, the document does not navigate, no `GET /`
+    is issued to the server, and the surrounding page state
+    (scroll position, focus, open SSE connection, etc.) is
+    preserved across the activation. A new subtitle MAY happen to
+    match the prior one because the bank R-MG6P-TA7C is sampled
+    uniformly at random with 28 entries — that is acceptable and
+    rare — but it must remain rare; an implementation that
+    deterministically returns the same subtitle on consecutive
+    activations does not satisfy this requirement. An
+    implementation in which the control is a plain `<a href="/">`
+    that triggers a full page reload (and therefore depends on
+    the server picking a different subtitle on the next render,
+    while losing all client state) does not satisfy this
+    requirement.
+
     The button carries `aria-label="New subtitle"`.
 - R-MG6P-TA7C: the subtitle is one entry chosen uniformly at random,
   per page render, from the following fixed list of acronym
@@ -116,15 +136,23 @@ deliberately differs from the reference.
   in-jokes, and 2001-allusion jokes; no entry is canonical and the
   project does not document which expansions are "real." Selection
   is uniform at random (not round-robin), but every entry is
-  reachable. Re-roll (R-N3CT-2XAJ) yields a freshly-picked entry
+  reachable. Re-roll (R-K7QI-9YW4) yields a freshly-picked entry
   on each activation. This requirement supersedes the earlier
   10-entry bank — the design reference contributed additional
   entries and they are merged here.
 
 ## Counter card
 
-- R-NRQS-QC4F: directly below the banner the page renders a counter
-  card with the chrome the design reference pins. The card contains:
+- R-NG6O-94I2: directly below the banner the page renders a counter
+  card with the chrome the design reference pins. **Layout**: at
+  viewports ≥640px the card lays out as a single horizontal row —
+  the label and value sit on the left edge of the card; the `−` and
+  `+` buttons sit on the right edge of the same row, side by side.
+  The buttons are *not* stacked above and below the value, and they
+  do not occupy the full width of the card. At viewports <640px the
+  card collapses to a vertical column (label/value above, buttons
+  below) per the design reference's small-viewport breakpoint. The
+  card contains:
   - **Label**: small uppercase mono `CURRENT COUNT` in muted ink.
   - **Value**: the current counter value (R-2I2S-XB7K) rendered in
     a large monospaced display weight — 56px on viewports ≥640px,
@@ -139,17 +167,6 @@ deliberately differs from the reference.
     *"Sign in to manipulate the counter from the browser. The MCP
     server can read & mutate it for any signed-in user."*
 
-  When the visitor has an active web session (R-AZZW-UX8U), the
-  `+` and `−` buttons are functional: `+` POSTs to
-  `/counter/increment` (R-340Z-T6K2), `−` POSTs to
-  `/counter/decrement` (R-H3FE-QFC0), with the web-session cookie
-  carrying authentication per R-OCH3-8FQ8. A successful click
-  changes the stored counter and the page reflects the new value
-  via the live-update channel (R-DRX9-8WNY). A `−` click against
-  a counter currently at zero is rejected by the endpoint
-  (R-F5X4-XI2F / R-H3FE-QFC0); the page conveys the rejection
-  briefly and does not change the displayed value.
-
   When the visitor has no active web session, the `+` and `−`
   buttons are rendered visibly disabled (~40% opacity,
   `cursor: not-allowed`, the HTML `disabled` attribute on the
@@ -157,41 +174,104 @@ deliberately differs from the reference.
   present on the page in this state — they are not hidden — so
   the visitor sees what becomes available after sign-in.
 
-  With JS enabled, button clicks update the page in place via the
-  live channel (R-DRX9-8WNY) and trigger the visual transition
-  the design reference pins: the value flashes in the accent
-  color for ~600ms and a small green delta indicator (`+1` or
-  `−1`) slides in from a few pixels and fades out. With JS
-  disabled (R-TK21-6AGY), the buttons function via standard form
-  submission (POST + 303 redirect to `/`); the page reloads with
-  the new value and no in-place animation fires.
+  The behavior of the `+` and `−` buttons when the visitor *does*
+  have an active web session — what they POST and how the page
+  reflects the change — is pinned by R-1LLM-Y4XF.
 
   This requirement supersedes the earlier posture that the index
   page offered no in-page mutation control — the project's posture
   changed when the counter card adopted the design reference's
   +/- chrome and the mutation endpoints were broadened to accept
   web sessions (R-OCH3-8FQ8).
-- R-DRX9-8WNY: while a visitor's browser has the index page open
+- R-1LLM-Y4XF: when a visitor with an active web session
+  (R-NJUD-EFQ5) activates the index page's `+` or `−` counter
+  button, the click drives an actual mutation against the canonical
+  counter and the displayed value reflects the result. Concretely:
+  the `+` button POSTs to `/counter/increment` (R-340Z-T6K2) and
+  the `−` button POSTs to `/counter/decrement` (R-H3FE-QFC0), with
+  the web-session cookie carrying authentication per R-OCH3-8FQ8
+  (no bearer token is required from the browser). On a successful
+  mutation, the displayed count updates to the new value. A `−`
+  click against a counter currently at zero is rejected by the
+  endpoint per R-F5X4-XI2F / R-H3FE-QFC0; the page conveys the
+  rejection briefly and the displayed value does not change.
+
+  With JavaScript enabled, the click is handled in-page (no full
+  reload): the request is issued asynchronously and the new value
+  arrives via the live-update channel R-K65O-80SH, accompanied by
+  the visual transition pinned below. Modulo reduced-motion
+  suppression per R-9VH6-C2KA, every observed change to the
+  displayed counter value — whether produced by this visitor's
+  own `+`/`−` click or by another caller (MCP, HTTP API, another
+  browser tab) — fires the same transition. Concretely:
+
+  - **Value flash**: at the moment the displayed value changes, the
+    digit is rendered in the design reference's red accent
+    (`#d4361e`) and remains visibly in that color for **at least
+    600ms** before returning to the default ink color. The
+    transition into and out of the accent is permitted but must
+    not consume the 600-millisecond perceivable window — i.e. the
+    digit is unambiguously red for the full 600ms, not "fading
+    through red." The change is not a subtle tint; the new
+    numeral reads as red, not as a slightly-warmer-than-usual ink,
+    against the page background.
+  - **Delta indicator**: at the moment the displayed value changes,
+    a small element bearing the literal text `+N` or `−N` (where
+    N is the absolute difference between the previous displayed
+    value and the new one — usually 1) is inserted into the page
+    adjacent to the counter value. The element is rendered in the
+    design reference's mint-green color (`#79d4a9`), at a weight
+    and size that read clearly against the page background (the
+    design reference pins ~18px, ~600 weight). It is **visible for
+    at least 600ms** from insertion before fading or removing, and
+    it must not visually collide with the counter value itself
+    (the value remains legible the entire time). Whether it slides
+    a few pixels vertically and fades — the design reference's
+    treatment — or animates in some other way is HOW; the property
+    is that the visitor unambiguously sees a `+1` or `−1` cue
+    appear and disappear in the same gesture as the value change.
+
+  An implementation in which the value's color briefly tints
+  toward the accent (because, e.g., a CSS color transition is
+  applied without a sustain-at-target keyframe), or in which the
+  delta element exists in the DOM but its visible duration is
+  measured in milliseconds rather than hundreds of milliseconds,
+  does not satisfy this requirement: the perceivable property is
+  "a visitor sees a red flash plus a `+1`/`−1` cue every time the
+  number changes," and that property must hold without the
+  visitor having to look for it.
+
+  This requirement is the standalone observable: a visitor who is
+  signed in and clicks `+` or `−` sees the count change. A
+  rendering that paints the buttons but leaves them inert — no
+  network request issued, no value change, no error surfaced —
+  does not satisfy this requirement. The click MUST cause an HTTP
+  POST to `/counter/increment` or `/counter/decrement` to actually
+  reach the server; a client-side handler that consumes the click
+  and then fails to issue the request (silent fetch error,
+  swallowed exception, etc.) does not satisfy this requirement.
+  (Disabled-state rendering for signed-out visitors remains pinned
+  by R-NG6O-94I2.)
+- R-K65O-80SH: while a visitor's browser has the index page open
   and JavaScript is running, any change to the counter — regardless
   of which caller produced it (web `+`/`−` button, MCP increment or
   decrement tool, HTTP API endpoint, or any future operation) — is
-  reflected on the page within a small bound (target sub-second,
-  upper bound ~a few seconds) without the visitor having to reload.
-  The page maintains a live connection to the server for this
-  purpose; SSE on a dedicated endpoint is the natural fit and the
-  spec's intended posture, but the choice of transport is HOW. The
-  connection carries only the counter value (already public per
+  reflected on the page within 2 seconds without the visitor having
+  to reload, with sub-second latency as the design target. The
+  choice of transport is HOW; the build agent picks among the
+  candidates Rails offers (ActionCable, Turbo Streams, SSE,
+  polling, …) under the canonical-Rails preference R-K8LG-ZK9V
+  pins, and any chosen transport must remain compatible with the
+  shutdown deadline R-K7DK-LSJ6 pins — a transport whose handler
+  blocks process exit on an in-flight request is disqualified.
+  The channel carries only the counter value (already public per
   R-SE5T-HP2J / R-3R73-2TN9 / R-0CQ7-DSBQ) and conveys no per-user,
-  auth-protected, or session-specific data. The connection requires
+  auth-protected, or session-specific data. The channel requires
   no authentication; an unauthenticated visitor sees counter updates
   the same way an authenticated visitor does. On update receipt, the
   page updates the rendered count in place and runs the visual
-  transition R-NRQS-QC4F describes, modulo reduced-motion
-  suppression per R-RLJF-YEWW. With JS disabled (R-TK21-6AGY), the
-  page does not maintain a live connection; the displayed count is
-  whatever the initial server render returned and subsequent
-  changes are not reflected until the page is reloaded — live
-  update is a JS-only enhancement, not a baseline.
+  transition R-NG6O-94I2 describes, modulo reduced-motion
+  suppression per R-9VH6-C2KA.
 
 ## MCP client instructions
 
@@ -210,30 +290,58 @@ deliberately differs from the reference.
   Desktop, the `claude_desktop_config.json` `mcpServers` block. A
   user can paste the displayed instructions directly into their
   client without translation.
-- R-PLLD-DY5X: the instructions area sits below the counter card and
+- R-9WP2-PUAZ: the instructions area sits below the counter card and
   has the structure the design reference pins:
   - **Area header**: an `h2` reading "Connect an MCP client" on the
     left; a 13px muted-ink subhead on the right reading
     `Point a client at <base-url>/mcp` with `<base-url>` derived
     from the request per R-CO4Y-11X7 / R-DA34-WX9P.
   - **Two section cards stacked vertically**, one per supported
-    client. Each section card has the chrome the design reference
-    pins (1px border, 10px radius, off-white fill), with a header
-    containing: a numeric badge (`01` for Claude Code, `02` for
-    Claude Desktop) rendered in mono inside a small rounded chip,
-    the client title in 15px display weight, and a right-aligned
-    13px muted-ink description of the client kind (e.g.
-    `CLI · adds a server entry to a scope`).
+    client, each rendered as a **visibly bordered, rounded card with
+    its own off-white fill and clear separation from its neighbor and
+    from the area header** — not as flat full-width sections divided
+    only by whitespace. (Exact border, radius, and fill values are
+    HOW and live in the design reference; the property is that each
+    client's instructions are visually contained as a card.) Each
+    section card's header carries, all three present together: a
+    numeric badge (`01` for Claude Code, `02` for Claude Desktop)
+    rendered in mono inside a small rounded chip; the client title
+    rendered as the literal text `Claude Code` or `Claude Desktop`
+    in 15px display weight; and a right-aligned 13px muted-ink
+    description of the client kind (e.g. `CLI · adds a server entry
+    to a scope`). A rendering that omits the client name from the
+    header — showing only the numeric badge — does not satisfy
+    this requirement.
   - **Body of each section card** contains one or more dark-
     background code blocks rendered in JetBrains Mono on the
-    design-reference's `--code-bg` fill (`#14130f`). Each code
-    block exposes a copy affordance — an overlay button labeled
-    `copy` with a small clipboard glyph — that copies the block's
-    plaintext to the visitor's clipboard via the standard
+    design-reference's `--code-bg` fill (`#14130f`). **Every code
+    block in this area renders a visible `copy` button** — an
+    overlay positioned inside the block, labeled `copy` with a
+    small clipboard glyph — that copies the block's plaintext to
+    the visitor's clipboard via the standard
     `navigator.clipboard.writeText` API (with the textarea +
     `execCommand` fallback). On successful copy, the affordance
     flips to a `copied` label in the design-reference's mint-green
-    color for ~1.4s and then reverts.
+    color for ~1.4s and then reverts. A rendering that ships the
+    code blocks without copy buttons does not satisfy this
+    requirement.
+
+    **What lands on the clipboard is the executable form of the
+    snippet — not the visual framing around it.** A leading shell-
+    prompt prefix (a `$ ` for a sh-style prompt or a `> ` for a
+    PowerShell-style prompt) that appears in the rendered block to
+    cue the reader "this is a shell command" is *not* included in
+    the text written to the clipboard. So a Claude Code block that
+    displays as `$ claude mcp add --transport http --scope project
+    hal http://localhost:3000/mcp` writes only `claude mcp add
+    --transport http --scope project hal http://localhost:3000/mcp`
+    to the clipboard — pasted verbatim into the visitor's terminal,
+    it executes; it does not error with `$: command not found`.
+    Trailing whitespace and the trailing newline policy are HOW;
+    the property is that the clipboard payload is what the visitor
+    needs to paste, with framing characters stripped. JSON snippets
+    (e.g. the Claude Desktop block) carry no shell prompt and are
+    copied verbatim.
   - Token coloring in code blocks (CLI flags in warm tan
     `#e0a96d`, command name in cool blue `#a8c8ff`, URLs and
     strings in mint green `#79d4a9`, prompts and punctuation in
@@ -245,39 +353,77 @@ deliberately differs from the reference.
     with the JSON snippet that names this service in
     `claude_desktop_config.json`, with the URL derived from the
     request per R-CO4Y-11X7.
-  - The Claude Code section card uses the tab layout R-OZN6-I2TF
-    pins for its two scope examples.
-- R-OZN6-I2TF: the Claude Code section card renders the two
-  scope examples in a tab layout with two tab triggers — `Project
-  scope` (with small mono `.mcp.json`) and `User scope` (with
-  small mono `~/.claude.json`) — with the Project tab active by
-  default. Switching tabs swaps the visible code block and the
-  short scope-meta description above it:
-  - Project: *"Commits the server to `.mcp.json` at the repo root —
-    everyone on the project gets it."* Code:
-    `$ claude mcp add --transport http --scope project hal <base-url>/mcp`
-  - User: *"Records the server in `~/.claude.json` — available in
-    every project you open."* Code:
-    `$ claude mcp add --transport http --scope user hal <base-url>/mcp`
+  - The Claude Code section card lays out its two scope examples
+    as a functional tabbed interface per R-9T1D-KJ2W.
+- R-9T1D-KJ2W: the Claude Code section card renders its two scope
+  examples inside a small **functional** tab interface: two tab
+  triggers above one code-block panel, where activating a trigger
+  swaps which scope's snippet is visible in the panel below.
+
+  **Triggers**: two side-by-side controls, each rendered as a
+  `<button>` element (or another non-navigating control — never
+  an `<a>` whose `href` would navigate the browser), styled with
+  the design reference's tab chrome (no fill, a 2px bottom border
+  that is transparent for the inactive trigger and the accent red
+  `#d4361e` for the active one; muted-ink label for inactive,
+  full-strength ink for active). Trigger labels:
+  - `Project scope` followed by small mono `.mcp.json`
+  - `User scope` followed by small mono `~/.claude.json`
+
+  The `Project scope` trigger is the **default active tab** on
+  first render.
+
+  **Panel**: a single code block visible at a time, holding the
+  active scope's snippet:
+  - Project active → `claude mcp add --transport http --scope project hal <base-url>/mcp`
+  - User active → `claude mcp add --transport http --scope user hal <base-url>/mcp`
 
   `<base-url>` is the request-derived value per R-CO4Y-11X7 /
-  R-DA34-WX9P.
+  R-DA34-WX9P. The panel exposes a `copy` affordance per
+  R-9WP2-PUAZ, and what the copy writes to the clipboard is the
+  active panel's executable form (no `$ ` prompt prefix, per the
+  clipboard property in R-9WP2-PUAZ).
 
-  With JS enabled, the tabs are interactive — the selected tab
-  gets the design reference's accent-red bottom border and
-  full-strength ink color; the unselected tab is muted. With JS
-  disabled (R-TK21-6AGY), the tabs degrade to both panels being
-  visible — the visitor sees both scope examples without needing
-  to click. Activating a tab does not require a network request.
+  **Behavior on activation**: clicking the inactive trigger
+  changes the visible state of the tab interface in place. The
+  active trigger's accent-red bottom border moves to the just-
+  clicked trigger; the previously active trigger goes muted; the
+  panel's text content swaps to the other scope's snippet. No
+  page reload, no URL change, no `GET /` issued to the server,
+  scroll position and surrounding state preserved. The swap is
+  observable to the visitor as a near-instant content change —
+  no perceptible delay round-trip while the interface "fetches"
+  anything; both snippets are present in the rendered HTML at
+  page load and the JS just toggles which one is shown.
 
-  Tab semantics use the WAI-ARIA `tablist` / `tab` / `tabpanel`
-  pattern with `aria-selected`, `aria-controls`, and
-  `aria-labelledby` wired correctly (R-RLJF-YEWW). Each code
-  block independently exposes a copy affordance per R-PLLD-DY5X.
+  **ARIA semantics**: the tab pattern is wired per the WAI-ARIA
+  APG — `role="tablist"` on the trigger container,
+  `role="tab"` on each trigger, `role="tabpanel"` on the panel,
+  with `aria-selected`, `aria-controls`, and `aria-labelledby`
+  set correctly. Cross-referenced from R-9VH6-C2KA.
 
-  This requirement supersedes the earlier two-example-with-
-  unspecified-layout posture; the layout is now specifically
-  tabbed with the no-JS fallback to both-visible.
+  **Failure modes named explicitly:**
+  - A rendering in which the tab triggers are `<a href=…>`
+    elements that navigate (full reload) instead of toggling in
+    place does not satisfy this requirement.
+  - A rendering in which the triggers are present visually but
+    clicking them does not change which snippet is visible —
+    "the links don't do anything" — does not satisfy this
+    requirement.
+  - A rendering that shows both snippets stacked at once with no
+    tab interface, or shows only one snippet with no way to reach
+    the other, does not satisfy this requirement.
+  - A rendering in which switching tabs causes a server round-
+    trip does not satisfy this requirement; the swap is a
+    client-side toggle of already-rendered content.
+
+  This requirement supersedes the earlier "both stacked, no
+  chrome" posture (the prior R-HNUA-WLNX ID) — the design
+  reference's tabbed treatment turns out to be the intended look,
+  and the previous removal traded an unimplemented tabbed
+  interface for a stacked layout that lost the design intent.
+  The tabbed layout is restored; the property is that it
+  functions as a real tab interface, not as decoration.
 - R-CO4Y-11X7: the URLs shown in that configuration are derived
   from the request the visitor used to reach the page. Visiting
   `http://localhost:3000/` shows a `http://localhost:3000` base URL;
@@ -292,7 +438,7 @@ deliberately differs from the reference.
 
 ## Footer
 
-- R-QKYG-HAO2: the page renders a footer below the instructions
+- R-K3PV-GHB3: the page renders a footer below the instructions
   area, separated by a top border, with the chrome the design
   reference pins (12px mono, muted ink, flex row). The footer
   contains:
@@ -311,17 +457,17 @@ deliberately differs from the reference.
 
 ## Motion + accessibility
 
-- R-RLJF-YEWW: the index page honors visitor preferences for
+- R-9VH6-C2KA: the index page honors visitor preferences for
   reduced motion and presents an accessible structure for the
   interactive controls it exposes.
 
   **Reduced motion.** When the visitor's browser reports
   `prefers-reduced-motion: reduce`, the page suppresses:
-  - The lens-dot pulse animation (R-N3CT-2XAJ): the dot is
+  - The lens-dot pulse animation (R-K7QI-9YW4): the dot is
     rendered without the pulsing outer glow.
-  - The subtitle fade-swap (R-N3CT-2XAJ): the re-roll updates the
+  - The subtitle fade-swap (R-K7QI-9YW4): the re-roll updates the
     subtitle without an opacity transition.
-  - The counter flash and delta animation (R-NRQS-QC4F): the new
+  - The counter flash and delta animation (R-NG6O-94I2): the new
     value is shown without the color flash and the delta indicator
     is not animated.
   - Hover-driven transforms (re-roll rotate, copy-button feedback):
@@ -329,21 +475,22 @@ deliberately differs from the reference.
     itself is instant.
 
   **ARIA semantics.**
-  - The tab pattern for Claude Code scopes (R-OZN6-I2TF) uses
-    `role="tablist"` / `role="tab"` / `role="tabpanel"` with
+  - The Claude Code scope tab interface (R-9T1D-KJ2W) uses
+    `role="tablist"` on the trigger container, `role="tab"` on
+    each trigger, `role="tabpanel"` on the panel, with
     `aria-selected`, `aria-controls`, and `aria-labelledby` wired
     per the WAI-ARIA APG.
-  - The counter `+` / `−` buttons (R-NRQS-QC4F) carry
+  - The counter `+` / `−` buttons (R-NG6O-94I2) carry
     `aria-label="Increment"` and `aria-label="Decrement"`, the
     HTML `disabled` attribute when no web session is active, and
     sit adjacent to an `aria-live="polite"` region around the
-    counter value so live-channel updates (R-DRX9-8WNY) are
+    counter value so live-channel updates (R-K65O-80SH) are
     announced to assistive tech.
-  - The re-roll button (R-N3CT-2XAJ) carries
+  - The re-roll button (R-K7QI-9YW4) carries
     `aria-label="New subtitle"`.
-  - The decorative lens dot (R-N3CT-2XAJ) carries
+  - The decorative lens dot (R-K7QI-9YW4) carries
     `aria-hidden="true"`. The footer status dot
-    (R-QKYG-HAO2) likewise.
+    (R-K3PV-GHB3) likewise.
 
 ## Auth routes
 
@@ -360,16 +507,51 @@ deliberately differs from the reference.
   visitor as not signed in. `/logout` from a user-agent that has no
   active web session is a no-op redirect to `/`, not an error.
   `/logout` does not touch any MCP token chain (R-93PJ-FRPY).
-- R-AZZW-UX8U: the index page reflects web-session state. When the
+- R-NJUD-EFQ5: the index page reflects web-session state. When the
   visitor has an active web session, the page identifies them by the
   Google email recorded for the session — the email appears verbatim
-  on the page — and the page exposes an affordance whose activation
-  reaches `/logout`. When the visitor has no active web session, the
-  page exposes an affordance whose activation reaches `/login`; the
-  page does not render any anonymous-visitor placeholder identity
-  (no literal "guest", no fake username). Placement and styling of
-  these affordances follow the design reference R-LRSQ-5VDG cites
-  (top-bar pill buttons, with the signed-in state optionally
-  preceded by an avatar element). The property: exactly one of the
-  two states is reflected on every page load and the corresponding
-  route is reachable from the page itself.
+  on the page — and the page exposes a separate, explicitly labeled
+  affordance whose activation reaches `/logout`. When the visitor
+  has no active web session, the page exposes an affordance whose
+  activation reaches `/login`; the page does not render any
+  anonymous-visitor placeholder identity (no literal "guest", no
+  fake username).
+
+  **Placement is load-bearing**: the auth area is anchored to the
+  **top-right of the page**, in a top-bar row that sits above and
+  to the right of the banner card, in both the signed-out and
+  signed-in states. A rendering that places the auth area
+  elsewhere — top-left, inline with body content, below the
+  banner, etc. — does not satisfy this requirement.
+
+  **Signed-out state**: the top-right contains a single pill-style
+  button bearing the literal label `Sign in` whose activation
+  reaches `/login`.
+
+  **Signed-in state**: the top-right contains two distinct
+  elements rendered side by side, identity on the left and the
+  sign-out affordance immediately to its right:
+  1. The visitor's email rendered as **inert, non-interactive
+     text** (optionally preceded by an avatar element). Clicking
+     the email does *not* sign the visitor out and does not
+     navigate anywhere — it is a label, not a control.
+  2. To the right of the email, a **separate, explicitly labeled
+     `Sign out` affordance** — rendered as a pill-style button or
+     equivalent visibly-actionable control, bearing the literal
+     text `Sign out` (or, if a glyph is used, accompanied by an
+     `aria-label="Sign out"`) — whose activation reaches `/logout`.
+
+  A rendering in which clicking the email itself triggers logout
+  does not satisfy this requirement: the user-visible logout
+  affordance must be a distinct element from the identity display,
+  with its own actionable label, because "click your name to sign
+  out" is not discoverable. A rendering that drops the pill chrome
+  on either control and surfaces only a bare text link likewise
+  does not satisfy this requirement.
+
+  The property: exactly one of the two states is reflected on every
+  page load; in the signed-out state the top-right exposes a
+  reachable route to `/login`; in the signed-in state the top-right
+  shows the visitor's email as a label *and* exposes a separate,
+  explicitly labeled sign-out control that reaches `/logout`; and
+  the auth area is in the top-right position in both states.

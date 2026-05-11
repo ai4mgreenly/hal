@@ -19,7 +19,7 @@ class CounterController < ActionController::API
   def increment
     value = Counter.current.increment!
     if browser_form_post?
-      # R-NRQS-QC4F: index-page form submission — redirect to / so the
+      # R-YJ05-EQRH: index-page form submission — redirect to / so the
       # page reloads with the new value when JS is disabled.
       redirect_to root_path, status: :see_other
     else
@@ -35,7 +35,7 @@ class CounterController < ActionController::API
   def decrement
     value = Counter.current.decrement!
     if browser_form_post?
-      # R-NRQS-QC4F: index-page form submission — redirect to / so the
+      # R-YJ05-EQRH: index-page form submission — redirect to / so the
       # page reloads with the new value when JS is disabled.
       redirect_to root_path, status: :see_other
     else
@@ -43,7 +43,7 @@ class CounterController < ActionController::API
     end
   rescue Counter::DecrementBelowZero
     if browser_form_post?
-      # R-NRQS-QC4F: rejected decrement against a zero counter — page
+      # R-YJ05-EQRH: rejected decrement against a zero counter — page
       # reloads without changing the displayed value; the no-JS path
       # does not need to surface a flash message in this iteration.
       redirect_to root_path, status: :see_other
@@ -130,7 +130,7 @@ class CounterController < ActionController::API
     row.touch_expiry!
   end
 
-  # R-NRQS-QC4F: distinguish browser HTML form submissions from API/JSON
+  # R-YJ05-EQRH: distinguish browser HTML form submissions from API/JSON
   # callers so the index page's +/- forms get a 303 redirect to / while
   # bearer-token API requests continue to receive JSON. The index-page
   # forms carry a `from=index` parameter; API callers don't.

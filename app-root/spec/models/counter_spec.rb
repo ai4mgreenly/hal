@@ -112,7 +112,7 @@ RSpec.describe Counter, type: :model do
     end
   end
 
-  describe "R-DRX9-8WNY change notifications go out on the live-update channel" do
+  describe "R-K65O-80SH change notifications go out on the live-update channel" do
     before { CounterBroadcaster.reset! }
     after { CounterBroadcaster.reset! }
 

@@ -20,7 +20,7 @@ The single shared integer that is the entire point of the service.
   corresponding tools per R-FUB4-KWWB; the HTTP API exposes
   endpoints for the read and the two mutations per R-2I2S-XB7K,
   R-340Z-T6K2, R-H3FE-QFC0; the web index page exposes both
-  mutations as `+` / `−` buttons per R-NRQS-QC4F. No other counter
+  mutations as `+` / `−` buttons per R-NG6O-94I2. No other counter
   operations exist. This requirement supersedes the earlier
   two-operation posture; decrement was added as part of the
   full-counter-demo expansion described in the design reference

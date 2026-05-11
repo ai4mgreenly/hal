@@ -34,6 +34,20 @@ port ENV.fetch("PORT", 3000)
 # Allow puma to be restarted by `bin/rails restart` command.
 plugin :tmp_restart
 
+# R-K7DK-LSJ6: when the launched service receives SIGINT or SIGTERM,
+# the process must exit within 1 second regardless of what requests
+# are in flight. Long-lived responses (notably the /counter/stream
+# live-update channel) must be dropped rather than waited on, since
+# the operator-experience contract is "Ctrl-C returns a prompt
+# promptly, every time" and the spec explicitly opts out of a
+# graceful posture that would wait on a never-returning SSE handler.
+# Re-trap once Puma has booted (so this overrides Puma's own
+# graceful-stop handlers) and exit the process immediately.
+on_booted do
+  Signal.trap("INT")  { Process.exit!(0) }
+  Signal.trap("TERM") { Process.exit!(0) }
+end
+
 # Run the Solid Queue supervisor inside of Puma for single-server deployments.
 plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"]
 

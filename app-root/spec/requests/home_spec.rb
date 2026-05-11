@@ -40,10 +40,10 @@ RSpec.describe "Home page", type: :request do
       # No data-turbo-driven mutation hooks tied to the count.
       expect(body).not_to match(/data-turbo-stream/i)
 
-      # The R-DRX9-8WNY live-update bootstrap is the only permitted
+      # The R-K65O-80SH live-update bootstrap is the only permitted
       # script and is a progressive enhancement: the count above is
       # already rendered by the server, the +/- forms function via
-      # POST + 303 redirect (R-NRQS-QC4F), and the script merely
+      # POST + 303 redirect (R-YJ05-EQRH), and the script merely
       # subscribes to the SSE channel for in-place updates.
     end
 
@@ -82,7 +82,7 @@ RSpec.describe "Home page", type: :request do
       body = response.body
 
       # Claude Code: a `claude mcp add --transport http …` line in each scope-flagged block.
-      # The block carries semantic token-coloring spans (R-PLLD-DY5X); strip inner
+      # The block carries semantic token-coloring spans (R-YHS9-0Z0S); strip inner
       # tags before comparing the plaintext, and tolerate a leading `$ ` prompt.
       code_text = lambda do |id|
         m = body.match(%r{<pre[^>]*id=["']#{Regexp.escape(id)}["'][^>]*>\s*<code[^>]*>(?<inner>.*?)</code>\s*</pre>}m)
@@ -112,15 +112,13 @@ RSpec.describe "Home page", type: :request do
       )
     end
 
-    it "R-JV1V-OF3W shows two scope-flagged Claude Code examples, each labeled and copy-pasteable" do
+    it "R-9T1D-KJ2W ships both Claude Code scope snippets in the rendered HTML, each copy-pasteable" do
       host! "hal.ai.metaspot.org"
       get "/"
 
       expect(response).to have_http_status(:ok)
       body = response.body
 
-      # Spans for semantic token coloring (R-PLLD-DY5X) live inside <code>; capture
-      # the full inner block then strip tags + the leading `$ ` prompt.
       project_match = body.match(
         %r{<pre[^>]*id=["']claude-code-config-project["'][^>]*>\s*<code[^>]*>(?<cmd>.*?)</code>\s*</pre>}m
       )
@@ -134,7 +132,6 @@ RSpec.describe "Home page", type: :request do
       project_cmd = strip_cmd.call(project_match[:cmd])
       user_cmd = strip_cmd.call(user_match[:cmd])
 
-      # Each example is a complete `claude mcp add` line with the MCP URL.
       expect(project_cmd).to start_with("claude mcp add")
       expect(project_cmd).to include("--scope project")
       expect(project_cmd).to include("http://hal.ai.metaspot.org/mcp")
@@ -142,12 +139,6 @@ RSpec.describe "Home page", type: :request do
       expect(user_cmd).to start_with("claude mcp add")
       expect(user_cmd).to include("--scope user")
       expect(user_cmd).to include("http://hal.ai.metaspot.org/mcp")
-
-      # Each scope is labeled near its block so a visitor can pick by intent.
-      project_section = body[/Project scope.*?<\/pre>/m]
-      user_section = body[/User scope.*?<\/pre>/m]
-      expect(project_section).to include("claude-code-config-project")
-      expect(user_section).to include("claude-code-config-user")
 
       # The Claude Desktop block remains unchanged in shape.
       expect(body).to match(%r{<pre[^>]*id=["']claude-desktop-config["']})
@@ -180,10 +171,10 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to include("http://hal.ai.metaspot.org/mcp")
     end
 
-    context "R-TFIQ-6805 banner and subtitle" do
+    context "R-JXMD-JMLM banner and subtitle" do
       let(:expansions) { HomeController::EXPANSIONS }
 
-      it "R-TFIQ-6805 shows the project name as the banner heading" do
+      it "R-JXMD-JMLM shows the project name as the banner heading" do
         # R-N3CT-2XAJ replaces the earlier H.A.L. spelling with bare HAL.
         get "/"
 
@@ -191,20 +182,25 @@ RSpec.describe "Home page", type: :request do
         expect(response.body).to match(%r{<h1[^>]*class=["'][^"']*\btitle\b[^"']*["'][^>]*>\s*HAL\s*</h1>}i)
       end
 
-      it "R-TFIQ-6805 shows exactly one expansion from the fixed list as the subtitle" do
+      it "R-JXMD-JMLM shows exactly one expansion from the fixed list as the subtitle" do
         expansion = expansions.first
         allow_any_instance_of(HomeController).to receive(:pick_subtitle).and_return(expansion)
 
         get "/"
 
-        expect(response.body).to include(expansion)
-        # Only the one chosen expansion appears; the others do not.
+        # The visible subtitle element renders the one chosen expansion;
+        # the others do not appear in the rendered subtitle. (Per
+        # R-K7QI-9YW4 the full bank IS embedded as JSON elsewhere on the
+        # page for client-side re-roll sampling — that data island is
+        # not part of the rendered subtitle text.)
+        subtitle = response.body[%r{<span[^>]*id=["']subtitle["'][^>]*>(.*?)</span>}m, 1]
+        expect(subtitle).to eq(expansion)
         (expansions - [ expansion ]).each do |other|
-          expect(response.body).not_to include(other)
+          expect(subtitle).not_to include(other)
         end
       end
 
-      it "R-TFIQ-6805 every expansion in the list can be shown as the subtitle" do
+      it "R-JXMD-JMLM every expansion in the list can be shown as the subtitle" do
         expansions.each do |expansion|
           allow_any_instance_of(HomeController).to receive(:pick_subtitle).and_return(expansion)
           get "/"
@@ -212,7 +208,7 @@ RSpec.describe "Home page", type: :request do
         end
       end
 
-      it "R-TFIQ-6805 successive requests can produce different subtitles" do
+      it "R-JXMD-JMLM successive requests can produce different subtitles" do
         call_count = 0
         allow_any_instance_of(HomeController).to receive(:pick_subtitle) do
           call_count += 1
@@ -228,22 +224,15 @@ RSpec.describe "Home page", type: :request do
         expect(second_body).to include(expansions[1])
       end
 
-      it "R-TFIQ-6805 provides a re-roll control that is a link to the root path" do
+      it "R-K7QI-9YW4 provides a re-roll control rendered as a non-navigating button" do
         get "/"
 
         expect(response).to have_http_status(:ok)
-        reroll_pattern = %r{<a[^>]*href=["']/["'][^>]*id=["']reroll["']|<a[^>]*id=["']reroll["'][^>]*href=["']/["']}
-        expect(response.body).to match(reroll_pattern)
-      end
-
-      it "R-TFIQ-6805 the re-roll control works without JavaScript (plain link)" do
-        get "/"
-
-        # No JavaScript needed: the control is an <a> link, not a JS-driven
-        # widget. (The page may carry the R-DRX9-8WNY SSE bootstrap script
-        # for live counter updates, but the re-roll itself does not depend
-        # on JS — it is a plain anchor.)
-        expect(response.body).to match(/<a[^>]*id=["']reroll["']/)
+        # R-K7QI-9YW4 explicitly forbids an <a> whose href would navigate
+        # the browser away from the current page; the control is a
+        # <button> (or another non-navigating element).
+        expect(response.body).to match(/<button[^>]*id=["']reroll["']/)
+        expect(response.body).not_to match(/<a[^>]*id=["']reroll["']/)
       end
     end
 
@@ -316,11 +305,11 @@ RSpec.describe "Home page", type: :request do
 
         section = banner_section
         expect(section).not_to be_nil
-        reroll = section[%r{<a[^>]*id=["']reroll["'][^>]*>.*?</a>}m]
+        reroll = section[%r{<button[^>]*id=["']reroll["'][^>]*>.*?</button>}m]
         expect(reroll).not_to be_nil
         expect(reroll).to match(/aria-label=["']New subtitle["']/i)
-        # Still works without JS — it is an <a href="/"> link, not a JS-only widget.
-        expect(reroll).to match(%r{href=["']/["']})
+        # R-K7QI-9YW4: rendered as <button>, not an <a href="/"> that would
+        # navigate; the re-roll mutates the subtitle in place via JS.
       end
     end
 
@@ -398,7 +387,7 @@ RSpec.describe "Home page", type: :request do
 
   end
 
-  describe "R-AZZW-UX8U index page reflects web-session state" do
+  describe "R-YLFY-6A8V index page reflects web-session state" do
     let(:provider) { Rails.configuration.x.google_identity_provider }
 
     around do |example|
@@ -423,7 +412,7 @@ RSpec.describe "Home page", type: :request do
       expect(WebSession.find_by_presented_token(session[:web_session_id])&.owner).to eq(email)
     end
 
-    it "R-AZZW-UX8U shows the visitor's email and a /logout affordance when signed in" do
+    it "R-YLFY-6A8V shows the visitor's email and a /logout affordance when signed in" do
       email = "signed-in@allowed.example"
       establish_web_session(email: email)
 
@@ -434,9 +423,18 @@ RSpec.describe "Home page", type: :request do
       expect(body).to include(email)
       expect(body).to match(%r{<a[^>]*href=["']/logout["']}i)
       expect(body).not_to match(%r{<a[^>]*href=["']/login["']}i)
+
+      # Placement is load-bearing: the affordance lives in the top-bar
+      # row above the banner card, and renders as a pill (not a bare link).
+      top_bar_idx = body.index(%r{<div[^>]*id=["']top-bar["']}i)
+      banner_idx = body.index(%r{<section[^>]*class=["'][^"']*\bbanner\b}i)
+      expect(top_bar_idx).not_to be_nil, "expected a #top-bar element"
+      expect(banner_idx).not_to be_nil, "expected the banner section"
+      expect(top_bar_idx).to be < banner_idx
+      expect(body).to match(%r{<a\b(?=[^>]*\bhref=["']/logout["'])(?=[^>]*\bclass=["'][^"']*\bauth-pill\b)[^>]*>}i)
     end
 
-    it "R-AZZW-UX8U shows a /login affordance and no placeholder identity when not signed in" do
+    it "R-YLFY-6A8V shows a /login affordance and no placeholder identity when not signed in" do
       get "/"
 
       expect(response).to have_http_status(:ok)
@@ -445,10 +443,94 @@ RSpec.describe "Home page", type: :request do
       expect(body).not_to match(%r{<a[^>]*href=["']/logout["']}i)
       expect(body).not_to match(/guest/i)
       expect(body).not_to match(/anonymous/i)
+
+      # Placement is load-bearing: the Sign in affordance lives in the
+      # top-bar row above the banner card, and renders as a pill labeled
+      # "Sign in" (not a bare text link).
+      top_bar_idx = body.index(%r{<div[^>]*id=["']top-bar["']}i)
+      banner_idx = body.index(%r{<section[^>]*class=["'][^"']*\bbanner\b}i)
+      expect(top_bar_idx).not_to be_nil, "expected a #top-bar element"
+      expect(banner_idx).not_to be_nil, "expected the banner section"
+      expect(top_bar_idx).to be < banner_idx
+      expect(body).to match(%r{<a\b(?=[^>]*\bhref=["']/login["'])(?=[^>]*\bclass=["'][^"']*\bauth-pill\b)[^>]*>\s*Sign in\s*</a>}i)
     end
   end
 
-  describe "R-NRQS-QC4F counter card with +/- buttons" do
+  describe "R-NJUD-EFQ5 index page reflects web-session state" do
+    let(:provider) { Rails.configuration.x.google_identity_provider }
+
+    around do |example|
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
+      example.run
+      Rails.configuration.x.auth.workspace_domain = previous_domain
+    end
+
+    def establish_web_session(email:)
+      get "https://www.example.com/login"
+      upstream_state = URI.decode_www_form(URI.parse(response.location).query).to_h["state"]
+      provider.stub_code(
+        "code-njud-#{email}",
+        sub: "google-#{email}",
+        email: email,
+        hosted_domain: "allowed.example"
+      )
+      get "https://www.example.com/oauth/google/callback",
+          params: { code: "code-njud-#{email}", state: upstream_state },
+          headers: { "X-Forwarded-Proto" => "https" }
+      expect(WebSession.find_by_presented_token(session[:web_session_id])&.owner).to eq(email)
+    end
+
+    it "R-NJUD-EFQ5 signed-in: email rendered as inert non-anchor text, with a separate Sign out pill linking to /logout" do
+      email = "visitor@allowed.example"
+      establish_web_session(email: email)
+
+      get "https://www.example.com/"
+
+      expect(response).to have_http_status(:ok)
+      body = response.body
+
+      # Email appears verbatim, and is NOT wrapped by any <a> tag — it is
+      # a label, not a control.
+      expect(body).to include(email)
+      expect(body).not_to match(%r{<a\b[^>]*>[^<]*#{Regexp.escape(email)}[^<]*</a>}i)
+
+      # A separate, explicitly labeled `Sign out` pill links to /logout.
+      expect(body).to match(
+        %r{<a\b(?=[^>]*\bhref=["']/logout["'])(?=[^>]*\bclass=["'][^"']*\bauth-pill\b)[^>]*>\s*Sign out\s*</a>}i
+      )
+      expect(body).not_to match(%r{<a[^>]*href=["']/login["']}i)
+
+      # Top-right anchoring: auth area sits in #top-bar above the banner.
+      top_bar_idx = body.index(%r{<div[^>]*id=["']top-bar["']}i)
+      banner_idx = body.index(%r{<section[^>]*class=["'][^"']*\bbanner\b}i)
+      expect(top_bar_idx).not_to be_nil
+      expect(banner_idx).not_to be_nil
+      expect(top_bar_idx).to be < banner_idx
+    end
+
+    it "R-NJUD-EFQ5 signed-out: single Sign in pill linking to /login, no placeholder identity" do
+      get "/"
+
+      expect(response).to have_http_status(:ok)
+      body = response.body
+
+      expect(body).to match(
+        %r{<a\b(?=[^>]*\bhref=["']/login["'])(?=[^>]*\bclass=["'][^"']*\bauth-pill\b)[^>]*>\s*Sign in\s*</a>}i
+      )
+      expect(body).not_to match(%r{<a[^>]*href=["']/logout["']}i)
+      expect(body).not_to match(/guest/i)
+      expect(body).not_to match(/anonymous/i)
+
+      top_bar_idx = body.index(%r{<div[^>]*id=["']top-bar["']}i)
+      banner_idx = body.index(%r{<section[^>]*class=["'][^"']*\bbanner\b}i)
+      expect(top_bar_idx).not_to be_nil
+      expect(banner_idx).not_to be_nil
+      expect(top_bar_idx).to be < banner_idx
+    end
+  end
+
+  describe "R-YJ05-EQRH counter card with +/- buttons" do
     let(:provider) { Rails.configuration.x.google_identity_provider }
 
     around do |example|
@@ -472,7 +554,7 @@ RSpec.describe "Home page", type: :request do
           headers: { "X-Forwarded-Proto" => "https" }
     end
 
-    it "R-NRQS-QC4F renders a counter card with CURRENT COUNT label, the value, and decrement/increment buttons" do
+    it "R-YJ05-EQRH renders a counter card with CURRENT COUNT label, the value, and decrement/increment buttons" do
       Counter.current.update!(value: 42)
 
       get "/"
@@ -486,9 +568,38 @@ RSpec.describe "Home page", type: :request do
       expect(card).to match(/>\s*42\s*</)
       expect(card).to match(/aria-label=["']Decrement["']/i)
       expect(card).to match(/aria-label=["']Increment["']/i)
+
+      # Geometry: card carries the .counter-card class (border/radius chrome
+      # in CSS keys off this), and the buttons are grouped under a single
+      # .counter-controls wrapper so they sit side-by-side on the right of
+      # the row rather than interleaved with the value.
+      expect(card).to match(/class=["'][^"']*\bcounter-card\b[^"']*["']/)
+      expect(card).to match(%r{<div[^>]*class=["'][^"']*\bcounter-main\b[^"']*["']}m)
+      expect(card).to match(%r{<div[^>]*class=["'][^"']*\bcounter-controls\b[^"']*["']}m)
+      # The label/value wrapper precedes the controls wrapper in DOM order —
+      # left edge first, right edge second.
+      main_at = card.index(/<div[^>]*\bcounter-main\b/)
+      controls_at = card.index(/<div[^>]*\bcounter-controls\b/)
+      expect(main_at).not_to be_nil
+      expect(controls_at).not_to be_nil
+      expect(main_at).to be < controls_at
+      # Both buttons live inside the controls wrapper (grouped on the right).
+      controls_block = card[%r{<div[^>]*\bcounter-controls\b[^>]*>.*?</div>\s*</div>}m]
+      expect(controls_block).not_to be_nil
+      expect(controls_block).to match(/aria-label=["']Decrement["']/i)
+      expect(controls_block).to match(/aria-label=["']Increment["']/i)
+
+      # CSS pins the 1px border / 8px radius on .counter-button and the
+      # 56px / 44px display-weight on .counter-value per the design ref.
+      css = Rails.root.join("app/assets/stylesheets/application.css").read
+      expect(css).to match(/\.counter-card\b[^{]*\{[^}]*border\s*:\s*1px\s+solid/m)
+      expect(css).to match(/\.counter-button\b[^{]*\{[^}]*border\s*:\s*1px\s+solid/m)
+      expect(css).to match(/\.counter-button\b[^{]*\{[^}]*border-radius\s*:\s*8px/m)
+      expect(css).to match(/\.counter-value\b[^{]*\{[^}]*font-size\s*:\s*56px/m)
+      expect(css).to match(/max-width:\s*639px[^{]*\)\s*\{[\s\S]*?\.counter-value\b[^{]*\{[^}]*font-size\s*:\s*44px/m)
     end
 
-    it "R-NRQS-QC4F renders functional +/- forms posting to the mutation endpoints when signed in" do
+    it "R-YJ05-EQRH renders functional +/- forms posting to the mutation endpoints when signed in" do
       establish_web_session!(email: "signed-in@allowed.example")
 
       get "https://www.example.com/"
@@ -504,7 +615,7 @@ RSpec.describe "Home page", type: :request do
       expect(card).not_to match(/aria-label=["']Decrement["'][^>]*disabled/i)
     end
 
-    it "R-NRQS-QC4F renders disabled +/- buttons and no mutation forms when not signed in" do
+    it "R-YJ05-EQRH renders disabled +/- buttons and no mutation forms when not signed in" do
       get "/"
 
       body = response.body
@@ -517,19 +628,19 @@ RSpec.describe "Home page", type: :request do
       expect(card).to match(/<button[^>]*aria-label=["']Decrement["'][^>]*disabled/i)
     end
 
-    it "R-NRQS-QC4F shows a signed-in hint line when there is an active web session" do
+    it "R-YJ05-EQRH shows a signed-in hint line when there is an active web session" do
       establish_web_session!(email: "signed-in@allowed.example")
 
       get "https://www.example.com/"
       expect(response.body).to include("Signed in. The MCP server can read")
     end
 
-    it "R-NRQS-QC4F shows a sign-in hint line when there is no active web session" do
+    it "R-YJ05-EQRH shows a sign-in hint line when there is no active web session" do
       get "/"
       expect(response.body).to include("Sign in to manipulate the counter from the browser.")
     end
 
-    it "R-NRQS-QC4F a browser form submission to /counter/increment redirects to / with 303 and updates the counter" do
+    it "R-YJ05-EQRH a browser form submission to /counter/increment redirects to / with 303 and updates the counter" do
       establish_web_session!(email: "signed-in@allowed.example")
       Counter.current.update!(value: 7)
 
@@ -540,7 +651,7 @@ RSpec.describe "Home page", type: :request do
       expect(Counter.current.value).to eq(8)
     end
 
-    it "R-NRQS-QC4F a browser form submission to /counter/decrement redirects to / with 303 and updates the counter" do
+    it "R-YJ05-EQRH a browser form submission to /counter/decrement redirects to / with 303 and updates the counter" do
       establish_web_session!(email: "signed-in@allowed.example")
       Counter.current.update!(value: 7)
 
@@ -550,7 +661,7 @@ RSpec.describe "Home page", type: :request do
       expect(Counter.current.value).to eq(6)
     end
 
-    it "R-NRQS-QC4F a browser form decrement against a zero counter redirects without changing the value" do
+    it "R-YJ05-EQRH a browser form decrement against a zero counter redirects without changing the value" do
       establish_web_session!(email: "signed-in@allowed.example")
       Counter.current.update!(value: 0)
 
@@ -558,6 +669,102 @@ RSpec.describe "Home page", type: :request do
 
       expect(response).to have_http_status(:see_other)
       expect(Counter.current.value).to eq(0)
+    end
+  end
+
+  describe "R-NIMH-0NZG signed-in +/- click drives a mutation" do
+    let(:provider) { Rails.configuration.x.google_identity_provider }
+
+    around do |example|
+      previous_domain = Rails.configuration.x.auth.workspace_domain
+      Rails.configuration.x.auth.workspace_domain = "allowed.example"
+      example.run
+      Rails.configuration.x.auth.workspace_domain = previous_domain
+    end
+
+    def establish_web_session!(email:)
+      get "https://www.example.com/login"
+      upstream_state = URI.decode_www_form(URI.parse(response.location).query).to_h["state"]
+      provider.stub_code(
+        "code-h5ka-#{email}",
+        sub: "google-#{email}",
+        email: email,
+        hosted_domain: "allowed.example"
+      )
+      get "https://www.example.com/oauth/google/callback",
+          params: { code: "code-h5ka-#{email}", state: upstream_state },
+          headers: { "X-Forwarded-Proto" => "https" }
+    end
+
+    it "R-NIMH-0NZG R-1LLM-Y4XF signed-in `+` click POSTs to /counter/increment and changes the canonical value" do
+      establish_web_session!(email: "click@allowed.example")
+      Counter.current.update!(value: 3)
+
+      post "https://www.example.com/counter/increment", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(response.location).to match(%r{/\z})
+      expect(Counter.current.value).to eq(4)
+    end
+
+    it "R-NIMH-0NZG R-1LLM-Y4XF signed-in `−` click POSTs to /counter/decrement and changes the canonical value" do
+      establish_web_session!(email: "click@allowed.example")
+      Counter.current.update!(value: 3)
+
+      post "https://www.example.com/counter/decrement", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(Counter.current.value).to eq(2)
+    end
+
+    it "R-NIMH-0NZG R-1LLM-Y4XF a `−` click against a zero counter leaves the displayed value unchanged" do
+      establish_web_session!(email: "click@allowed.example")
+      Counter.current.update!(value: 0)
+
+      post "https://www.example.com/counter/decrement", params: { from: "index" }
+
+      expect(response).to have_http_status(:see_other)
+      expect(Counter.current.value).to eq(0)
+    end
+
+    it "R-NIMH-0NZG session-cookie auth alone authenticates the JSON mutation path used by JS fetch" do
+      establish_web_session!(email: "click@allowed.example")
+      Counter.current.update!(value: 5)
+
+      post "https://www.example.com/counter/increment"
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body)).to eq("value" => 6)
+      expect(Counter.current.value).to eq(6)
+    end
+
+    it "R-NIMH-0NZG session-cookie JSON decrement at zero returns 409 so JS can convey rejection briefly" do
+      establish_web_session!(email: "click@allowed.example")
+      Counter.current.update!(value: 0)
+
+      post "https://www.example.com/counter/decrement"
+
+      expect(response).to have_http_status(:conflict)
+      body = JSON.parse(response.body)
+      expect(body["error"]).to eq("counter_at_zero")
+      expect(Counter.current.value).to eq(0)
+    end
+
+    it "R-NIMH-0NZG renders JS that intercepts .counter-form submission and POSTs asynchronously via fetch" do
+      get "/"
+
+      body = response.body
+      # The JS must prevent the default submit (no full reload),
+      # target the counter forms, and issue an async POST via fetch.
+      expect(body).to match(/querySelectorAll\(["']\.counter-form["']\)/)
+      expect(body).to match(/addEventListener\(["']submit["']/)
+      expect(body).to match(/preventDefault\(\)/)
+      expect(body).to match(/fetch\(\s*url\s*,\s*\{[^}]*method:\s*["']POST["']/m)
+      expect(body).to match(/credentials:\s*["']same-origin["']/)
+      # On a 409 response, a brief rejection element flips visible.
+      expect(body).to match(/id=["']counter-reject["']/)
+      expect(body).to match(/r\.status\s*===\s*409/)
+      expect(body).to match(/1400/)
     end
   end
 
@@ -570,72 +777,8 @@ RSpec.describe "Home page", type: :request do
     end
   end
 
-  describe "R-OZN6-I2TF Claude Code scope tabs" do
-    it "R-OZN6-I2TF renders a WAI-ARIA tablist with two tabs labeled Project scope and User scope" do
-      get "/"
-
-      expect(response).to have_http_status(:ok)
-      body = response.body
-
-      expect(body).to match(/role=["']tablist["']/i)
-
-      # Two tabs, each with role=tab, aria-selected, aria-controls.
-      project_tab = body[%r{<a[^>]*role=["']tab["'][^>]*id=["']claude-code-tab-project["'][^>]*>.*?</a>}m]
-      user_tab = body[%r{<a[^>]*role=["']tab["'][^>]*id=["']claude-code-tab-user["'][^>]*>.*?</a>}m]
-      expect(project_tab).not_to be_nil, "expected a Project-scope tab"
-      expect(user_tab).not_to be_nil, "expected a User-scope tab"
-
-      # Project tab is the default-active one.
-      expect(project_tab).to match(/aria-selected=["']true["']/i)
-      expect(user_tab).to match(/aria-selected=["']false["']/i)
-
-      # Tab triggers carry the documented labels with the mono filenames.
-      expect(project_tab).to include("Project scope")
-      expect(project_tab).to match(%r{<code[^>]*>\s*\.mcp\.json\s*</code>}m)
-      expect(user_tab).to include("User scope")
-      expect(user_tab).to match(%r{<code[^>]*>\s*~/\.claude\.json\s*</code>}m)
-
-      # aria-controls wires each tab to its matching panel.
-      expect(project_tab).to match(/aria-controls=["']claude-code-panel-project["']/i)
-      expect(user_tab).to match(/aria-controls=["']claude-code-panel-user["']/i)
-    end
-
-    it "R-OZN6-I2TF renders two tabpanels labelled-by their tabs, each containing the scope-meta description and the existing code block" do
-      get "/"
-      body = response.body
-
-      project_panel = body[%r{<div[^>]*role=["']tabpanel["'][^>]*id=["']claude-code-panel-project["'][^>]*>.*?</div>\s*<div[^>]*role=["']tabpanel["']}m] ||
-                      body[%r{<div[^>]*role=["']tabpanel["'][^>]*id=["']claude-code-panel-project["'][^>]*>.*?</pre>\s*</div>}m]
-      user_panel = body[%r{<div[^>]*role=["']tabpanel["'][^>]*id=["']claude-code-panel-user["'][^>]*>.*?</pre>\s*</div>}m]
-      expect(project_panel).not_to be_nil
-      expect(user_panel).not_to be_nil
-
-      expect(project_panel).to match(/aria-labelledby=["']claude-code-tab-project["']/i)
-      expect(user_panel).to match(/aria-labelledby=["']claude-code-tab-user["']/i)
-
-      # Scope-meta description from the spec, verbatim phrasing.
-      expect(project_panel).to include("Commits the server to")
-      expect(project_panel).to include(".mcp.json")
-      expect(user_panel).to include("Records the server in")
-      expect(user_panel).to include("~/.claude.json")
-
-      # Each panel still contains its existing-id `<pre>` code block.
-      expect(project_panel).to include("claude-code-config-project")
-      expect(user_panel).to include("claude-code-config-user")
-    end
-
-    it "R-OZN6-I2TF degrades to both panels visible with JS disabled" do
-      get "/"
-      body = response.body
-
-      # With no JS and no hiding CSS, both panels (and their code blocks) are present in the body.
-      expect(body).to match(%r{<pre[^>]*id=["']claude-code-config-project["']})
-      expect(body).to match(%r{<pre[^>]*id=["']claude-code-config-user["']})
-    end
-  end
-
-  describe "R-PLLD-DY5X instructions area structure" do
-    it "R_PLLD_DY5X renders an instructions header with an h2 and a right-side muted subhead pointing at <base-url>/mcp" do
+  describe "R-YHS9-0Z0S instructions area structure" do
+    it "R_YHS9_0Z0S renders an instructions header with an h2 and a right-side muted subhead pointing at <base-url>/mcp" do
       host! "hal.ai.metaspot.org"
       get "/"
 
@@ -653,7 +796,7 @@ RSpec.describe "Home page", type: :request do
       expect(head).to include("http://hal.ai.metaspot.org/mcp")
     end
 
-    it "R_PLLD_DY5X renders two stacked section cards, one per supported client, with 01/02 numeric badges" do
+    it "R_YHS9_0Z0S renders two stacked section cards, one per supported client, with 01/02 numeric badges" do
       get "/"
       body = response.body
 
@@ -678,7 +821,7 @@ RSpec.describe "Home page", type: :request do
       expect(code_idx).to be < desktop_idx
     end
 
-    it "R_PLLD_DY5X renders dark code blocks with semantic token-coloring spans rather than undifferentiated monospace" do
+    it "R_YHS9_0Z0S renders dark code blocks with semantic token-coloring spans rather than undifferentiated monospace" do
       get "/"
       body = response.body
 
@@ -693,7 +836,7 @@ RSpec.describe "Home page", type: :request do
       end
     end
 
-    it "R_PLLD_DY5X the instructions area sits below the counter card and above the footer" do
+    it "R_YHS9_0Z0S the instructions area sits below the counter card and above the footer" do
       get "/"
       body = response.body
 
@@ -703,10 +846,47 @@ RSpec.describe "Home page", type: :request do
       expect(footer_idx).not_to be_nil
       expect(head_idx).to be < footer_idx
     end
+
+    it "R_YHS9_0Z0S section cards carry off-white fills and every code block exposes a visible copy button with clipboard JS + execCommand fallback + mint-green copied feedback" do
+      get "/"
+      body = response.body
+
+      # Off-white section-card fill is pinned in CSS: the dark #1a1916 fill
+      # is gone and the `.section` selector now keys off a light fill.
+      css = File.read(Rails.root.join("app/assets/stylesheets/application.css"))
+      expect(css).not_to match(/#mcp-config\s+\.section\s*\{[^}]*background:\s*#1a1916/m),
+        "expected the dark #1a1916 section fill to be replaced with an off-white fill"
+      expect(css).to match(/#mcp-config\s+\.section\s*\{[^}]*background:\s*#(?:f|F)[0-9a-fA-F]{5}/m),
+        "expected #mcp-config .section to use an off-white (#f...) fill"
+
+      # Every code block id has a sibling copy button that targets it by id.
+      %w[claude-code-config-project claude-code-config-user claude-desktop-config].each do |id|
+        expect(body).to match(%r{<button[^>]*class=["'][^"']*\bcopy\b[^"']*["'][^>]*data-copy-target=["']#{Regexp.escape(id)}["']}),
+          "expected a copy button targeting #{id.inspect}"
+        # Code block + button share a `.code-block` wrapper so the button can
+        # be positioned over the <pre>.
+        wrapper = body[%r{<div[^>]*class=["'][^"']*\bcode-block\b[^"']*["'][^>]*>(?:(?!</div>).)*?id=["']#{Regexp.escape(id)}["'].*?</div>}m]
+        expect(wrapper).not_to be_nil, "expected #{id.inspect} to live inside a .code-block wrapper"
+        expect(wrapper).to match(%r{<button[^>]*class=["'][^"']*\bcopy\b}),
+          "expected the .code-block wrapping #{id.inspect} to contain its copy button"
+      end
+
+      # The copy-button JS uses the standard clipboard API with a textarea +
+      # execCommand fallback and applies a `copied` state for ~1.4s.
+      expect(body).to include("navigator.clipboard")
+      expect(body).to include("writeText")
+      expect(body).to match(/document\.execCommand\(\s*["']copy["']\s*\)/)
+      expect(body).to match(/1400/)
+      expect(body).to match(/classList\.add\(\s*["']copied["']\s*\)/)
+
+      # Mint-green `copied` state is pinned in CSS.
+      expect(css).to match(/\.copy\.copied\s*\{[^}]*color:\s*#79d4a9/m),
+        "expected .copy.copied to render in mint-green #79d4a9"
+    end
   end
 
-  describe "R-RLJF-YEWW motion + accessibility" do
-    # Verifies the slice of R-RLJF-YEWW that can land today: the
+  describe "R-K4XR-U91S motion + accessibility" do
+    # Verifies the slice of R-K4XR-U91S that can land today: the
     # reduced-motion CSS suppressing the lens-dot pulse and the ARIA
     # affordances on elements already present on the index page.
     # The counter-flash and subtitle fade-swap suppression pieces
@@ -741,50 +921,89 @@ RSpec.describe "Home page", type: :request do
       get "/"
       body = response.body
 
-      reroll = body[/<a[^>]*id=["']reroll["'][^>]*>/i]
+      reroll = body[/<button[^>]*id=["']reroll["'][^>]*>/i]
       expect(reroll).not_to be_nil
       expect(reroll).to match(/aria-label=["']New subtitle["']/i)
     end
   end
 
-  describe "R-LRSQ-5VDG visual fidelity to design reference" do
-    # The design tokens pinned by R-LRSQ-5VDG live in the stylesheet.
-    # The reference checked into reqs/design/HAL.html names them
-    # explicitly; this spec asserts each load-bearing token appears
-    # in application.css so the index page renders against the same
-    # palette, type families, and headline scale as the reference.
+  describe "R-YFCG-9FJE design-reference visual fidelity" do
+    # The design reference (reqs/design/HAL.html) names two load-bearing
+    # layout properties beyond the token palette R-JWEH-5UUX pins:
+    # content is centered with a max content width around 880px, and the
+    # page is visibly card-grouped — banner, counter, and MCP-client
+    # sections render inside distinct bordered, rounded cards rather
+    # than as flat full-width sections.
 
     let(:css) { File.read(Rails.root.join("app/assets/stylesheets/application.css")) }
 
-    it "pins the warm off-white background token" do
+    it "R_YFCG_9FJE centers page content with a max-width on the order of 880px" do
+      get "/"
+      body = response.body
+      # The layout wraps yield in a .page container so every page picks up centering.
+      expect(body).to match(%r{<main[^>]*class=["'][^"']*\bpage\b[^"']*["']}i)
+      # The .page rule sets a max-width around 880px and centers via auto margins.
+      page_rule = css[/\.page\s*\{[^}]*\}/m]
+      expect(page_rule).not_to be_nil, "expected a .page CSS rule"
+      expect(page_rule).to match(/max-width\s*:\s*8[0-9]{2}px/i)
+      expect(page_rule).to match(/margin\s*:\s*0\s+auto/i)
+    end
+
+    it "R_YFCG_9FJE renders banner, counter, and instructions as visibly bordered cards" do
+      get "/"
+      body = response.body
+      # The three load-bearing groupings are present on the page.
+      expect(body).to match(%r{<section[^>]*class=["'][^"']*\bbanner\b}i)
+      expect(body).to match(%r{<section[^>]*class=["'][^"']*\bcounter-card\b}i)
+      expect(body).to match(%r{<section[^>]*id=["']mcp-config["']}i)
+      # The banner and MCP-config section cards carry visible borders in CSS.
+      banner_rule = css[/\.banner\s*\{[^}]*\}/m]
+      expect(banner_rule).to match(/border\s*:\s*1px\s+solid/i)
+      expect(banner_rule).to match(/border-radius\s*:/i)
+      section_rule = css[/#mcp-config\s+\.section\s*\{[^}]*\}/m]
+      expect(section_rule).to match(/border\s*:\s*1px\s+solid/i)
+      expect(section_rule).to match(/border-radius\s*:/i)
+    end
+  end
+
+  describe "R-JWEH-5UUX design-reference fidelity" do
+    # The load-bearing design tokens pinned by R-JWEH-5UUX live in the
+    # stylesheet. The reference checked into reqs/design/HAL.html names
+    # them explicitly; this spec asserts each appears in application.css
+    # so the index page renders against the same palette, type families,
+    # and headline scale as the reference.
+
+    let(:css) { File.read(Rails.root.join("app/assets/stylesheets/application.css")) }
+
+    it "R_JWEH_5UUX pins the warm off-white background token" do
       expect(css).to match(/#f6f5f1/i)
     end
 
-    it "pins the dark-ink foreground token" do
+    it "R_JWEH_5UUX pins the dark-ink foreground token" do
       expect(css).to match(/#14130f/i)
     end
 
-    it "pins the HAL-lens red accent token" do
+    it "R_JWEH_5UUX pins the HAL-lens red accent token" do
       expect(css).to match(/#d4361e/i)
     end
 
-    it "applies the page background and ink color to the body" do
+    it "R_JWEH_5UUX applies the page background and ink color to the body" do
       expect(css).to match(/body\s*\{[^}]*background\s*:\s*[^;]*(#f6f5f1|--bg)/im)
       expect(css).to match(/body\s*\{[^}]*color\s*:\s*[^;]*(#14130f|--ink)/im)
     end
 
-    it "selects Inter for UI text and JetBrains Mono for code" do
+    it "R_JWEH_5UUX selects Inter for UI text and JetBrains Mono for code" do
       expect(css).to match(/font-family\s*:\s*[^;]*["']?Inter["']?/i)
       expect(css).to match(/["']JetBrains Mono["']/)
     end
 
-    it "anchors the type scale at the 88px HAL title and the 11px mono badge" do
+    it "R_JWEH_5UUX anchors the type scale at the 88px HAL title and the 11px mono badge" do
       expect(css).to match(/\.banner\s+\.title\s*\{[^}]*font-size\s*:\s*88px/im)
       expect(css).to match(/font\s*:\s*[^;]*\b11px\b[^;]*["']JetBrains Mono["']/i)
     end
   end
 
-  describe "R-QKYG-HAO2 footer below the instructions area" do
+  describe "R-K3PV-GHB3 footer below the instructions area" do
     it "renders a footer with a decorative status dot and the 'MCP server live' phrase on the left" do
       get "/"
 

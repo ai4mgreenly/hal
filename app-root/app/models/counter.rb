@@ -20,7 +20,7 @@ class Counter < ApplicationRecord
       update!(value: value + 1)
       value
     end
-    # R-DRX9-8WNY: notify any subscribed live-update channels.
+    # R-K65O-80SH: notify any subscribed live-update channels.
     CounterBroadcaster.broadcast(new_value)
     new_value
   end
@@ -31,7 +31,7 @@ class Counter < ApplicationRecord
       update!(value: value - 1)
       value
     end
-    # R-DRX9-8WNY: notify any subscribed live-update channels.
+    # R-K65O-80SH: notify any subscribed live-update channels.
     CounterBroadcaster.broadcast(new_value)
     new_value
   end

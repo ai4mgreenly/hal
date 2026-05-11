@@ -9,7 +9,7 @@ RSpec.describe "Counter operations posture (R-ECNJ-R09R)" do
       Rails.application.routes.routes.map do |r|
         { verb: r.verb, path: r.path.spec.to_s.sub("(.:format)", "") }
       end.select { |r| r[:path] == "/counter" || r[:path].start_with?("/counter/") }
-       # R-DRX9-8WNY's /counter/stream is a live-update notification
+       # R-K65O-80SH's /counter/stream is a live-update notification
        # channel, not a counter operation R-ECNJ-R09R counts.
        .reject { |r| r[:path] == "/counter/stream" }
     end
