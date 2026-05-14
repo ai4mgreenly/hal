@@ -41,18 +41,17 @@ explicit scope and out-of-scope list.
 
 ## Setup
 
-With a working Ruby of the version recorded in `.ruby-version`
-(currently 4.0.x, see R-OJKW-K8Q6), a fresh checkout is bootstrapped
-to a passing test suite with a single command:
+With a working Go toolchain of the version pinned in
+`app-root/go.mod` (per R-35T7-Z8EF / R-3714-D054), a fresh checkout
+is bootstrapped to a passing test suite with a single command
+(R-SDDJ-SBIN):
 
 ```
-bin/setup --skip-server
+cd app-root && go test ./...
 ```
 
-That installs gems, prepares the database, and clears logs/tempfiles.
-`--skip-server` omits starting the development server so the command
-returns when bootstrap is complete. Once it returns, `./test.sh` should
-pass without further manual steps.
+No further manual steps. The module lives in `app-root/`; the rest of
+the repo holds the spec (`reqs/`) and operator-facing helpers.
 
 ## Tests
 

@@ -4,7 +4,7 @@ A small JSON API that mirrors the MCP tools, so the counter can also
 be driven from curl, scripts, or any non-MCP HTTP client. The auth
 posture matches MCP: read is open, mutations require an authenticated
 caller. The mutation endpoints also accept a valid web session cookie
-so that the index page's `+` / `−` buttons (R-NG6O-94I2) can drive
+so that the index page's `+` / `−` buttons (R-EJAP-XUSB) can drive
 the same endpoints without bearer tokens.
 
 - R-2I2S-XB7K: `GET /counter` returns HTTP 200 with a JSON object
@@ -22,7 +22,7 @@ the same endpoints without bearer tokens.
   unauthenticated or invalid-auth request returns HTTP 401 and does
   not change the counter, consistent with R-T2JT-53WF. The endpoint
   is a protected endpoint for the purposes of R-MHYT-TIF7 (rejects
-  cross-origin browser requests) and R-DH2I-28CK (resource-binding
+  cross-origin browser requests) and R-76M5-C87C (resource-binding
   match for bearer-presented tokens).
 - R-3R73-2TN9: `GET /counter` requires no authentication, consistent
   with R-SE5T-HP2J.
@@ -45,7 +45,7 @@ the same endpoints without bearer tokens.
   the service accepts it if either is valid. The two auth modes are
   validated against their own stores; a mutation succeeding via
   session cookie does not touch the token store, and vice versa —
-  the lifetime/revocation independence R-93PJ-FRPY pins between web
+  the lifetime/revocation independence R-0XJ4-5MSL pins between web
   sessions and MCP token chains is preserved at the mutation path.
   The intent: a single pair of endpoints serves both the
   MCP/CLI/script surface (bearer-token clients) and the browser's

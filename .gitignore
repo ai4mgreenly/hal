@@ -32,6 +32,14 @@
 # Ralph run state
 /app-root/.ralph/
 
+# Go build artifacts and local database
+/app-root/hal
+/app-root/hal.db
+/app-root/hal.db-*
+
+# Local backups
+/reqs.bak/
+
 # Editor / OS detritus
 .DS_Store
 *.swp

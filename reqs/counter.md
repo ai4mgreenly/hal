@@ -20,13 +20,10 @@ The single shared integer that is the entire point of the service.
   corresponding tools per R-FUB4-KWWB; the HTTP API exposes
   endpoints for the read and the two mutations per R-2I2S-XB7K,
   R-340Z-T6K2, R-H3FE-QFC0; the web index page exposes both
-  mutations as `+` / `−` buttons per R-NG6O-94I2. No other counter
-  operations exist. This requirement supersedes the earlier
-  two-operation posture; decrement was added as part of the
-  full-counter-demo expansion described in the design reference
-  at `reqs/design/HAL.html`.
-- R-XMDZ-2RGA: increment takes no arguments. Each successful call adds
-  exactly one to the stored value.
+  mutations as `+` / `−` buttons per R-EJAP-XUSB. No other counter
+  operations exist.
+- R-XMDZ-2RGA: increment takes no arguments. Each successful call
+  adds exactly one to the stored value.
 - R-RQZQ-81ZC: increment returns the value as it stands after the
   increment is applied.
 - R-F5X4-XI2F: decrement takes no arguments. When the stored value
@@ -52,5 +49,10 @@ The single shared integer that is the entire point of the service.
 ## Concurrency
 
 - R-TOI0-0Z8X: concurrent increments do not lose updates. If N
-  successful increment calls return, the post-state value has gone up
-  by exactly N relative to the pre-state value.
+  successful increment calls return, the post-state value has gone
+  up by exactly N relative to the pre-state value. The same property
+  holds for decrement: if M successful decrement calls return, the
+  post-state value has gone down by exactly M. Interleaved increments
+  and decrements compose: N successful increments and M successful
+  decrements (with N ≥ M relative to the pre-state) leave the
+  post-state value (N − M) above the pre-state.

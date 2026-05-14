@@ -60,6 +60,45 @@ provider; clients never see Google directly.
   expired code is likewise rejected. Without these bindings, PKCE
   is decorative and a leaked code is exchangeable by an attacker.
 
+## Authorization ordering
+
+- R-FFOQ-Y4JG: every endpoint and MCP tool whose specification
+  requires authentication evaluates the authentication check
+  **before** any input validation, business-logic gate,
+  state-dependent rejection, or transport-level transformation
+  that could produce its own error response. An unauthenticated
+  request to a gated endpoint receives the unauthenticated-
+  rejection response and nothing else — HTTP 401 on the JSON API
+  (R-53Z2-DNB1), the standard unauthenticated-tool signal on the
+  MCP transport (R-0YOE-9NO8) — regardless of the request's
+  payload, the system's current state, or what other rejections
+  the request would have hit had it been authenticated.
+
+  Concretely: an unauthenticated `POST /counter/decrement`
+  (R-H3FE-QFC0) presented while the counter is zero returns 401,
+  **not** the "counter cannot go below zero" 4xx that
+  R-F5X4-XI2F pins for an authenticated decrement against a zero
+  counter. The auth check terminates the request before the
+  zero-counter check is reached, and the body of the response
+  is the same one any other unauthenticated mutation request
+  would receive — it does not leak the counter's value, its
+  position relative to zero, or any other state. The same
+  ordering applies to the MCP decrement tool (R-GG9B-GS8T,
+  R-ZQS0-HWZ8): an unauthenticated decrement against a
+  zero-valued counter produces the unauthenticated-tool signal,
+  not the "below zero" tool error.
+
+  The intent has two parts. First, an unauthenticated caller
+  cannot use response-shape differences to probe system state:
+  the only thing a request's rejection can tell an unauth caller
+  is "you are not authenticated", never anything about the world
+  the gated endpoint operates on. Second, the order of checks
+  is observable, so getting it right is testable: a test that
+  drives an unauthenticated mutation request against a state in
+  which a non-auth rejection would also apply, and asserts that
+  the response is exactly the unauthenticated rejection, fences
+  this ordering for every gated endpoint the spec names.
+
 ## Configuration surface
 
 - R-LWCN-ZBXO: every numeric and string value that governs the
@@ -70,27 +109,20 @@ provider; clients never see Google directly.
   forced-authentication posture in R-3BKZ-L7R4 and the deliberate
   non-use of forced-authentication parameters in R-126C-AM1E, the
   configured workspace domain in R-5LQM-O89D, the canonical resource
-  identifier in R-3UT3-IKZG, and the HSTS max-age in R-ID5L-BSJM —
-  is sourced from a single configuration surface:
-  `Rails.configuration.x.auth.*`, populated by
-  `config/initializers/auth.rb`. Secrets (the Google client
-  credentials R-68WP-XVCK names) are read from environment variables
-  inside that initializer; the initializer fails loudly (raises) if
-  a required environment variable is missing, rather than
-  substituting a default or a sentinel. Non-secret tunables are
-  Ruby-typed values in the same initializer — durations as
-  `1.hour` / `30.days`, scopes as `%w[openid email profile]`,
-  booleans for the per-flow prompt-forcing posture. Code that
-  consumes any of these values reads it from
-  `Rails.configuration.x.auth.*` and does not duplicate the literal
-  anywhere else in the codebase: changing the access-token
-  lifetime, the web idle ceiling, the Google scope list, etc., is a
-  single-file edit in `config/initializers/auth.rb`. This extends
-  the convention R-VF61-2Y6I already establishes for
-  `Rails.configuration.x.google_identity_provider` across the rest
-  of the auth surface. The intent: an operator reading the auth
-  posture finds every value that governs it in one file; a magic
-  number buried in a controller or model is itself a defect.
+  identifier in R-75E8-YGGN, and the HSTS max-age in R-ID5L-BSJM —
+  is sourced from a single named configuration surface inside the
+  service. Secrets (the Google client credentials R-68WP-XVCK names)
+  are read from environment variables by that same configuration
+  surface; startup fails loudly (refuses to begin serving and
+  surfaces a clear error) if a required environment variable is
+  missing, rather than substituting a default or a sentinel. Code
+  that consumes any of these values reads it from the central
+  configuration surface and does not duplicate the literal anywhere
+  else in the codebase: changing the access-token lifetime, the web
+  idle ceiling, the Google scope list, etc., is a single-location
+  edit. The intent: an operator reading the auth posture finds every
+  value that governs it in one place; a magic number buried in a
+  handler or model is itself a defect.
 
 ## Google federation
 
@@ -118,22 +150,276 @@ provider; clients never see Google directly.
   single Workspace domain whose users are allowed. A user whose
   Google identity is outside that domain is rejected with a clear
   error message and no token is issued.
+- R-ANRQ-04PK: the allowed Workspace domain (R-5LQM-O89D) is
+  supplied via the environment variable `GOOGLE_WORKSPACE_DOMAIN`,
+  matching the bare-`GOOGLE_*` convention R-68WP-XVCK and the
+  Google federation seam already use for `GOOGLE_CLIENT_ID` and
+  `GOOGLE_CLIENT_SECRET`. The service reads this exact name — not
+  a `HAL_`-prefixed variant — and surfaces a clear error at startup
+  when the variable is unset or empty, consistent with the
+  fail-loudly contract R-LWCN-ZBXO pins for required configuration.
+  The same value flows to the two places it governs: the `hd`
+  parameter on the Google authorization URL (R-W3K0-QD0E), and the
+  `hosted_domain` claim check the callback applies (R-5LQM-O89D).
 - R-68WP-XVCK: Google client credentials (client ID and secret) are
   supplied via environment configuration. They are never committed to
   the repository.
-- R-ETP6-60VA: when the service redirects the user-agent to Google
-  for the federated login, it generates a fresh unguessable `state`
-  value and records it server-side, bound both to the in-flight
-  authorize request it represents and to the originating browser
-  session. The Google callback is accepted only when the returned
-  `state` is recognized, unexpired, has not been consumed before,
-  and was generated for the same browser session that is presenting
-  the callback. A `state` that is missing, unknown, expired,
+- R-T37L-4J01: this requirement governs **every code path in the
+  service that redirects the user-agent to Google for federated
+  login** — without exception. The enumerated paths are:
+
+  1. The **web `/login`** redirect to Google (the entry point the
+     human visitor reaches per R-9PNQ-BN2G, R-8GJG-64MR,
+     R-3BKZ-L7R4).
+  2. The **MCP `/oauth/authorize`** redirect to Google (the entry
+     point a registered MCP client's authorize request reaches
+     per R-4SH1-HQGP, R-126C-AM1E).
+
+  Any future code path the service introduces that hands the
+  user-agent off to Google for federation is governed by this
+  requirement as well; the enumeration above names what exists
+  today, not a closed set.
+
+  **Property** (applies to every enumerated path): when the
+  service redirects the user-agent to Google for federated
+  login, it generates a fresh unguessable `state` value and
+  records it server-side, bound both to the in-flight authorize
+  request it represents and to the originating browser session
+  (the `bindingID` written to the browser as the
+  `hal_oauth_state` cookie, or any equivalent browser-session
+  binding the service uses for this purpose). The Google
+  callback is accepted only when the returned `state` is
+  recognized, unexpired, has not been consumed before, and was
+  generated for the same browser session that is presenting the
+  callback. A `state` that is missing, unknown, expired,
   already-consumed, or tied to a different session causes the
-  callback to be rejected and no token chain to be issued. Used
-  `state` values are single-use. This closes the login-CSRF window
-  where an attacker pre-initiates a flow and induces a victim to
-  complete the Google step on their behalf.
+  callback to be rejected with no token chain issued and no web
+  session established. Used `state` values are single-use.
+
+  **The property is per-path, not aggregate.** Satisfying the
+  state-binding contract on one enumerated path while skipping
+  it on another does **not** satisfy this requirement. A
+  redirect-to-Google code path that generates a `state` value
+  but does **not** record it server-side, does **not** set the
+  browser-session binding cookie, or does **not** validate both
+  on the callback is in violation regardless of which other
+  paths are correctly wired. Concretely: an MCP authorization
+  flow whose `/oauth/authorize` handler redirects to Google
+  with a `state` value the callback then rejects as "state
+  value not recognized" — because the handler never recorded
+  the state in the server-side store — is the exact failure
+  mode this requirement forbids.
+
+  **Acceptance criteria the test suite exercises both paths:**
+  the verification of this requirement names tests that drive a
+  redirect-to-Google through the web `/login` entry point and
+  separately drive a redirect-to-Google through the MCP
+  `/oauth/authorize` entry point, and asserts in both cases
+  that (a) a state-binding cookie is set on the redirect
+  response, (b) the corresponding callback succeeds when the
+  cookie and `state` value are presented together, and (c) the
+  callback fails with no token chain issued when the cookie is
+  missing, the `state` is unknown, the `state` is expired, the
+  `state` has already been consumed, or the cookie's value
+  differs from the binding recorded server-side. A test suite
+  that exercises only one of the two entry points does not
+  verify this requirement.
+
+  This closes the login-CSRF window where an attacker
+  pre-initiates a flow and induces a victim to complete the
+  Google step on their behalf — and closes the
+  per-path-omission gap where one code path correctly enforces
+  the binding while another silently skips it.
+
+- R-MTRN-DL9W: every state record (R-T37L-4J01) carries enough
+  of the originating authorize-request context that the
+  Google-callback handler can complete its work without
+  consulting any other source. The record stores, at minimum:
+
+  - **Origin discriminator**: which code path created this
+    record. Exactly two values exist today: `web` (the
+    `/login` redirect to Google) and `mcp` (the
+    `/oauth/authorize` redirect to Google). The
+    discriminator is recorded at state-creation time and
+    never mutates.
+  - **For `mcp`-origin records, the full MCP authorize-
+    request context needed to complete the post-callback
+    action**: the requesting MCP client's `client_id`, the
+    `redirect_uri` it presented (already verified at
+    authorize time against its DCR-registered values per
+    R-1ERW-YD9G — the recorded value is the byte-for-byte
+    request value, not a normalized form), the PKCE
+    `code_challenge` and `code_challenge_method`, the
+    original `state` value the MCP client supplied on its
+    `/oauth/authorize` request (to be echoed back to the MCP
+    client on the eventual redirect to its callback URL),
+    and any `resource` parameter the request carried (which
+    must have already passed the R-4GRA-EGBY check; the
+    recorded value is the byte-for-byte request value).
+  - **For `web`-origin records**: no extra context beyond
+    the discriminator is required, because the post-callback
+    action (establish a web session, redirect to `/`) needs
+    no further values from the originating request.
+
+  The record's session-binding ID, expiry, and consumed flag
+  pinned by R-T37L-4J01 are unchanged; this requirement adds
+  to that store, it does not replace any field there. A
+  state record that lacks the origin discriminator, or that
+  lacks any of the enumerated `mcp`-origin fields when its
+  origin is `mcp`, is in violation; the build agent cannot
+  satisfy R-MUZJ-RD0L without the data this requirement pins.
+
+- R-MUZJ-RD0L: the Google-callback handler dispatches on the
+  recorded origin discriminator (R-MTRN-DL9W) after — and
+  only after — the state-binding check (R-T37L-4J01) and the
+  workspace-domain check (R-5LQM-O89D) have both succeeded.
+  No HAL-issued token, no HAL-issued authorization code, and
+  no web session is created on any path where either check
+  failed. On the success path the dispatch is:
+
+  - **`web` origin** (federation initiated from `/login`):
+    the handler establishes a web session for the
+    Google-asserted email per R-CXJ2-R3BN (with cookie
+    attributes per R-AYLJ-8SYX), writes the web-session
+    record per R-SLGL-B5B4, and redirects the user-agent to
+    `/` via HTTP 303. No HAL authorization code is minted on
+    this path; no MCP client is involved.
+  - **`mcp` origin** (federation initiated from
+    `/oauth/authorize`): the handler **does NOT establish a
+    web session**, **does NOT redirect to `/`**, and **does
+    NOT touch the web-session store**. Instead, it:
+
+    1. Mints a fresh HAL authorization code per R-ZPE1-0DV8,
+       bound at issue time to the state record's recorded
+       `client_id`, `code_challenge`, `code_challenge_method`,
+       and `redirect_uri` — these come from the state
+       record, not from the callback request's query
+       parameters. The code is also tied to the
+       Google-asserted email (the identity it represents),
+       so the eventual token issuance (R-ZQS0-HWZ8) can
+       attach owner information; and to the `resource` value
+       if one was recorded.
+    2. Builds the redirect target as the state record's
+       recorded `redirect_uri`, with the freshly-minted HAL
+       authorization code in the `code` query parameter and
+       the MCP client's **originally-supplied** `state`
+       value (recorded at authorize time, NOT the HAL
+       internal state value used for the Google round-trip)
+       echoed in the `state` query parameter.
+    3. Issues HTTP 303 to that target.
+
+    A rendering in which an `mcp`-origin Google callback
+    success terminates with the user-agent at HAL's
+    `/` landing page — the exact failure observable in the
+    server access log as the sequence
+    `GET /oauth/authorize → 303` ··· `GET /oauth/google/callback → 303` ··· `GET / → 200`,
+    with no intervening `GET <mcp-client-redirect_uri>?code=…&state=…`
+    — does **not** satisfy this requirement. The
+    user-agent's final HTTP destination on the success path
+    of an `mcp`-origin federation is the MCP client's
+    registered callback, with the HAL authorization code in
+    hand; anything else is a defect.
+
+    A rendering in which an `mcp`-origin success
+    inadvertently also establishes a HAL web session (so
+    the human running the MCP-auth flow finds themselves
+    signed in to the HAL web UI as a side effect) is a
+    separate defect: per R-0XJ4-5MSL, web sessions and MCP
+    token chains are independent identity contexts;
+    completing an MCP authorize flow does not — under any
+    code path — produce a web session.
+
+  When the workspace-domain check (R-5LQM-O89D) rejects an
+  out-of-domain identity, the dispatch path is suspended for
+  both origins; the handler returns the appropriate
+  rejection response and writes neither a web session nor a
+  HAL authorization code. The origin discriminator is still
+  used to choose the rejection surface (an in-browser error
+  page for `web` origin, the standard OAuth `error=…`
+  redirect to the MCP client's `redirect_uri` for `mcp`
+  origin where that is feasible), but no authenticated
+  artifact is produced on either path.
+
+- R-77U1-PZY1: the test suite contains at least one
+  end-to-end test that drives a complete MCP OAuth round
+  trip against the running service (using the Google
+  identity-provider test double per R-VF61-2Y6I) and asserts
+  that the round trip terminates with the simulated MCP
+  client holding a usable bearer access token. The test
+  exercises, in order, every leg of the documented MCP
+  authorization flow:
+
+  1. Challenge: an unauthenticated request to the MCP
+     transport endpoint (`POST /mcp` per R-UK7D-Z0IZ /
+     R-7A9U-HJFF) responds with the unauthenticated-tool
+     signal R-0YOE-9NO8 names and carries a
+     `WWW-Authenticate: Bearer ..., resource_metadata="..."`
+     header per R-7BHQ-VB64. The `resource_metadata` URL the
+     header advertises is the protected-resource metadata
+     document's URL (`/.well-known/oauth-protected-resource/mcp`
+     per R-75E8-YGGN).
+  2. Discovery: `GET /.well-known/oauth-authorization-server`
+     and `GET /.well-known/oauth-protected-resource/mcp`
+     return the documents R-2XEK-GCOI / R-75E8-YGGN pin.
+     The `resource` field in the protected-resource metadata
+     document is byte-equal to the configured canonical
+     identifier (`HAL_RESOURCE_IDENTIFIER` per R-791Y-3ROQ).
+  3. Dynamic Client Registration: `POST /oauth/register`
+     returns a fresh `client_id` per R-3JCR-C810 /
+     R-25DN-9PUR.
+  4. Authorize: `GET /oauth/authorize` with the registered
+     `client_id`, a PKCE challenge, a `redirect_uri`, and a
+     `resource` parameter equal to the canonical identifier
+     R-75E8-YGGN publishes responds with a 303 to Google and
+     sets the state-binding cookie per R-T37L-4J01.
+  5. Google round trip: the test double satisfies the
+     authorization-URL/code-exchange seam R-T0B2-A4E5
+     defines, simulating a callback to
+     `/oauth/google/callback` with a workspace-domain
+     identity that passes R-5LQM-O89D.
+  6. Origin dispatch: the callback responds with a 303 to
+     the MCP client's registered `redirect_uri` carrying a
+     HAL `code` and the MCP client's original `state` per
+     R-MUZJ-RD0L.
+  7. Token exchange: `POST /oauth/token` with the HAL
+     authorization code, the PKCE verifier, the `client_id`,
+     the registered `redirect_uri`, and the same `resource`
+     value sent in step 4 returns a bearer access token and
+     a refresh token per R-42V5-GJW4 / R-ZPE1-0DV8 /
+     R-WRDD-TR27.
+  8. Bearer use: presenting the issued access token at the
+     MCP transport endpoint (R-UK7D-Z0IZ / R-7A9U-HJFF) for
+     an authenticated tool — increment per R-ZQS0-HWZ8 — is
+     accepted and the call succeeds.
+
+  All eight legs must pass within the single test for the
+  property to hold. A test suite that passes every leg in
+  isolation but does **not** demonstrate that one MCP
+  client can carry context across all eight legs in a
+  single end-to-end run does not verify this requirement.
+  The failure modes the test prevents include the
+  challenge-discovery gap (an unauthenticated MCP request
+  fails without a `WWW-Authenticate` header pointing at the
+  metadata document, so a real client cannot bootstrap into
+  the flow), the per-path-omission gap (state-binding
+  skipped on the MCP authorize path), the origin-dispatch
+  gap (callback terminates at `/` instead of the MCP
+  client's redirect_uri), the code-binding gap (token
+  exchange succeeds with a wrong PKCE verifier or a wrong
+  `redirect_uri`), and the bearer-binding gap (an issued
+  token is rejected at the MCP endpoint due to a
+  resource-binding mismatch the test would have caught at
+  issue time — including the host-form mismatch the
+  R-791Y-3ROQ / R-76M5-C87C pair closes).
+
+  Because R-VF61-2Y6I forbids outbound network calls in
+  tests, the Google leg is driven through the test double.
+  The build agent does **not** mark R-MTRN-DL9W,
+  R-MUZJ-RD0L, or R-77U1-PZY1 verified by a test that
+  exercises only a subset of these legs; a per-leg unit
+  test is fine for the per-leg requirements it verifies,
+  but the end-to-end test this requirement names is
+  separately required.
 
 ## Web sessions
 
@@ -152,7 +438,7 @@ provider; clients never see Google directly.
   R-8GJG-64MR defines: the visitor's user-agent must reach Google's
   authorization endpoint, the human must complete the Google login
   screen, and the service must accept Google's callback (with `state`
-  validated per R-ETP6-60VA and the workspace-domain check applied per
+  validated per R-T37L-4J01 and the workspace-domain check applied per
   R-5LQM-O89D) before any web session exists. The service does not
   synthesize a web session by any other means — not from an active MCP
   token chain belonging to the same email, not from a development-mode
@@ -162,24 +448,25 @@ provider; clients never see Google directly.
   (R-W3K0-QD0E), every transition from "not signed in" to "signed in"
   produces a network round-trip to Google's authorization endpoint. A
   login flow that completes without ever reaching Google is a defect.
-- R-SLGL-B5B4: web sessions are persisted as rows in a dedicated
-  table distinct from the OAuth token store R-Z955-CD0I defines. Each
-  row records at minimum: the owner (the Google email recorded at
-  sign-in time per R-8GJG-64MR), a cryptographic hash of the opaque
-  session identifier the cookie carries, issued-at, expires-at, and
-  revoked-at. The plaintext session identifier appears in exactly one
-  place outside the user-agent's cookie store: the `Set-Cookie`
-  response that established the session; the service never persists
-  it — mirroring the posture R-CUUP-REQT defines for OAuth token
-  plaintext. Validation of an inbound session cookie is a single
-  lookup against this store: hash the presented value, find the row,
-  accept iff the row is un-expired and un-revoked. Logout
-  (R-AE1P-Z1WC) is the act of writing revoked-at on the matching
-  row; once revoked, the same cookie value cannot be redeemed again.
-  The web-session table and the OAuth-token table do not share rows
-  and have no foreign-key relationship; lifecycle operations on one
-  (issue, revoke, rotate, expire) do not read or write rows in the
-  other, reinforcing R-93PJ-FRPY at the schema level.
+- R-SLGL-B5B4: web sessions are persisted in a dedicated store
+  distinct from the OAuth token store R-WRDD-TR27 defines. Each
+  persisted session records at minimum: the owner (the Google email
+  recorded at sign-in time per R-8GJG-64MR), a cryptographic hash of
+  the opaque session identifier the cookie carries, issued-at,
+  expires-at, and revoked-at. The plaintext session identifier
+  appears in exactly one place outside the user-agent's cookie store:
+  the `Set-Cookie` response that established the session; the service
+  never persists it — mirroring the posture R-CUUP-REQT defines for
+  OAuth token plaintext. Validation of an inbound session cookie is a
+  single lookup against this store: hash the presented value, find
+  the record, accept iff the record is un-expired and un-revoked.
+  Logout (R-AE1P-Z1WC) is the act of writing revoked-at on the
+  matching record; once revoked, the same cookie value cannot be
+  redeemed again. The web-session store and the OAuth-token store
+  are independent — they do not share records and have no referential
+  relationship; lifecycle operations on one (issue, revoke, rotate,
+  expire) do not read or write records in the other, reinforcing
+  R-0XJ4-5MSL at the storage level.
 - R-KJ15-9P17: a web session is bounded by two ceilings beyond
   explicit revocation. (1) **Idle:** a session that has gone 1 hour
   without a successful authenticated request from its bearer is
@@ -191,16 +478,14 @@ provider; clients never see Google directly.
   validates as expired per R-SLGL-B5B4 and the user must complete a
   fresh federation round-trip per R-CXJ2-R3BN — and re-enter
   credentials at Google per R-3BKZ-L7R4 — to obtain a new session.
-  The expires-at column R-SLGL-B5B4 names is the natural place to
-  materialize the effective deadline (the min of the two bounds),
-  updated on each successful request; how the row stores the two
-  bounds is HOW, but the two observable ceilings — 1 hour idle, 12
-  hours absolute — are the property. Logout still terminates a
-  session immediately by writing revoked-at; these ceilings are
-  upper bounds on how long a session can survive without explicit
-  termination. The intent: an active user enjoys a workday-length
-  session up to 12 hours; an abandoned tab dies after 1 hour;
-  neither path lets a web session linger past the bounds.
+  How the two bounds are stored and combined is HOW; the observable
+  property is the two ceilings — 1 hour idle, 12 hours absolute.
+  Logout still terminates a session immediately by writing
+  revoked-at; these ceilings are upper bounds on how long a session
+  can survive without explicit termination. The intent: an active
+  user enjoys a workday-length session up to 12 hours; an abandoned
+  tab dies after 1 hour; neither path lets a web session linger past
+  the bounds.
 - R-3BKZ-L7R4: every web /login redirect (R-9PNQ-BN2G) to Google's
   authorization endpoint includes whatever parameter Google's OIDC
   contract requires to demand a fresh authentication of the user —
@@ -223,90 +508,113 @@ provider; clients never see Google directly.
   round-trip itself; together they say a web session requires both a
   network round-trip to Google and a fresh credential collection on
   every issuance.
-- R-93PJ-FRPY: a web session and an MCP token chain are independent
+- R-0XJ4-5MSL: a web session and an MCP token chain are independent
   identity contexts that do not share lifetime or revocation. A human
   who is signed in to the web UI and also has live MCP tokens issued
   for the same email is in two separate states: ending the web session
   (logout) does not revoke any MCP token, and revoking or expiring an
-  MCP token chain does not end the web session. A future permission
-  layer may relate them — for example, letting a signed-in user force-
-  expire MCP token chains issued to their own email — but no such
-  cross-action is part of the current spec, and the build agent must
-  not invent one.
+  MCP token chain does not end the web session. There is exactly one
+  user-initiated cross-action permitted by this spec: a signed-in
+  visitor may revoke an MCP token chain owned by their own email
+  through the action R-0SNI-MJTT defines on the index page's agents
+  block. This direction is one-way only — revoking a chain through
+  that action does not affect the web session that issued the revoke,
+  and the inverse (an MCP-token-chain action ending a web session) is
+  still forbidden. No other cross-actions exist in the current spec,
+  and the build agent must not invent any.
 
 ## Provider wiring
 
-- R-VF61-2Y6I: in the test environment,
-  `Rails.configuration.x.google_identity_provider` is the test double,
-  and the automated test suite makes no outbound network calls to
-  Google. The double returns payloads whose shape matches Google's
-  documented OAuth/OIDC responses, so service code under test exercises
-  the same code paths it uses against real Google. The property is
-  verified by checking the configured provider in the test environment
-  and by exercising the double's behavior; it is **not** verified by
-  asserting that any "not yet implemented" sentinel
-  (`NotImplementedError` or equivalent) exists in the real-Google code
-  path. A test that pins the real provider's methods to a sentinel
-  couples the test to a transient implementation state and will break
-  in lockstep with R-W3K0-QD0E being satisfied — that coupling is
-  itself a defect.
+- R-VF61-2Y6I: in the test environment, the Google identity provider
+  is a test double, and the automated test suite makes no outbound
+  network calls to Google. The double returns payloads whose shape
+  matches Google's documented OAuth/OIDC responses, so service code
+  under test exercises the same code paths it uses against real
+  Google. The property is verified by checking the configured
+  provider in the test environment and by exercising the double's
+  behavior; it is **not** verified by asserting that any "not yet
+  implemented" sentinel exists in the real-Google code path. A test
+  that pins the real provider's operations to a sentinel couples the
+  test to a transient implementation state and will break in lockstep
+  with R-W3K0-QD0E being satisfied — that coupling is itself a defect.
 - R-T0B2-A4E5: the seam between the service's Google client and
-  Google is narrow — `#authorization_url` and `#exchange_code` are
-  its only operations — and the two implementations (test double,
-  real-Google) return values of identical shape, so callers of the
-  seam do not branch on which is in use. `#authorization_url`
-  returns the URL string the user-agent should be redirected to;
-  `#exchange_code` returns an `Identity` value carrying the four
-  claims the callback consumes — `sub`, `email`, `hosted_domain`,
-  `email_verified` — drawn from the resulting OIDC ID token.
-  Callers depend only on this contract; they do not look for extras
-  one implementation may incidentally expose (e.g. a raw OAuth
-  token-endpoint hash, the unparsed ID token JWT, or a pre-parsed
-  claims map), because the other implementation may not surface
-  them. There is no automated test tier that exercises real Google;
-  end-to-end verification against real Google is performed manually
-  by running the service in development and driving the flow
-  through a browser.
-- R-W3K0-QD0E: in development and production environments,
-  `Rails.configuration.x.google_identity_provider` is an instance of
-  the real `GoogleIdentityProvider` class (not the test double). Its
-  two seam methods (`#authorization_url` and `#exchange_code`) are
-  fully implemented — neither raises `NotImplementedError` or any
-  equivalent "not yet implemented" sentinel, and neither returns a
-  fixture or stub value. `#authorization_url` builds a URL on Google's
-  documented OAuth 2.0 / OIDC authorization endpoint, parameterized
-  with the client ID from `GOOGLE_CLIENT_ID`, the supplied redirect
-  URI, the supplied state, the OIDC scopes the service needs
+  Google is narrow — exactly two operations: one that produces the
+  authorization URL the user-agent should be redirected to, and one
+  that exchanges an authorization code for an identity value. The
+  two implementations (test double, real-Google) return values of
+  identical shape, so callers of the seam do not branch on which is
+  in use. The authorization-URL operation returns the URL string the
+  user-agent should be redirected to. The code-exchange operation
+  returns an identity value carrying the four claims the callback
+  consumes — `sub`, `email`, `hosted_domain`, `email_verified` —
+  drawn from the resulting OIDC ID token. Callers depend only on
+  this contract; they do not look for extras one implementation may
+  incidentally expose (e.g. a raw OAuth token-endpoint hash, the
+  unparsed ID token JWT, or a pre-parsed claims map), because the
+  other implementation may not surface them. There is no automated
+  test tier that exercises real Google; end-to-end verification
+  against real Google is performed manually by running the service
+  in development and driving the flow through a browser.
+- R-W3K0-QD0E: in development and production environments, the
+  Google identity provider is the real implementation (not the test
+  double). Both seam operations defined in R-T0B2-A4E5 are fully
+  implemented — neither raises a "not yet implemented" sentinel of
+  any form, and neither returns a fixture or stub value. The
+  authorization-URL operation builds a URL on Google's documented
+  OAuth 2.0 / OIDC authorization endpoint, parameterized with the
+  client ID from `GOOGLE_CLIENT_ID`, the supplied redirect URI, the
+  supplied state, the OIDC scopes the service needs
   (`openid email profile`), and the `hd` parameter set to the
-  configured Workspace domain (R-5LQM-O89D). `#exchange_code` performs
-  an HTTPS POST to Google's documented token endpoint, authenticating
-  with `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` per R-68WP-XVCK,
-  and returns an `Identity` carrying the `sub`, `email`,
-  `hosted_domain`, and `email_verified` claims from the resulting ID
-  token. The implementations satisfy the surrounding Google-federation
-  requirements (R-4SH1-HQGP, R-5LQM-O89D, R-68WP-XVCK, R-ETP6-60VA)
+  configured Workspace domain (R-5LQM-O89D). The code-exchange
+  operation performs an HTTPS POST to Google's documented token
+  endpoint, authenticating with `GOOGLE_CLIENT_ID` and
+  `GOOGLE_CLIENT_SECRET` per R-68WP-XVCK, and returns an identity
+  value carrying the `sub`, `email`, `hosted_domain`, and
+  `email_verified` claims from the resulting ID token. The
+  implementations satisfy the surrounding Google-federation
+  requirements (R-4SH1-HQGP, R-5LQM-O89D, R-68WP-XVCK, R-T37L-4J01)
   when reached in deployed environments.
 
 ## Tokens
 
-- R-Z955-CD0I: tokens (both access and refresh) are opaque
+- R-WRDD-TR27: tokens (both access and refresh) are opaque
   cryptographically-random strings. Each issued token has a
-  corresponding server-side row recording at minimum: the token's
+  corresponding server-side record capturing at minimum: the token's
   kind (access or refresh), its owner, its chain membership (so
   rotation and revocation can act on siblings), issued-at,
   expires-at, used-at (refresh tokens only, for reuse detection),
-  and revoked-at. Validation of an inbound bearer token is a single
-  lookup against this store: the string itself carries no
-  information. The expires-at column is the mechanism that enforces
-  R-TNXJ-ZWQ0 and R-8UAA-YKR9; the used-at column is the mechanism
-  for R-89K0-GH5G and R-9HGE-87UG; the revoked-at column is the
-  mechanism for R-A26O-QBG9.
-- R-CUUP-REQT: the token row stores a cryptographic hash of the token
-  string, not the plaintext. The plaintext is returned to the client
-  exactly once, at issue time, and is never persisted by the service.
-  Inbound bearer tokens are validated by hashing the presented string
-  with the same algorithm and looking up the row by that hash. A
-  database leak therefore does not give an attacker any usable token.
+  and revoked-at. Validation of an inbound bearer token is a lookup
+  against this store — the string itself carries no information —
+  and the lookup accepts the token **only when** the record exists,
+  its `expires-at` is in the future, its `revoked-at` is unset, and
+  (for refresh tokens) its `used-at` is unset. If any of those
+  conditions fails the token is rejected, regardless of which
+  condition produced the failure or which other condition might
+  also have applied. The `expires-at` field is the mechanism that
+  enforces R-TNXJ-ZWQ0 and R-8UAA-YKR9; the `used-at` field is the
+  mechanism for R-89K0-GH5G and R-9HGE-87UG; the `revoked-at` field
+  is the mechanism for **every** revocation path the spec names —
+  reuse-detection-triggered chain revocation (R-9HGE-87UG /
+  R-A26O-QBG9), user-initiated chain revocation through the agents
+  block (R-0SNI-MJTT), the revocation that R-ZPE1-0DV8 performs on
+  the access and refresh tokens of a code-reuse chain, and any
+  future revocation path the spec introduces. A token-validation
+  code path that consults `expires-at` but not `revoked-at`, or
+  that honors `revoked-at` for some revocation origins but not
+  others, is in violation. The property is observable at every
+  bearer-token validation site — the MCP transport endpoint
+  (R-UK7D-Z0IZ) and the HTTP API mutation endpoints
+  (R-340Z-T6K2 / R-H3FE-QFC0 / R-4ED6-CGQG) — and the failure mode
+  this requirement fences is the one where a revoked chain's
+  outstanding access token continues to satisfy validation because
+  the validation lookup never reads `revoked-at`.
+- R-CUUP-REQT: the token record stores a cryptographic hash of the
+  token string, not the plaintext. The plaintext is returned to the
+  client exactly once, at issue time, and is never persisted by the
+  service. Inbound bearer tokens are validated by hashing the
+  presented string with the same algorithm and looking up the record
+  by that hash. A database leak therefore does not give an attacker
+  any usable token.
 - R-6UUW-TQP2: an issued access token grants the holder permission to
   call the increment tool. There are no finer-grained scopes in the
   current spec.
@@ -330,24 +638,28 @@ provider; clients never see Google directly.
 - R-A26O-QBG9: revocation triggered by reuse detection takes effect
   immediately for newly arriving requests. Any access token from the
   revoked chain that is presented after revocation is rejected.
-- R-3UT3-IKZG: the service has a single configured resource
-  identifier — the canonical external URL it is reached at — and
+- R-75E8-YGGN: the service has a single configured resource
+  identifier — the MCP transport endpoint URL the service is
+  reached at, including its path component (R-7A9U-HJFF pins the
+  path as `/mcp`; in development the full identifier is
+  `http://localhost:3000/mcp`, in production
+  `https://hal.ai.metaspot.org/mcp`). The identifier is sourced
+  exclusively from the environment per R-791Y-3ROQ. The service
   honors the `resource` parameter (RFC 8707) on its authorize and
   token endpoints. The canonical identifier is published verbatim,
-  byte-for-byte, in the OAuth 2.0 Protected Resource Metadata
-  document at `/.well-known/oauth-protected-resource` (the value of
-  the `resource` field there is the same string that bearer-side
-  validation compares against). For a service whose protected
-  endpoints sit at the root path of the host, the canonical form
-  includes a single trailing `/` (e.g. `http://localhost:3000/`,
-  `https://hal.ai.metaspot.org/`); the slash is part of the
-  identifier, not an optional decoration, and the same string is
-  used in the metadata document, the bound `resource` value
-  recorded on each issued token, and the validation comparison.
-  Each issued access token's server-side row records the resource
-  identifier the token was bound to at issue time. The MCP
-  tool-call endpoint and the HTTP API accept a presented bearer
-  token only when its recorded resource binding equals this
+  byte-for-byte, as the value of the `resource` field in the
+  OAuth 2.0 Protected Resource Metadata document (RFC 9728). Per
+  RFC 9728 §3.1, because the identifier carries a non-root path,
+  the metadata document is served at
+  `/.well-known/oauth-protected-resource/mcp` — the path component
+  of the resource identifier is appended to
+  `/.well-known/oauth-protected-resource`. The same string appears
+  in the metadata document, in the bound `resource` value recorded
+  on each issued token, and in the validation comparison. Each
+  issued access token's server-side record captures the resource
+  identifier the token was bound to at issue time. The MCP transport
+  endpoint and the HTTP API mutation endpoints accept a presented
+  bearer token only when its recorded resource binding equals this
   service's identifier; a token whose binding is for any other
   resource, or that has no recorded binding, is rejected. This
   holds even though only one resource currently exists, so a token
@@ -357,12 +669,12 @@ provider; clients never see Google directly.
 - R-4GRA-EGBY: the authorize endpoint and the token endpoint
   reject any request whose `resource` parameter is present and is
   not byte-equal to the configured canonical resource identifier
-  R-3UT3-IKZG defines. Rejection happens at the endpoint itself,
+  R-75E8-YGGN defines. Rejection happens at the endpoint itself,
   before any code or token is issued, and uses the standard OAuth
   signaling RFC 8707 §3.2 prescribes (`error="invalid_target"`).
   The user-agent is not redirected anywhere using the offending
   `resource` value. This is the issue-time mirror of the
-  presentation-time check R-DH2I-28CK defines: without it, a
+  presentation-time check R-76M5-C87C defines: without it, a
   client that sends a `resource` value the service cannot accept
   (a different trailing-slash discipline, a different scheme, an
   extra path segment, etc.) silently obtains a token that every
@@ -370,23 +682,52 @@ provider; clients never see Google directly.
   mismatch, with no obvious signal of what went wrong. Closing
   the loop at issuance turns that silent failure into a loud,
   diagnosable one.
-- R-DH2I-28CK: "matches" in R-3UT3-IKZG means byte-for-byte equality
-  against the one configured resource-identifier string the service
-  was started with. The protected endpoints — the MCP transport
-  endpoint (R-UK7D-Z0IZ) and `POST /counter/increment` (R-340Z-T6K2)
-  — share that single resource identifier; neither endpoint derives
-  its own resource identifier from the request URL, the path, or
-  any per-endpoint convention. A token bound to the configured
-  resource is therefore valid for every protected endpoint of this
-  service simultaneously. Conversely, a token whose recorded
-  resource string differs from the configured one in any way —
-  trailing slash, scheme, host, port, path — is rejected. This
-  closes the failure mode where the resource check appears to
-  reject all tokens because the build agent computed a per-endpoint
-  resource string (e.g. `http://host/mcp`) different from the one
-  bound at issue (e.g. `http://host/`).
-- R-E5GH-PN6G: at the moment a token row is written, the
-  difference between the row's `expires_at` and `issued_at` equals
+- R-76M5-C87C: "matches" in R-75E8-YGGN means byte-for-byte
+  equality against the one configured resource-identifier string
+  the service was started with — the value R-791Y-3ROQ reads from
+  `HAL_RESOURCE_IDENTIFIER`. The protected endpoints — the MCP
+  transport endpoint (R-UK7D-Z0IZ) and the counter-mutation
+  endpoints `POST /counter/increment` (R-340Z-T6K2) and
+  `POST /counter/decrement` (R-H3FE-QFC0) — share that single
+  resource identifier; neither endpoint derives its own resource
+  identifier from the request URL, the request's `Host` header,
+  the bound interface (`hal serve --ip`), the bound port
+  (`--port`), or any per-endpoint convention. A token bound to
+  the configured resource is therefore valid for every protected
+  endpoint of this service simultaneously. Conversely, a token
+  whose recorded resource string differs from the configured one
+  in any way — trailing slash, scheme, host, port, path — is
+  rejected. This closes the failure mode where the resource check
+  rejects every token (and protected-resource metadata advertises
+  a mismatched identifier) because the build agent derived the
+  identifier from the request URL or the bind address (e.g.
+  publishing `http://127.0.0.1:3000/mcp` because `--ip` defaults
+  to `127.0.0.1`, while clients reach the service through
+  `http://localhost:3000/mcp` and reject the mismatch) rather
+  than from the single configured value R-791Y-3ROQ pins.
+- R-791Y-3ROQ: the canonical resource identifier R-75E8-YGGN
+  defines is sourced from the environment variable
+  `HAL_RESOURCE_IDENTIFIER`. The variable is required: when it is
+  unset or empty, `hal serve` fails loudly per R-LWCN-ZBXO with a
+  clear error and never begins accepting requests. The service
+  does not provide a default value, does not derive the identifier
+  from the bound interface (`--ip`), the bound port (`--port`),
+  the request's `Host` header, the request URL, or any other
+  runtime signal — every place the spec calls for the canonical
+  identifier reads exactly the string the operator supplied. The
+  value must include the MCP endpoint path component R-7A9U-HJFF
+  pins (`/mcp`); a value whose path component is absent, empty,
+  or differs from `/mcp` is rejected at startup with the same
+  fail-loudly contract. The operator picks the scheme, host, and
+  port that match how clients externally reach the service: a
+  developer running `hal serve` bound to `127.0.0.1:3000` but
+  reaching the service through `http://localhost:3000` sets
+  `HAL_RESOURCE_IDENTIFIER=http://localhost:3000/mcp`, not
+  `http://127.0.0.1:3000/mcp`. The variable is not classified as
+  a secret; the startup banner R-NQ3G-K0CQ pins reports its
+  effective value verbatim.
+- R-E5GH-PN6G: at the moment a token record is written, the
+  difference between the record's `expires_at` and `issued_at` equals
   the lifetime defined for that token kind exactly: one hour for an
   access token (R-TNXJ-ZWQ0), thirty days for a refresh token
   (R-8UAA-YKR9). Both timestamps are taken from a single clock
@@ -406,8 +747,8 @@ provider; clients never see Google directly.
   failure causes the spec separately defines: no token presented,
   token malformed, token not found in the store, token expired
   (R-TNXJ-ZWQ0), token chain revoked (R-9HGE-87UG / R-A26O-QBG9),
-  and token's recorded resource binding does not match (R-3UT3-IKZG
-  / R-DH2I-28CK). Each cause yields its own distinct
+  and token's recorded resource binding does not match (R-75E8-YGGN
+  / R-76M5-C87C). Each cause yields its own distinct
   `error_description` string; the service does not collapse two or
   more causes into a single placeholder reason such as `"expired"`.
   The exact wording of each description is HOW; the property is
@@ -416,7 +757,7 @@ provider; clients never see Google directly.
   refreshing (genuinely expired) and restarting the auth flow
   (revoked, wrong resource, unknown).
 - R-AYLJ-8SYX: any cookie the service uses to identify a browser
-  session — including the one R-ETP6-60VA binds `state` against —
+  session — including the one R-T37L-4J01 binds `state` against —
   is set with `HttpOnly` and `SameSite=Lax`. The cookie additionally
   carries `Secure` when the response is served over HTTPS — detected
   via the same forwarded-protocol signal R-ID5L-BSJM uses to gate
@@ -426,7 +767,7 @@ provider; clients never see Google directly.
   the OAuth round-trip; without this dispensation, modern browsers
   refuse to store a `Secure` cookie set over `http://`, the session
   evaporates between the authorize redirect and the Google callback,
-  and the state-binding check (R-ETP6-60VA) rejects every callback
+  and the state-binding check (R-T37L-4J01) rejects every callback
   in dev. The `Secure` property is therefore conditional on having
   actually been served over HTTPS, exactly the way R-ID5L-BSJM
   treats HSTS: present in production, absent locally. `SameSite=Lax`
@@ -438,7 +779,7 @@ provider; clients never see Google directly.
   login, so a session ID an attacker may have planted in the
   victim's browser before the flow began is no longer valid
   afterwards. Without these attributes, the browser-session premise
-  R-ETP6-60VA depends on does not hold: a non-`HttpOnly` cookie is
+  R-T37L-4J01 depends on does not hold: a non-`HttpOnly` cookie is
   reachable from page-level script; under HTTPS, a non-`Secure`
   cookie can travel in plaintext; a missing `SameSite` lets
   cross-site requests ride the session.
