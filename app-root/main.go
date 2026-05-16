@@ -635,6 +635,8 @@ func openCounterDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+type databaseOpener func(string) (*sql.DB, error)
+
 // attach binds a backing database to the counter and loads the current
 // stored value from the database into the in-memory field. After attach
 // returns, every successful increment and decrement persists the new
@@ -2877,7 +2879,8 @@ func configuredGoogleIDP(servingIDP googleIDP) googleIDP {
 }
 
 func main() {
-	os.Exit(runWithEnvAndClock(os.Args[1:], os.Stdout, os.Stderr, os.LookupEnv, realAppClock{}))
+	os.Exit(runWithEnvClockAndDatabaseOpener(
+		os.Args[1:], os.Stdout, os.Stderr, os.LookupEnv, realAppClock{}, openCounterDB))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -2889,13 +2892,23 @@ func runWithEnv(args []string, stdout, stderr io.Writer, lookup envLookup) int {
 }
 
 func runWithEnvAndClock(args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock) int {
+	return runWithEnvClockAndDatabaseOpener(args, stdout, stderr, lookup, clock, openCounterDB)
+}
+
+func runWithEnvClockAndDatabaseOpener(
+	args []string,
+	stdout, stderr io.Writer,
+	lookup envLookup,
+	clock appClock,
+	openDatabase databaseOpener,
+) int {
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "serve":
-		return cmdServeWithEnvAndClock(args[1:], stdout, stderr, lookup, clock)
+		return cmdServeWithEnvClockAndDatabaseOpener(args[1:], stdout, stderr, lookup, clock, openDatabase)
 	case "reset":
 		return cmdReset(args[1:], stdout, stderr)
 	case "version":
@@ -2945,9 +2958,19 @@ func cmdServeWithEnv(args []string, stdout, stderr io.Writer, lookup envLookup) 
 }
 
 func cmdServeWithEnvAndClock(args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock) int {
+	return cmdServeWithEnvClockAndDatabaseOpener(args, stdout, stderr, lookup, clock, openCounterDB)
+}
+
+func cmdServeWithEnvClockAndDatabaseOpener(
+	args []string,
+	stdout, stderr io.Writer,
+	lookup envLookup,
+	clock appClock,
+	openDatabase databaseOpener,
+) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServeWithEnvAndClock(ctx, args, stdout, stderr, lookup, clock)
+	return runServeWithEnvClockAndDatabaseOpener(ctx, args, stdout, stderr, lookup, clock, openDatabase)
 }
 
 func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -2963,6 +2986,17 @@ func runServeWithEnv(
 func runServeWithEnvAndClock(
 	ctx context.Context, args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock,
 ) int {
+	return runServeWithEnvClockAndDatabaseOpener(ctx, args, stdout, stderr, lookup, clock, openCounterDB)
+}
+
+func runServeWithEnvClockAndDatabaseOpener(
+	ctx context.Context,
+	args []string,
+	stdout, stderr io.Writer,
+	lookup envLookup,
+	clock appClock,
+	openDatabase databaseOpener,
+) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	port := fs.Int("port", 3000, "TCP port to listen on")
@@ -2970,6 +3004,9 @@ func runServeWithEnvAndClock(
 	dbPath := fs.String("db", "./hal.db", "path to the SQLite database file")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if openDatabase == nil {
+		openDatabase = openCounterDB
 	}
 	prevClock := setAppClock(clock)
 	defer setAppClock(prevClock)
@@ -2989,7 +3026,7 @@ func runServeWithEnvAndClock(
 	// write a stray hal.db file into the test working directory through
 	// the counter persistence binding.
 	if !testing.Testing() {
-		db, err := openCounterDB(*dbPath)
+		db, err := openDatabase(*dbPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: open db %q: %v\n", *dbPath, err)
 			return 1
