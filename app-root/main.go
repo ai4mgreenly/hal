@@ -34,6 +34,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	websessionpkg "github.com/mgreenly/hal/websession"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -2489,24 +2490,21 @@ func (s *oauthTokenStorage) lookupAccessReason(plaintext string) (*oauthToken, s
 // appears only in the Set-Cookie response and is never persisted —
 // records are keyed by a cryptographic hash of the plaintext, mirroring
 // R-CUUP-REQT's posture for OAuth tokens.
-type webSession struct {
-	ownerEmail string
-	issuedAt   time.Time
-	expiresAt  time.Time
-	// lastSeenAt advances on each successful lookup and feeds the idle
-	// ceiling per R-KJ15-9P17.
-	lastSeenAt time.Time
-	revokedAt  time.Time
-}
-
-type webSessionStorage struct {
-	mu sync.Mutex
-	m  map[string]*webSession
-	db *sql.DB
-}
+type webSession = websessionpkg.Session
+type webSessionStorage = websessionpkg.Store
 
 func newWebSessionStorage() *webSessionStorage {
-	return &webSessionStorage{m: map[string]*webSession{}}
+	return websessionpkg.New(websessionpkg.Options{
+		Now: func() time.Time {
+			return webSessionNow()
+		},
+		AbsoluteTTL: func() time.Duration {
+			return authCfg().WebSessionAbsoluteTTL
+		},
+		IdleTTL: func() time.Duration {
+			return authCfg().WebSessionIdleTTL
+		},
+	})
 }
 
 type serveWebSessionStoreKey struct{}
@@ -2528,7 +2526,7 @@ func webSessionStoreFromContext(ctx context.Context) *webSessionStorage {
 var webSessionNow = appNow
 
 // webSessionCookieName carries the plaintext session identifier.
-const webSessionCookieName = "hal_session"
+const webSessionCookieName = websessionpkg.CookieName
 
 // The web-session ceilings R-KJ15-9P17 pins — the 12-hour absolute cap
 // from issue and the 1-hour idle cap from last successful authenticated
@@ -2536,159 +2534,6 @@ const webSessionCookieName = "hal_session"
 // (authCfg().WebSessionAbsoluteTTL, authCfg().WebSessionIdleTTL). The
 // cookie's MaxAge matches the absolute cap so the browser drops the
 // cookie at the same instant.
-
-func webSessionHash(plaintext string) string {
-	sum := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(sum[:])
-}
-
-// issue records a session for the given owner email and returns the
-// plaintext identifier the caller writes to the user-agent's cookie
-// store. The plaintext is not retained by the service (R-SLGL-B5B4).
-func (s *webSessionStorage) issue(ownerEmail string) (string, error) {
-	var buf [32]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	plaintext := hex.EncodeToString(buf[:])
-	hash := webSessionHash(plaintext)
-	now := webSessionNow()
-	rec := &webSession{
-		ownerEmail: ownerEmail,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().WebSessionAbsoluteTTL),
-		lastSeenAt: now,
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.db != nil {
-		if err := s.upsertLocked(hash, rec); err != nil {
-			return "", err
-		}
-	}
-	if s.m == nil {
-		s.m = map[string]*webSession{}
-	}
-	s.m[hash] = rec
-	return plaintext, nil
-}
-
-// lookup returns the session record for the given plaintext cookie value
-// if one exists and is currently active (not revoked, not past its
-// absolute expiry). Returns nil otherwise. R-GUEU-LKL1's consumer of the
-// hal_session cookie reads through here so the index page only reflects
-// auth-state affordances for visitors with a live session.
-func (s *webSessionStorage) lookup(plaintext string) *webSession {
-	if plaintext == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.m[webSessionHash(plaintext)]
-	if !ok {
-		return nil
-	}
-	if !rec.revokedAt.IsZero() {
-		return nil
-	}
-	now := webSessionNow()
-	if !now.Before(rec.expiresAt) {
-		return nil
-	}
-	if !now.Before(rec.lastSeenAt.Add(authCfg().WebSessionIdleTTL)) {
-		return nil
-	}
-	rec.lastSeenAt = now
-	if s.db != nil {
-		_, _ = s.db.Exec(
-			`UPDATE web_sessions SET last_seen_at = ? WHERE session_hash = ?`,
-			rec.lastSeenAt.UnixNano(), webSessionHash(plaintext))
-	}
-	return rec
-}
-
-// revoke marks the session matching plaintext as revoked. A missing or
-// already-revoked entry is a no-op — logout is idempotent and tolerates
-// a presented cookie that no longer maps to a live record (R-FZ10-BE37).
-// R-0XJ4-5MSL: this writes only to the web-session store; it never reads
-// or writes any MCP token chain store.
-func (s *webSessionStorage) revoke(plaintext string) {
-	if plaintext == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.m[webSessionHash(plaintext)]
-	if !ok {
-		return
-	}
-	if rec.revokedAt.IsZero() {
-		rec.revokedAt = webSessionNow()
-		if s.db != nil {
-			_, _ = s.db.Exec(
-				`UPDATE web_sessions SET revoked_at = ? WHERE session_hash = ?`,
-				rec.revokedAt.UnixNano(), webSessionHash(plaintext))
-		}
-	}
-}
-
-// R-8CBQ-IKKA: web-session records are loaded from and written through to
-// SQLite so a valid hal_session cookie remains known across process
-// restarts against the same database. The plaintext cookie value is never
-// stored; the table is keyed by the same SHA-256 hash lookup uses.
-func (s *webSessionStorage) attach(db *sql.DB) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows, err := db.Query(
-		`SELECT session_hash, owner_email, issued_at, expires_at, ` +
-			`last_seen_at, revoked_at FROM web_sessions`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	loaded := map[string]*webSession{}
-	for rows.Next() {
-		var hash, owner string
-		var issued, expires, lastSeen int64
-		var revoked sql.NullInt64
-		if err := rows.Scan(&hash, &owner, &issued, &expires,
-			&lastSeen, &revoked); err != nil {
-			return err
-		}
-		rec := &webSession{
-			ownerEmail: owner,
-			issuedAt:   time.Unix(0, issued),
-			expiresAt:  time.Unix(0, expires),
-			lastSeenAt: time.Unix(0, lastSeen),
-		}
-		if revoked.Valid {
-			rec.revokedAt = time.Unix(0, revoked.Int64)
-		}
-		loaded[hash] = rec
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	s.m = loaded
-	s.db = db
-	return nil
-}
-
-func (s *webSessionStorage) upsertLocked(hash string, rec *webSession) error {
-	var revoked any
-	if !rec.revokedAt.IsZero() {
-		revoked = rec.revokedAt.UnixNano()
-	}
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO web_sessions (`+
-			`session_hash, owner_email, issued_at, expires_at, `+
-			`last_seen_at, revoked_at`+
-			`) VALUES (?, ?, ?, ?, ?, ?)`,
-		hash, rec.ownerEmail, rec.issuedAt.UnixNano(),
-		rec.expiresAt.UnixNano(), rec.lastSeenAt.UnixNano(), revoked)
-	return err
-}
 
 // configuredGoogleIDP returns the Google identity provider wired for the
 // current request. R-W3K0-QD0E pins production to the real
@@ -2858,7 +2703,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 		fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
 		return 1
 	}
-	if err := servingWebSessions.attach(db); err != nil {
+	if err := servingWebSessions.Attach(db); err != nil {
 		fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
 		return 1
 	}
@@ -3119,14 +2964,14 @@ func handleIndexWithCounterAndStores(
 	// (R-GVMQ-ZCBQ pins the no-session "disabled" treatment).
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.lookup(c.Value)
+		session = sessions.Lookup(c.Value)
 	}
 	var bannerAuth, counterDisabled string
 	if session != nil {
 		bannerAuth = `<div class="banner-auth">` +
 			// R-TEP7-Q6UT: the Google email is externally sourced
 			// identity text, so it is escaped before interpolation.
-			`<span class="auth-email">` + htmlEscape(session.ownerEmail) + `</span>` +
+			`<span class="auth-email">` + htmlEscape(session.OwnerEmail()) + `</span>` +
 			// R-A2L2-1NA1: Sign out is a real form POST, not a JS-only
 			// click handler or href, so it works when scripts are absent.
 			`<form method="post" action="/logout" class="auth-form">` +
@@ -3151,7 +2996,7 @@ func handleIndexWithCounterAndStores(
 	// row instead of reserving vertical space for absent agent rows.
 	var agentsBlock string
 	if session != nil {
-		chains := tokens.liveAgentChainsR_0NRX_3GV1(session.ownerEmail, clients)
+		chains := tokens.liveAgentChainsR_0NRX_3GV1(session.OwnerEmail(), clients)
 		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		if len(chains) > 0 {
 			var b strings.Builder
@@ -3882,7 +3727,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// R-CXJ2-R3BN: mint a web session and set the session cookie. The
 		// plaintext identifier appears only here, in the Set-Cookie response;
 		// the store keeps a hash (R-SLGL-B5B4).
-		plaintext, err := sessions.issue(identity.Email)
+		plaintext, err := sessions.Issue(identity.Email)
 		if err != nil {
 			http.Error(w, "session issuance failed",
 				http.StatusInternalServerError)
@@ -3937,12 +3782,12 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func handleLogoutWithSessionStore(sessions *webSessionStorage, w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		if sess := sessions.lookup(c.Value); sess != nil &&
+		if sess := sessions.Lookup(c.Value); sess != nil &&
 			!sameOriginBrowserMutationR_R4RG_O4Y9(r) {
 			writeSameOriginForbiddenR_R4RG_O4Y9(w)
 			return
 		}
-		sessions.revoke(c.Value)
+		sessions.Revoke(c.Value)
 		http.SetCookie(w, &http.Cookie{
 			Name:     webSessionCookieName,
 			Value:    "",
@@ -3975,7 +3820,7 @@ func handleAgentsRevokeWithStores(
 ) {
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.lookup(c.Value)
+		session = sessions.Lookup(c.Value)
 	}
 	if session == nil {
 		writeMutationUnauthorized(w, "invalid_token",
@@ -3996,7 +3841,7 @@ func handleAgentsRevokeWithStores(
 		return
 	}
 	chainID := r.PostForm.Get("chain_id")
-	if !tokens.revokeChainR_D0XD_1YT0(chainID, session.ownerEmail) {
+	if !tokens.revokeChainR_D0XD_1YT0(chainID, session.OwnerEmail()) {
 		http.Error(w, "chain not found", http.StatusNotFound)
 		return
 	}
@@ -4102,14 +3947,14 @@ func handleAgentsStreamWithStores(
 ) {
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.lookup(c.Value)
+		session = sessions.Lookup(c.Value)
 	}
 	if session == nil {
 		http.Error(w, "web session required",
 			http.StatusUnauthorized)
 		return
 	}
-	email := session.ownerEmail
+	email := session.OwnerEmail()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -4802,9 +4647,9 @@ func checkMutationAuthWithStores(
 	cookieRejectedByOrigin := false
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
 		cookiePresented = true
-		if sess := sessions.lookup(c.Value); sess != nil {
+		if sess := sessions.Lookup(c.Value); sess != nil {
 			if sameOriginBrowserMutationR_R4RG_O4Y9(r) {
-				setAuthedUserR_D56D_EBP3(r, sess.ownerEmail)
+				setAuthedUserR_D56D_EBP3(r, sess.OwnerEmail())
 				return true, 0, "", ""
 			}
 			cookieRejectedByOrigin = true

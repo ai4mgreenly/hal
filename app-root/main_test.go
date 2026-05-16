@@ -111,11 +111,7 @@ func detachTestStoresFromDB(db *sql.DB) {
 		oauthTokenStore.db = nil
 	}
 	oauthTokenStore.mu.Unlock()
-	webSessionStore.mu.Lock()
-	if webSessionStore.db == db {
-		webSessionStore.db = nil
-	}
-	webSessionStore.mu.Unlock()
+	webSessionStore.DetachDBIf(db)
 }
 
 // R-74NI-T9CI: no subcommand prints a usage summary listing the three
@@ -520,7 +516,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	originalSessions := webSessionStore
 	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
-	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+	webSessionStore = newWebSessionStorage()
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
 		oauthTokenStore = originalTokens
@@ -553,7 +549,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	}
 
 	email := "rvkzd@example.com"
-	sessionPlaintext, err := webSessionStore.issue(email)
+	sessionPlaintext, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -5798,7 +5794,7 @@ func TestR_K7DK_LSJ6_serve_exits_within_1s_on_signal(t *testing.T) {
 // R-53Z2-DNB1 stays exercised in the success path.
 func authedCounterPost(t *testing.T, url string) *http.Response {
 	t.Helper()
-	plaintext, err := webSessionStore.issue("test@example.com")
+	plaintext, err := webSessionStore.Issue("test@example.com")
 	if err != nil {
 		t.Fatalf("authedCounterPost: issue session: %v", err)
 	}
@@ -6043,7 +6039,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 	originalSessions := webSessionStore
 	isolatedCounter := counterpkg.New()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
-	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+	webSessionStore = newWebSessionStorage()
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
 		webSessionStore = originalSessions
@@ -6724,7 +6720,7 @@ func TestR_OCH3_8FQ8_mutation_accepts_either_auth_mode(t *testing.T) {
 	}
 
 	issueValidCookie := func() string {
-		plaintext, err := webSessionStore.issue("owner@example.com")
+		plaintext, err := webSessionStore.Issue("owner@example.com")
 		if err != nil {
 			t.Fatalf("issue web session: %v (R-OCH3-8FQ8)", err)
 		}
@@ -8233,11 +8229,11 @@ func TestR_7MLK_O6I5_state_changing_browser_actions_reject_get(t *testing.T) {
 		}
 	})
 
-	sessionPlaintext, err := webSessionStore.issue("r-7mlk-o6i5@example.com")
+	sessionPlaintext, err := webSessionStore.Issue("r-7mlk-o6i5@example.com")
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v (R-7MLK-O6I5)", err)
 	}
-	t.Cleanup(func() { webSessionStore.revoke(sessionPlaintext) })
+	t.Cleanup(func() { webSessionStore.Revoke(sessionPlaintext) })
 
 	client := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -8269,7 +8265,7 @@ func TestR_7MLK_O6I5_state_changing_browser_actions_reject_get(t *testing.T) {
 			t.Fatalf("GET %s Allow = %q, want POST (R-7MLK-O6I5)", path, got)
 		}
 	}
-	if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+	if got := webSessionStore.Lookup(sessionPlaintext); got == nil {
 		t.Fatalf("GET /logout revoked the session (R-7MLK-O6I5)")
 	}
 }
@@ -8293,7 +8289,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 	}
 
 	t.Run("counter_cookie_mutation_rejects_mismatched_origin_before_mutating", func(t *testing.T) {
-		sessionPlaintext, err := webSessionStore.issue(email)
+		sessionPlaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
 		}
@@ -8321,7 +8317,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 	})
 
 	t.Run("logout_rejects_mismatched_referer_before_revoking_session", func(t *testing.T) {
-		sessionPlaintext, err := webSessionStore.issue(email)
+		sessionPlaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
 		}
@@ -8334,13 +8330,13 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 			t.Fatalf("cross-origin logout status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
 		}
-		if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+		if got := webSessionStore.Lookup(sessionPlaintext); got == nil {
 			t.Fatalf("cross-origin logout revoked the session (R-R4RG-O4Y9)")
 		}
 	})
 
 	t.Run("agents_revoke_rejects_mismatched_origin_before_revoking_chain", func(t *testing.T) {
-		sessionPlaintext, err := webSessionStore.issue(email)
+		sessionPlaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
 		}
@@ -8584,11 +8580,11 @@ func TestR_X0O1_BJ2H_unknown_paths_return_404_without_action(t *testing.T) {
 // it has no read or write effect on any MCP token chain.
 func TestR_0XJ4_5MSL_R_FZ10_BE37_logout_revokes_only_web_session(t *testing.T) {
 	t.Run("logout_revokes_web_session_and_clears_cookie", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("user@example.com")
+		plaintext, err := webSessionStore.Issue("user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v (R-FZ10-BE37)", err)
 		}
-		if got := webSessionStore.lookup(plaintext); got == nil {
+		if got := webSessionStore.Lookup(plaintext); got == nil {
 			t.Fatalf("session not found after issue (R-FZ10-BE37)")
 		}
 
@@ -8624,7 +8620,7 @@ func TestR_0XJ4_5MSL_R_FZ10_BE37_logout_revokes_only_web_session(t *testing.T) {
 		}
 
 		// The session is revoked: lookup returns nil.
-		if got := webSessionStore.lookup(plaintext); got != nil {
+		if got := webSessionStore.Lookup(plaintext); got != nil {
 			t.Fatalf("session still validates after logout (R-FZ10-BE37)")
 		}
 	})
@@ -9033,9 +9029,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 		EmailVerified: false,
 	}}
 
-	webSessionStore.mu.Lock()
-	webSessionStore.m = map[string]*webSession{}
-	webSessionStore.mu.Unlock()
+	webSessionStore.ResetForTest()
 	authCodes := newOAuthAuthCodeStorage()
 	states := newOAuthStateStorage()
 
@@ -9083,9 +9077,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 					"(R-EMW1-D8A0)", c.Value)
 			}
 		}
-		webSessionStore.mu.Lock()
-		gotSessions := len(webSessionStore.m)
-		webSessionStore.mu.Unlock()
+		gotSessions := webSessionStore.Count()
 		if gotSessions != 0 {
 			t.Fatalf("web sessions after unverified callback = %d, want 0 "+
 				"(R-EMW1-D8A0)", gotSessions)
@@ -9172,9 +9164,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			t.Fatalf("auth codes after unverified callback = %d, want 0 "+
 				"(R-EMW1-D8A0)", gotCodes)
 		}
-		webSessionStore.mu.Lock()
-		gotSessions := len(webSessionStore.m)
-		webSessionStore.mu.Unlock()
+		gotSessions := webSessionStore.Count()
 		if gotSessions != 0 {
 			t.Fatalf("web sessions after unverified mcp callback = %d, want 0 "+
 				"(R-EMW1-D8A0)", gotSessions)
@@ -9265,16 +9255,14 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 		}
 		// The plaintext cookie value must hash to a record in the store
 		// (R-SLGL-B5B4: persisted by hash, owner email recorded).
-		webSessionStore.mu.Lock()
-		rec := webSessionStore.m[webSessionHash(c.Value)]
-		webSessionStore.mu.Unlock()
+		rec := webSessionStore.RecordForPlaintextForTest(c.Value)
 		if rec == nil {
 			t.Fatalf("session cookie value does not resolve to a stored "+
 				"record (R-CXJ2-R3BN / R-SLGL-B5B4); cookie=%q", c.Value)
 		}
-		if rec.ownerEmail != "user@example.com" {
+		if rec.OwnerEmail() != "user@example.com" {
 			t.Errorf("recorded ownerEmail = %q, want %q (R-CXJ2-R3BN)",
-				rec.ownerEmail, "user@example.com")
+				rec.OwnerEmail(), "user@example.com")
 		}
 	})
 
@@ -9398,17 +9386,15 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 
 		// The recorded session's owner must be the Google email the fake
 		// IDP returned — the email is the identity the service stores.
-		webSessionStore.mu.Lock()
-		rec := webSessionStore.m[webSessionHash(sessionCookie.Value)]
-		webSessionStore.mu.Unlock()
+		rec := webSessionStore.RecordForPlaintextForTest(sessionCookie.Value)
 		if rec == nil {
 			t.Fatalf("session cookie does not resolve to a stored record " +
 				"(R-8GJG-64MR)")
 		}
-		if rec.ownerEmail != "user@example.com" {
+		if rec.OwnerEmail() != "user@example.com" {
 			t.Errorf("recorded ownerEmail = %q, want %q — the Google email "+
 				"must be the recorded identity (R-8GJG-64MR)",
-				rec.ownerEmail, "user@example.com")
+				rec.OwnerEmail(), "user@example.com")
 		}
 
 		// And the rest of the application sees that email as the
@@ -9478,7 +9464,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 // placeholder identity, and keeps the −/+ buttons visibly disabled.
 func TestR_GUEU_LKL1_index_reflects_web_session_state(t *testing.T) {
 	t.Run("signed_in_visitor_sees_email_and_signout_and_enabled_buttons", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("dave@discovery.one")
+		plaintext, err := webSessionStore.Issue("dave@discovery.one")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
@@ -9587,14 +9573,14 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 
 	t.Run("idle_ceiling_expires_at_one_hour_of_inactivity", func(t *testing.T) {
 		webSessionNow = func() time.Time { return start }
-		plaintext, err := webSessionStore.issue("dave@discovery.one")
+		plaintext, err := webSessionStore.Issue("dave@discovery.one")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
 		webSessionNow = func() time.Time {
 			return start.Add(authCfg().WebSessionIdleTTL + time.Second)
 		}
-		if rec := webSessionStore.lookup(plaintext); rec != nil {
+		if rec := webSessionStore.Lookup(plaintext); rec != nil {
 			t.Errorf("session still live 1h+1s after issue with no activity "+
 				"(R-KJ15-9P17); rec=%+v", rec)
 		}
@@ -9602,19 +9588,19 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 
 	t.Run("idle_clock_restarts_on_each_successful_lookup", func(t *testing.T) {
 		webSessionNow = func() time.Time { return start }
-		plaintext, err := webSessionStore.issue("dave@discovery.one")
+		plaintext, err := webSessionStore.Issue("dave@discovery.one")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
 		// 30 minutes in: still live, lastSeenAt advances.
 		webSessionNow = func() time.Time { return start.Add(30 * time.Minute) }
-		if rec := webSessionStore.lookup(plaintext); rec == nil {
+		if rec := webSessionStore.Lookup(plaintext); rec == nil {
 			t.Fatalf("session expired 30m after issue (R-KJ15-9P17)")
 		}
 		// 50 more minutes (80m total from issue, 50m from last lookup):
 		// still live because the 1h clock restarted at the prior lookup.
 		webSessionNow = func() time.Time { return start.Add(80 * time.Minute) }
-		if rec := webSessionStore.lookup(plaintext); rec == nil {
+		if rec := webSessionStore.Lookup(plaintext); rec == nil {
 			t.Fatalf("idle clock did not restart on prior lookup " +
 				"(R-KJ15-9P17); 80m total / 50m since last seen")
 		}
@@ -9622,7 +9608,7 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 		webSessionNow = func() time.Time {
 			return start.Add(80*time.Minute + authCfg().WebSessionIdleTTL + time.Second)
 		}
-		if rec := webSessionStore.lookup(plaintext); rec != nil {
+		if rec := webSessionStore.Lookup(plaintext); rec != nil {
 			t.Errorf("session still live 1h+1s after last successful lookup "+
 				"(R-KJ15-9P17); rec=%+v", rec)
 		}
@@ -9631,7 +9617,7 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 	t.Run("absolute_ceiling_expires_at_twelve_hours_regardless_of_activity",
 		func(t *testing.T) {
 			webSessionNow = func() time.Time { return start }
-			plaintext, err := webSessionStore.issue("dave@discovery.one")
+			plaintext, err := webSessionStore.Issue("dave@discovery.one")
 			if err != nil {
 				t.Fatalf("issue: %v", err)
 			}
@@ -9639,7 +9625,7 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 			for m := 30; m < int(authCfg().WebSessionAbsoluteTTL/time.Minute); m += 30 {
 				offset := time.Duration(m) * time.Minute
 				webSessionNow = func() time.Time { return start.Add(offset) }
-				if rec := webSessionStore.lookup(plaintext); rec == nil {
+				if rec := webSessionStore.Lookup(plaintext); rec == nil {
 					t.Fatalf("session prematurely expired at +%dm despite "+
 						"continuous activity (R-KJ15-9P17)", m)
 				}
@@ -9649,7 +9635,7 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 			webSessionNow = func() time.Time {
 				return start.Add(authCfg().WebSessionAbsoluteTTL + time.Second)
 			}
-			if rec := webSessionStore.lookup(plaintext); rec != nil {
+			if rec := webSessionStore.Lookup(plaintext); rec != nil {
 				t.Errorf("session still live 12h+1s after issue despite "+
 					"absolute ceiling (R-KJ15-9P17); rec=%+v", rec)
 			}
@@ -9672,11 +9658,11 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open first db: %v (R-8CBQ-IKKA)", err)
 	}
-	var first webSessionStorage
-	if err := first.attach(db1); err != nil {
+	first := newWebSessionStorage()
+	if err := first.Attach(db1); err != nil {
 		t.Fatalf("first attach: %v (R-8CBQ-IKKA)", err)
 	}
-	plaintext, err := first.issue("restart-session@example.com")
+	plaintext, err := first.Issue("restart-session@example.com")
 	if err != nil {
 		t.Fatalf("issue session: %v (R-8CBQ-IKKA)", err)
 	}
@@ -9689,21 +9675,21 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen db: %v (R-8CBQ-IKKA)", err)
 	}
-	var restarted webSessionStorage
-	if err := restarted.attach(db2); err != nil {
+	restarted := newWebSessionStorage()
+	if err := restarted.Attach(db2); err != nil {
 		t.Fatalf("restart attach: %v (R-8CBQ-IKKA)", err)
 	}
-	rec := restarted.lookup(plaintext)
+	rec := restarted.Lookup(plaintext)
 	if rec == nil {
 		t.Fatalf("session cookie became unknown after restart " +
 			"(R-8CBQ-IKKA)")
 	}
-	if rec.ownerEmail != "restart-session@example.com" {
+	if rec.OwnerEmail() != "restart-session@example.com" {
 		t.Fatalf("ownerEmail after restart = %q, want %q (R-8CBQ-IKKA)",
-			rec.ownerEmail, "restart-session@example.com")
+			rec.OwnerEmail(), "restart-session@example.com")
 	}
-	restarted.revoke(plaintext)
-	if got := restarted.lookup(plaintext); got != nil {
+	restarted.Revoke(plaintext)
+	if got := restarted.Lookup(plaintext); got != nil {
 		t.Fatalf("revoked session still validates before close " +
 			"(R-8CBQ-IKKA)")
 	}
@@ -9715,11 +9701,11 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen revoked db: %v (R-8CBQ-IKKA)", err)
 	}
-	var revoked webSessionStorage
-	if err := revoked.attach(db3); err != nil {
+	revoked := newWebSessionStorage()
+	if err := revoked.Attach(db3); err != nil {
 		t.Fatalf("revoked attach: %v (R-8CBQ-IKKA)", err)
 	}
-	if got := revoked.lookup(plaintext); got != nil {
+	if got := revoked.Lookup(plaintext); got != nil {
 		t.Fatalf("revoked session validated after restart " +
 			"(R-8CBQ-IKKA)")
 	}
@@ -9731,11 +9717,11 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open reset setup db: %v (R-8CBQ-IKKA)", err)
 	}
-	var resetSetup webSessionStorage
-	if err := resetSetup.attach(db4); err != nil {
+	resetSetup := newWebSessionStorage()
+	if err := resetSetup.Attach(db4); err != nil {
 		t.Fatalf("reset setup attach: %v (R-8CBQ-IKKA)", err)
 	}
-	resetPlaintext, err := resetSetup.issue("reset-session@example.com")
+	resetPlaintext, err := resetSetup.Issue("reset-session@example.com")
 	if err != nil {
 		t.Fatalf("issue reset session: %v (R-8CBQ-IKKA)", err)
 	}
@@ -9753,11 +9739,11 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 		t.Fatalf("open after reset: %v (R-8CBQ-IKKA)", err)
 	}
 	defer db5.Close()
-	var afterReset webSessionStorage
-	if err := afterReset.attach(db5); err != nil {
+	afterReset := newWebSessionStorage()
+	if err := afterReset.Attach(db5); err != nil {
 		t.Fatalf("after reset attach: %v (R-8CBQ-IKKA)", err)
 	}
-	if got := afterReset.lookup(resetPlaintext); got != nil {
+	if got := afterReset.Lookup(resetPlaintext); got != nil {
 		t.Fatalf("session survived hal reset (R-8CBQ-IKKA)")
 	}
 }
@@ -12048,28 +12034,17 @@ func TestR_SLGL_B5B4_web_session_store_properties(t *testing.T) {
 	})
 
 	t.Run("store_keys_records_by_hash_not_plaintext", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("user-slgl@example.com")
+		plaintext, err := webSessionStore.Issue("user-slgl@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v (R-SLGL-B5B4)", err)
 		}
-		t.Cleanup(func() { webSessionStore.revoke(plaintext) })
+		t.Cleanup(func() { webSessionStore.Revoke(plaintext) })
 
-		webSessionStore.mu.Lock()
-		_, plaintextKeyed := webSessionStore.m[plaintext]
-		_, hashKeyed := webSessionStore.m[webSessionHash(plaintext)]
-		// Defense-in-depth: confirm no record's struct fields hold
+		plaintextKeyed := webSessionStore.HasPlaintextKeyForTest(plaintext)
+		hashKeyed := webSessionStore.HasHashKeyForTest(plaintext)
+		// Defense-in-depth: confirm no record's string fields hold
 		// the plaintext.
-		var plaintextLeaked bool
-		for _, rec := range webSessionStore.m {
-			rv := reflect.ValueOf(*rec)
-			for i := 0; i < rv.NumField(); i++ {
-				if rv.Field(i).Kind() == reflect.String &&
-					rv.Field(i).String() == plaintext {
-					plaintextLeaked = true
-				}
-			}
-		}
-		webSessionStore.mu.Unlock()
+		plaintextLeaked := webSessionStore.PlaintextLeakedForTest(plaintext)
 
 		if plaintextKeyed {
 			t.Errorf("webSessionStore is keyed by plaintext — must " +
@@ -12092,53 +12067,51 @@ func TestR_SLGL_B5B4_web_session_store_properties(t *testing.T) {
 		webSessionNow = func() time.Time { return fixed }
 		t.Cleanup(func() { webSessionNow = prev })
 
-		plaintext, err := webSessionStore.issue("owner-slgl@example.com")
+		plaintext, err := webSessionStore.Issue("owner-slgl@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v (R-SLGL-B5B4)", err)
 		}
-		t.Cleanup(func() { webSessionStore.revoke(plaintext) })
+		t.Cleanup(func() { webSessionStore.Revoke(plaintext) })
 
-		webSessionStore.mu.Lock()
-		rec := webSessionStore.m[webSessionHash(plaintext)]
-		webSessionStore.mu.Unlock()
+		rec := webSessionStore.RecordForPlaintextForTest(plaintext)
 		if rec == nil {
 			t.Fatalf("record missing after issue (R-SLGL-B5B4)")
 		}
-		if rec.ownerEmail != "owner-slgl@example.com" {
+		if rec.OwnerEmail() != "owner-slgl@example.com" {
 			t.Errorf("ownerEmail = %q, want %q (R-SLGL-B5B4)",
-				rec.ownerEmail, "owner-slgl@example.com")
+				rec.OwnerEmail(), "owner-slgl@example.com")
 		}
-		if !rec.issuedAt.Equal(fixed) {
+		if !rec.IssuedAt().Equal(fixed) {
 			t.Errorf("issuedAt = %v, want %v (R-SLGL-B5B4)",
-				rec.issuedAt, fixed)
+				rec.IssuedAt(), fixed)
 		}
-		if !rec.expiresAt.Equal(fixed.Add(authCfg().WebSessionAbsoluteTTL)) {
+		if !rec.ExpiresAt().Equal(fixed.Add(authCfg().WebSessionAbsoluteTTL)) {
 			t.Errorf("expiresAt = %v, want %v (R-SLGL-B5B4)",
-				rec.expiresAt, fixed.Add(authCfg().WebSessionAbsoluteTTL))
+				rec.ExpiresAt(), fixed.Add(authCfg().WebSessionAbsoluteTTL))
 		}
-		if !rec.revokedAt.IsZero() {
+		if !rec.RevokedAt().IsZero() {
 			t.Errorf("revokedAt = %v, want zero on a fresh record "+
-				"(R-SLGL-B5B4)", rec.revokedAt)
+				"(R-SLGL-B5B4)", rec.RevokedAt())
 		}
 	})
 
 	t.Run("lookup_is_single_hash_lookup_accepting_live_records", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("lookup-slgl@example.com")
+		plaintext, err := webSessionStore.Issue("lookup-slgl@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v (R-SLGL-B5B4)", err)
 		}
-		t.Cleanup(func() { webSessionStore.revoke(plaintext) })
+		t.Cleanup(func() { webSessionStore.Revoke(plaintext) })
 
-		if got := webSessionStore.lookup(plaintext); got == nil {
+		if got := webSessionStore.Lookup(plaintext); got == nil {
 			t.Fatalf("lookup of live session returned nil "+
 				"(R-SLGL-B5B4); plaintext=%q", plaintext)
 		}
-		if got := webSessionStore.lookup(plaintext + "x"); got != nil {
+		if got := webSessionStore.Lookup(plaintext + "x"); got != nil {
 			t.Errorf("lookup of unrelated plaintext returned a " +
 				"record — store must miss on hash mismatch " +
 				"(R-SLGL-B5B4)")
 		}
-		if got := webSessionStore.lookup(""); got != nil {
+		if got := webSessionStore.Lookup(""); got != nil {
 			t.Errorf("lookup of empty plaintext returned a record " +
 				"(R-SLGL-B5B4)")
 		}
@@ -12150,24 +12123,22 @@ func TestR_SLGL_B5B4_web_session_store_properties(t *testing.T) {
 		webSessionNow = func() time.Time { return fixed }
 		t.Cleanup(func() { webSessionNow = prev })
 
-		plaintext, err := webSessionStore.issue("revoke-slgl@example.com")
+		plaintext, err := webSessionStore.Issue("revoke-slgl@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v (R-SLGL-B5B4)", err)
 		}
 
-		webSessionStore.revoke(plaintext)
+		webSessionStore.Revoke(plaintext)
 
-		webSessionStore.mu.Lock()
-		rec := webSessionStore.m[webSessionHash(plaintext)]
-		webSessionStore.mu.Unlock()
+		rec := webSessionStore.RecordForPlaintextForTest(plaintext)
 		if rec == nil {
 			t.Fatalf("revoke removed the record — must update in " +
 				"place by setting revokedAt (R-SLGL-B5B4)")
 		}
-		if rec.revokedAt.IsZero() {
+		if rec.RevokedAt().IsZero() {
 			t.Errorf("revoke did not set revokedAt (R-SLGL-B5B4)")
 		}
-		if got := webSessionStore.lookup(plaintext); got != nil {
+		if got := webSessionStore.Lookup(plaintext); got != nil {
 			t.Errorf("revoked session still validates — same value " +
 				"must not be redeemable again (R-SLGL-B5B4)")
 		}
@@ -13783,7 +13754,7 @@ func TestR_A26O_QBG9_revocation_takes_effect_for_new_requests(t *testing.T) {
 // to the server and renders the visual cue on every observed update.
 func TestR_FY4A_3B1M_index_wires_counter_mutations(t *testing.T) {
 	t.Run("signed_in_index_wires_buttons_and_stream", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("dave@discovery.one")
+		plaintext, err := webSessionStore.Issue("dave@discovery.one")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
@@ -14660,7 +14631,7 @@ func TestR_D56D_EBP3_access_log_authed_user_field(t *testing.T) {
 	// Part 3: web-session-authenticated mutation logs the session
 	// owner's email.
 	const sessionEmail = "alice@example.com"
-	cookieValue, err := webSessionStore.issue(sessionEmail)
+	cookieValue, err := webSessionStore.Issue(sessionEmail)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -15954,7 +15925,10 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	}
 
 	dir := t.TempDir()
-	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css", "counter/counter.go"} {
+	for _, name := range []string{
+		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
+		"counter/counter.go", "websession/session.go",
+	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -16037,7 +16011,10 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	}
 
 	srcDir := t.TempDir()
-	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css", "counter/counter.go"} {
+	for _, name := range []string{
+		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
+		"counter/counter.go", "websession/session.go",
+	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -16488,11 +16465,11 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 	t.Run("logout_does_not_revoke_mcp_token_chain", func(t *testing.T) {
 		const email = "user@example.com"
 
-		sessionPlaintext, err := webSessionStore.issue(email)
+		sessionPlaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-0XJ4-5MSL)", err)
 		}
-		if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+		if got := webSessionStore.Lookup(sessionPlaintext); got == nil {
 			t.Fatalf("web session not found after issue (R-0XJ4-5MSL)")
 		}
 
@@ -16520,7 +16497,7 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 		}
 
 		// The web session is now revoked.
-		if got := webSessionStore.lookup(sessionPlaintext); got != nil {
+		if got := webSessionStore.Lookup(sessionPlaintext); got != nil {
 			t.Fatalf("web session still validates after logout " +
 				"(R-0XJ4-5MSL)")
 		}
@@ -16535,11 +16512,11 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 	t.Run("mcp_chain_revoke_does_not_end_web_session", func(t *testing.T) {
 		const email = "other@example.com"
 
-		sessionPlaintext, err := webSessionStore.issue(email)
+		sessionPlaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-0XJ4-5MSL)", err)
 		}
-		if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+		if got := webSessionStore.Lookup(sessionPlaintext); got == nil {
 			t.Fatalf("web session not found after issue (R-0XJ4-5MSL)")
 		}
 
@@ -16567,7 +16544,7 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 				"revoke (R-0XJ4-5MSL setup invariant)")
 		}
 		// The web session for the same email is untouched.
-		if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+		if got := webSessionStore.Lookup(sessionPlaintext); got == nil {
 			t.Fatalf("web session ended by MCP chain revoke; " +
 				"web session and MCP chain are supposed to be " +
 				"independent (R-0XJ4-5MSL)")
@@ -16656,7 +16633,7 @@ func TestR_0WB7_RV1W_banner_auth_placement_and_shape(t *testing.T) {
 
 	t.Run("signed_in_inert_email_plus_distinct_pill_sign_out", func(t *testing.T) {
 		email := "dave@discovery.one"
-		plaintext, err := webSessionStore.issue(email)
+		plaintext, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-0WB7-RV1W)", err)
 		}
@@ -16936,7 +16913,7 @@ func TestR_EJAP_XUSB_counter_card_structure(t *testing.T) {
 	})
 
 	t.Run("signed_in_buttons_enabled_same_hint", func(t *testing.T) {
-		plaintext, err := webSessionStore.issue("dave@discovery.one")
+		plaintext, err := webSessionStore.Issue("dave@discovery.one")
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-EJAP-XUSB)", err)
 		}
@@ -16995,7 +16972,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 
 	t.Run("signed_in_zero_chains_no_block", func(t *testing.T) {
 		email := "nochains-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17020,7 +16997,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 			email, "client-B", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17062,7 +17039,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 			other, "client-X", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh other: %v", err)
 		}
-		sess, err := webSessionStore.issue(mine)
+		sess, err := webSessionStore.Issue(mine)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17102,7 +17079,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 		}
 		oauthTokenStore.mu.Unlock()
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17179,7 +17156,7 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 			t.Fatalf("issued refresh has empty chainID")
 		}
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17238,7 +17215,7 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 			t.Fatalf("issued refresh has empty chainID")
 		}
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17280,7 +17257,7 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 		t.Fatalf("issued refresh has empty chainID")
 	}
 
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -17330,7 +17307,7 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 // text, not interpreted as markup, script, attributes, or URLs.
 func TestR_TEP7_Q6UT_signed_in_email_renders_as_inert_text(t *testing.T) {
 	email := `eve"><img src=x onerror="alert('owned')">&<script>bad()</script>@example.com`
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v (R-TEP7-Q6UT)", err)
 	}
@@ -17375,7 +17352,7 @@ func TestR_TEP7_Q6UT_signed_in_email_renders_as_inert_text(t *testing.T) {
 // submit button inside a POST /logout form and exposes no navigable
 // /logout href.
 func TestR_A2L2_1NA1_signed_in_sign_out_is_post_form_without_href(t *testing.T) {
-	sess, err := webSessionStore.issue("form-signout@example.com")
+	sess, err := webSessionStore.Issue("form-signout@example.com")
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v (R-A2L2-1NA1)", err)
 	}
@@ -17464,7 +17441,7 @@ func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 	}
 	renderIndex := func(t *testing.T, email string) string {
 		t.Helper()
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17626,7 +17603,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 			t.Fatalf("issueRefresh theirs: %v", err)
 		}
 		theirChain := chainIDFor(t, theirRefresh)
-		sess, err := webSessionStore.issue(mine)
+		sess, err := webSessionStore.Issue(mine)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17668,7 +17645,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 		}
 		_ = access
 		chainID := chainIDFor(t, refresh2)
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17686,7 +17663,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 		}
 		// R-0XJ4-5MSL holds in this direction too: the web session that
 		// drove the revoke is still live afterwards.
-		if got := webSessionStore.lookup(sess); got == nil {
+		if got := webSessionStore.Lookup(sess); got == nil {
 			t.Errorf("web session was ended by chain revoke — R-0XJ4-5MSL " +
 				"requires lifetime independence in this direction too")
 		}
@@ -17694,7 +17671,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 
 	t.Run("empty_chain_id_rejected", func(t *testing.T) {
 		email := "empty-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17820,7 +17797,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 
 	t.Run("snapshot_and_live_updates", func(t *testing.T) {
 		email := "stream-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -17897,7 +17874,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		mine := "scope-mine-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		other := "scope-other-" + agentsBlockRandomEmailToken(t) +
 			"@discovery.one"
-		sess, err := webSessionStore.issue(mine)
+		sess, err := webSessionStore.Issue(mine)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -18012,7 +17989,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 // later SSE snapshot contains the first live MCP token chain.
 func TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update(t *testing.T) {
 	email := "zero-one-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v (R-KSI8-M0JX)", err)
 	}
@@ -18098,7 +18075,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		// subscribing and never demonstrate the resource property.
 		email := "stream-budget-" + agentsBlockRandomEmailToken(t) +
 			"@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-T6VA-9U84)", err)
 		}
@@ -18184,7 +18161,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 
 		email := "dead-stream-" + agentsBlockRandomEmailToken(t) +
 			"@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-T6VA-9U84)", err)
 		}
@@ -18726,9 +18703,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			authCodes.mu.Lock()
 			authCodes.m = map[string]*oauthAuthCode{}
 			authCodes.mu.Unlock()
-			webSessionStore.mu.Lock()
-			beforeSessions := len(webSessionStore.m)
-			webSessionStore.mu.Unlock()
+			beforeSessions := webSessionStore.Count()
 
 			res := doCallback(t, state, bindingID)
 			defer res.Body.Close()
@@ -18744,9 +18719,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 						c.Value)
 				}
 			}
-			webSessionStore.mu.Lock()
-			afterSessions := len(webSessionStore.m)
-			webSessionStore.mu.Unlock()
+			afterSessions := webSessionStore.Count()
 			if afterSessions != beforeSessions {
 				t.Errorf("web-session count: before=%d after=%d "+
 					"(R-MUZJ-RD0L: mcp arm must not write web-session "+
@@ -18801,9 +18774,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 		func(t *testing.T) {
 			installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "allowed.example.org"})
 			_, state, bindingID, redirect, _, _, clientState, _ := driveAuthorize(t)
-			webSessionStore.mu.Lock()
-			beforeSessions := len(webSessionStore.m)
-			webSessionStore.mu.Unlock()
+			beforeSessions := webSessionStore.Count()
 
 			res := doCallback(t, state, bindingID)
 			defer res.Body.Close()
@@ -18831,9 +18802,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 				t.Errorf("state echo on off-domain redirect = %q, want %q "+
 					"(R-MUZJ-RD0L)", got, clientState)
 			}
-			webSessionStore.mu.Lock()
-			afterSessions := len(webSessionStore.m)
-			webSessionStore.mu.Unlock()
+			afterSessions := webSessionStore.Count()
 			if afterSessions != beforeSessions {
 				t.Errorf("web-session count changed under off-domain " +
 					"mcp rejection (R-MUZJ-RD0L)")
@@ -20423,7 +20392,7 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 			accessRec)
 	}
 	chainID := accessRec.chainID
-	sessionPlaintext, err := webSessionStore.issue(owner)
+	sessionPlaintext, err := webSessionStore.Issue(owner)
 	if err != nil {
 		t.Fatalf("issue web session: %v (R-7E4W-K6HL)", err)
 	}
@@ -20554,7 +20523,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	})
 	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
-	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+	webSessionStore = newWebSessionStorage()
 
 	const (
 		owner       = "r-2ht5-50f4@example.test"
@@ -20613,7 +20582,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 			accessRec.chainID, refreshRec.chainID)
 	}
 
-	sessionPlaintext, err := webSessionStore.issue(owner)
+	sessionPlaintext, err := webSessionStore.Issue(owner)
 	if err != nil {
 		t.Fatalf("issue web session: %v (R-2HT5-50F4)", err)
 	}
@@ -20860,7 +20829,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		// R-VTZ5-5FF5: when the signed-in visitor has zero live chains the
 		// block does not render — the banner collapses to its auth row.
 		email := "gating-zero-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -20884,7 +20853,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 			email, "client-G1", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -20931,7 +20900,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 			t.Fatalf("issueRefresh other: %v", err)
 		}
 		// Authenticate as MINE (who has no chains of their own).
-		sess, err := webSessionStore.issue(mine)
+		sess, err := webSessionStore.Issue(mine)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -21004,7 +20973,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		clientID := "inert0001" + agentsBlockRandomEmailToken(t)
 		chainID := issueChain(t, email, clientID, "Inert Agent")
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -21029,7 +20998,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		clientID := "parens99abcdef12-tail"
 		chainID := issueChain(t, email, clientID, "Parens Agent")
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -21070,7 +21039,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 			t.Fatalf("chainID empty")
 		}
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -21094,7 +21063,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		clientID := "pill0001" + agentsBlockRandomEmailToken(t)
 		chainID := issueChain(t, email, clientID, "Pill Agent")
 
-		sess, err := webSessionStore.issue(email)
+		sess, err := webSessionStore.Issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
@@ -21143,7 +21112,7 @@ func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 	email := "geometry-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	chainA := issueChain(t, email, "geomaaaa"+agentsBlockRandomEmailToken(t), "Alpha Agent")
 	chainB := issueChain(t, email, "geombbbb"+agentsBlockRandomEmailToken(t), "Beta Agent")
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -21240,7 +21209,7 @@ func TestR_2ZZH_LJYA_banner_grows_for_identity_stack(t *testing.T) {
 		issueChain(t, email,
 			fmt.Sprintf("grow%04d%s", i, agentsBlockRandomEmailToken(t)), name)
 	}
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -21293,7 +21262,7 @@ func TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset(t *testing.T) {
 			t.Fatalf("issueRefresh: %v", err)
 		}
 	}
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -21361,7 +21330,7 @@ func TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding(t *testing.T)
 			t.Fatalf("issueRefresh: %v", err)
 		}
 	}
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
@@ -21424,7 +21393,7 @@ func TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		if email != "" {
-			sess, err := webSessionStore.issue(email)
+			sess, err := webSessionStore.Issue(email)
 			if err != nil {
 				t.Fatalf("webSessionStore.issue: %v", err)
 			}
@@ -21514,7 +21483,7 @@ func TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		if email != "" {
-			sess, err := webSessionStore.issue(email)
+			sess, err := webSessionStore.Issue(email)
 			if err != nil {
 				t.Fatalf("webSessionStore.issue: %v", err)
 			}
@@ -21592,7 +21561,7 @@ func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
 			t.Fatalf("issueRefresh: %v", err)
 		}
 	}
-	sess, err := webSessionStore.issue(email)
+	sess, err := webSessionStore.Issue(email)
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
