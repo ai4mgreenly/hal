@@ -685,6 +685,19 @@ type googleIdentity struct {
 	EmailVerified bool
 }
 
+type googleIDPContextKey struct{}
+
+func contextWithGoogleIDP(ctx context.Context, idp googleIDP) context.Context {
+	return context.WithValue(ctx, googleIDPContextKey{}, idp)
+}
+
+func googleIDPFromContext(ctx context.Context) googleIDP {
+	if idp, ok := ctx.Value(googleIDPContextKey{}).(googleIDP); ok {
+		return idp
+	}
+	return nil
+}
+
 // R-VF61-2Y6I: in the test environment, the Google identity provider is
 // a test double. The double returns payloads whose shape matches Google's
 // documented OAuth/OIDC responses, so service code under test exercises
@@ -2863,24 +2876,14 @@ func (s *webSessionStorage) upsertLocked(hash string, rec *webSession) error {
 	return err
 }
 
-// testHookGoogleIDP, when non-nil under testing, overrides the fake
-// provider so callback tests can drive identity-claim rejection branches.
-var testHookGoogleIDP googleIDP
-
 // configuredGoogleIDP returns the Google identity provider wired for the
-// current request. R-VF61-2Y6I pins the test-environment choice to the
-// double. Outside tests, R-W3K0-QD0E pins it to the real
-// golang.org/x/oauth2-backed implementation, constructed once at startup
-// by runServe from GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET via
-// requireEnv — startup fails loudly if either is missing
-// (R-LWCN-ZBXO / R-68WP-XVCK).
+// current request. R-W3K0-QD0E pins production to the real
+// golang.org/x/oauth2-backed implementation, constructed once at startup by
+// runServe from GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET via requireEnv —
+// startup fails loudly if either is missing (R-LWCN-ZBXO / R-68WP-XVCK).
+// Tests that need R-VF61-2Y6I's double inject it through this same serving
+// seam.
 func configuredGoogleIDP(servingIDP googleIDP) googleIDP {
-	if testing.Testing() {
-		if testHookGoogleIDP != nil {
-			return testHookGoogleIDP
-		}
-		return googleFakeIDP{}
-	}
 	return servingIDP
 }
 
@@ -2993,7 +2996,7 @@ func runServeWithEnvAndClock(
 	servingWebSessions := webSessionStoreFromContext(ctx)
 	servingOAuthTokens := oauthTokenStoreFromContext(ctx)
 	servingCounter := counterFromContext(ctx)
-	var servingGoogleIDP googleIDP
+	servingGoogleIDP := googleIDPFromContext(ctx)
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to the serve-owned counter so every increment/decrement persists.
 	// Tests skip this step — they exercise the persistence layer directly

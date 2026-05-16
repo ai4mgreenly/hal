@@ -1,44 +1,44 @@
 # NEXT — one transformation
 
-## Strangle one global singleton into an owned, injected instance
+## Retire the test-only Google-IDP short-circuit; inject the fake through the existing seam
 
-**Outcome.** Exactly one of the application's mutable package-level
-singletons stops being a global and becomes an instance constructed at
-the serve entry point and threaded to the code that uses it — the same
-ownership-from-the-entry-point shape steps 1–3 established for the
-environment lookup, the clock, and the lifecycle context. After this
-round that one singleton no longer exists as package-global mutable
-state; every consumer reaches it through the threaded instance. Every
-other singleton remains exactly as it is today — each is strangled in
-its own later round, one per round.
+**Outcome.** The function that selects the Google identity provider for a
+request no longer consults `testing.Testing()` and no longer reads a
+test-only package-level provider hook. It returns the identity provider
+threaded to it through the serving seam steps 1–4 already established —
+the same parameter the production startup path supplies the real
+provider through. Tests that need a fake, or a claim-rejection-driving
+double, supply that double through that same serving seam exactly as
+production supplies the real one. The runtime `testing.Testing()` branch
+and the test-only provider package variable no longer exist.
 
-**Why.** Package-level singletons are shared mutable state. They force
-the `testing.Testing()` special-casing and they block the per-capability
-package extraction that follows: a global cannot move into its own
-package without dragging every other consumer with it. Converting them
-to entry-owned injected instances, one at a time so every round stays
-independently green, removes that coupling incrementally and is the
-precondition the extraction steps depend on.
+**Why.** With every dependency now owned and threaded, the
+`testing.Testing()` runtime fork is the last thing making production
+code behave differently merely because a test binary is running. It is
+being retired one isolated branch per round. This branch is the most
+self-contained: the provider is already a threaded seam, so the only
+change is to stop overriding it at runtime and let tests inject through
+the seam they already have — no database, configuration, or startup
+path is touched.
 
 ## Scope
 
-- Strangle exactly **one** singleton. Choose one that is still a mutable
-  package-level global and whose set of consumers is the smallest and
-  most self-contained available. Do not touch any singleton already
-  converted in a prior round.
-- The result note must name the singleton strangled, so the remaining
-  globals stay trackable from one round to the next.
-- Production behavior is identical: the entry point constructs the same
-  instance the package variable held, threaded to the same consumers.
-  Existing test substitution points stay exactly as they are.
-- Do **not** remove, collapse, or alter any `testing.Testing()` branch
-  or test hook in this round. Retiring that branch is reserved for the
-  final strangle round only — once the singleton being strangled is the
-  last global standing.
-- Do **only** this one strangle. Do not also extract packages, change
-  routing or handler behavior, or strangle a second singleton.
-- Do not modify, weaken, or skip any test. Do not edit reqs/ (the
-  behavioral contract) or helper/.
+- Retire **only** the Google-IDP `testing.Testing()` short-circuit and
+  its associated test-only provider package variable. Provider selection
+  must come solely from the value threaded through the existing serving
+  seam.
+- Production behavior is identical: outside tests the function already
+  returns the threaded serving provider; that path does not change.
+- Tests obtain the fake or rejection-driving double by injecting it
+  through the existing serving-provider seam — not through any runtime
+  test check and not through a reinstated global. Adjust test wiring as
+  needed; do not weaken, skip, or delete any test or its assertions.
+- Do **not** touch the other three `testing.Testing()` sites: the
+  config/env-lookup test branch, its serve-startup toggle, and the
+  database/required-environment startup gate. Each is retired in its
+  own later round.
+- Do not extract packages or change routing or handler behavior. Do not
+  edit reqs/ (the behavioral contract) or helper/.
 
 ## Done when
 
@@ -48,33 +48,23 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result — 2026-05-16
 
-Strangled singleton: `theCounter`.
+Completed the Google-IDP provider-selection refactor: `configuredGoogleIDP`
+now returns only the threaded serving provider, the test-only Google-IDP hook
+was removed, and tests inject `googleFakeIDP{}` or the unverified-email double
+through the existing serving seams. Live serve tests receive the fake through
+the test context provider value used by `runServe`.
 
-Completed:
-- Removed the production mutable package-level counter singleton.
-- Added a `newCounter()` constructor plus context/threaded counter helpers.
-- Constructed the serving counter at the serve entry point and threaded that
-  instance to the index renderer, counter HTTP endpoints, counter stream, and
-  MCP counter tools.
-- Kept test counter substitution in `main_test.go` and updated counter tests
-  to call counter-aware helpers explicitly where they bypass `runServe`.
+Files changed: `app-root/main.go`, `app-root/main_test.go`, `NEXT.md`.
 
-Files changed:
-- `app-root/main.go`
-- `app-root/main_test.go`
-- `NEXT.md`
+Verification from `app-root/` with `GOROOT` unset:
+- `go test -run 'TestR_(VF61_2Y6I|9PNQ_BN2G|3BKZ_L7R4|ETP6_60VA|5LQM_O89D|EMW1_D8A0|CXJ2_R3BN|8GJG_64MR|MUZJ_RD0L)' .` — passed.
+- `go test ./...` — blocked only by out-of-scope local Ralph state:
+  `.ralph/requirements-verified.jsonl` permission denied.
+- `go test -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests ./...` — passed.
+- `go test -race -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests ./...` — passed.
+- `go vet ./...` — passed.
+- `awk 'length($0)>120 {print}' main.go main_test.go` — no output.
+- `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` — passed.
 
-Verification:
-- `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
-  state failure: `.ralph/requirements-verified.jsonl: permission denied`.
-- `env -u GOROOT go test ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
-- `env -u GOROOT go test -race ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
-- `gofmt -w main.go main_test.go` completed.
-- `env -u GOROOT go vet ./...` passed.
-- `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' main.go main_test.go` produced no output.
-- `git diff --check` passed.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` passed.
-
-Notes:
-- The shell environment still has a stale `GOROOT` pointing at a Go 1.23.5
-  tree while `go` is Go 1.26.2; verification used `env -u GOROOT`.
+Follow-up risk: the broad suite still depends on local `.ralph/` permissions;
+this iteration did not inspect or modify `.ralph/` per the refactor prompt.
