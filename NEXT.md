@@ -53,61 +53,32 @@ suite passes, the race-detector run passes, gofmt and go vet are clean
 across the whole module, no source line in the module exceeds 120
 columns, and the static binary still builds.
 
-## Result — 2026-05-16
+## Result — 2026-05-16 client-registration slice
 
-Completed the first coherent OAuth/token extraction slice: the OAuth state
-store, state record, MCP state context, state-binding cookie name, state
-generation, consume/replay/expiry/binding checks, and state rejection errors now
-live in `app-root/oauth`. `main` wires the package with the application clock
-and configured OAuth-state TTL, and the login, callback, and authorize handlers
-use the package surface instead of reaching into state internals. OAuth client
-registration, authorization-code storage, and access/refresh-token storage
-remain in `main` for later slices.
+Completed the next coherent OAuth/token extraction slice: OAuth dynamic-client
+registration records and their store now live in `app-root/oauth`, including
+client ID generation, registration lookup, collision-safe insert, replacement
+for test/setup callers, count/detach diagnostics, and SQLite persistence.
+`main` now uses the package surface for registration, authorization redirect
+matching, startup DB attach, and agents client-name lookup. Access/refresh-token
+storage and agents notification remain in `main` for later slices.
 
-Files changed: `app-root/oauth/state.go`, `app-root/main.go`,
+Files changed: `app-root/oauth/client.go`, `app-root/main.go`,
 `app-root/main_test.go`, `NEXT.md`.
 
 Verification from `app-root/`:
-- `gofmt -w main.go main_test.go oauth/state.go` — passed.
-- `awk 'length($0)>120 {print FILENAME ":" FNR ":" length($0)}' $(rg --files -g '*.go')` — no output.
-- `GOROOT= go vet ./...` — passed.
-- `GOROOT= CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-check .` — passed.
-- `GOROOT= make build` — passed.
-- `GOROOT= go test -run 'TestR_(ETP6_60VA|T37L_4J01|MTRN_DL9W|BAXT_SBU9|JTTZ_CG5J|WLUL_MZCD)' .` — passed.
-- `GOROOT= go test -race -run 'TestR_(ETP6_60VA|T37L_4J01|MTRN_DL9W|BAXT_SBU9|JTTZ_CG5J|WLUL_MZCD)' .` — passed.
-- `GOROOT= go test -race ./oauth ./counter ./websession` — passed.
-- `GOROOT= go test ./...` — blocked only by out-of-scope local Ralph state:
-  `.ralph/requirements-verified.jsonl` permission denied.
-
-Follow-up risk: `main` still carries temporary compatibility type aliases and
-constructor/error wiring for the extracted state package so the rest of the
-large OAuth/token cluster can be moved incrementally without weakening tests.
-
-## Result — 2026-05-16 auth-code slice
-
-Completed the next coherent OAuth/token extraction slice: the authorization-code
-record and store now live in `app-root/oauth`, including code issuance, S256 PKCE
-verification, redemption, expiry, single-use detection, distinct redemption
-errors, count/reset/snapshot diagnostics, and host-supplied clock/TTL policy.
-`main` now wires the package through the existing application clock and
-configured auth-code TTL, and the callback/token handlers consume the exported
-store surface. OAuth client registration and access/refresh-token storage remain
-in `main` for later slices.
-
-Files changed: `app-root/oauth/authcode.go`, `app-root/main.go`,
-`app-root/main_test.go`, `NEXT.md`.
-
-Verification from `app-root/`:
-- `gofmt -w main.go main_test.go oauth/authcode.go oauth/state.go` — passed.
+- `gofmt -w main.go main_test.go oauth/client.go oauth/state.go oauth/authcode.go` — passed.
+- Go source line-length awk check — no output.
 - `GOROOT=/usr/local/go go vet ./...` — passed.
-- line-length awk check over Go sources — no output.
-- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` — passed.
-- `GOROOT=/usr/local/go go test ./... -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_2HT5_50F4|TestR_WLUL_MZCD|TestR_EMW1_D8A0|TestR_8OAK_OKFV|TestR_8PIH_2C6K'` — passed.
+- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-check .` — passed.
+- `GOROOT=/usr/local/go go test -run 'TestR_(8OBG_7FST|19BA_4XX4|YRMT_B7LZ|JE3Z_IGI4|KCBH_CXY9|8OAK_OKFV|8PIH_2C6K)' .` — passed.
+- `GOROOT=/usr/local/go go test -race -run 'TestR_(8OBG_7FST|19BA_4XX4|YRMT_B7LZ|JE3Z_IGI4|KCBH_CXY9)' .` — passed.
+- `GOROOT=/usr/local/go go test -race ./oauth ./counter ./websession` — passed.
 - `GOROOT=/usr/local/go go test ./...` — blocked only by out-of-scope local
   Ralph state: `.ralph/requirements-verified.jsonl` permission denied.
 - `GOROOT=/usr/local/go go test -race ./...` — blocked only by the same
   out-of-scope local Ralph state.
 
-Follow-up risk: `main` still carries compatibility aliases and constructor/error
-wiring for the extracted state and auth-code packages while client registration
-and token-chain storage remain to be moved.
+Local toolchain note: plain `go test ./...` without `GOROOT=/usr/local/go`
+failed before project compilation because the active `go1.26.2` binary was
+reading a stale `go1.23.5` GOROOT from the environment.

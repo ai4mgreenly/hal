@@ -1433,159 +1433,14 @@ func newOAuthStateValue() (string, error) {
 	return oauthpkg.NewStateValue()
 }
 
-// R-3JCR-C810: a registered OAuth client record. R-YRMT-B7LZ keeps the
-// records in SQLite so a registered client_id remains usable after a
-// process restart against the same database. R-25DN-9PUR makes registration
-// open, so the store may grow without bound under abuse — the bound is
-// operator concern, not a posture this service negotiates.
-type oauthClient struct {
-	redirectURIs  []string
-	clientName    string
-	grantTypes    []string
-	responseTypes []string
-	authMethod    string
-	issuedAt      int64
-}
-
-type oauthClientStorage struct {
-	mu sync.Mutex
-	m  map[string]*oauthClient
-	db *sql.DB
-}
+type oauthClient = oauthpkg.Client
+type oauthClientStorage = oauthpkg.ClientStore
 
 func newOAuthClientStorage() *oauthClientStorage {
-	return &oauthClientStorage{m: map[string]*oauthClient{}}
+	return oauthpkg.NewClientStore()
 }
 
-func (s *oauthClientStorage) put(clientID string, c *oauthClient) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.db != nil {
-		_ = s.insertOrReplaceLocked(clientID, c)
-	}
-	s.m[clientID] = c
-}
-
-func (s *oauthClientStorage) putIfAbsent(clientID string, c *oauthClient) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.m[clientID]; exists {
-		return false
-	}
-	if s.db != nil {
-		ok, err := s.insertIfAbsentLocked(clientID, c)
-		if err != nil || !ok {
-			return false
-		}
-	}
-	s.m[clientID] = c
-	return true
-}
-
-func (s *oauthClientStorage) lookup(clientID string) *oauthClient {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.m[clientID]
-}
-
-func (s *oauthClientStorage) attach(db *sql.DB) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows, err := db.Query(
-		`SELECT client_id, redirect_uris, client_name, grant_types, ` +
-			`response_types, auth_method, issued_at FROM oauth_clients`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	loaded := map[string]*oauthClient{}
-	for rows.Next() {
-		var clientID, redirectJSON, grantJSON, responseJSON string
-		rec := &oauthClient{}
-		if err := rows.Scan(&clientID, &redirectJSON, &rec.clientName,
-			&grantJSON, &responseJSON, &rec.authMethod, &rec.issuedAt); err != nil {
-			return err
-		}
-		if err := json.Unmarshal([]byte(redirectJSON), &rec.redirectURIs); err != nil {
-			return err
-		}
-		if err := json.Unmarshal([]byte(grantJSON), &rec.grantTypes); err != nil {
-			return err
-		}
-		if err := json.Unmarshal([]byte(responseJSON), &rec.responseTypes); err != nil {
-			return err
-		}
-		loaded[clientID] = rec
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	s.m = loaded
-	s.db = db
-	return nil
-}
-
-func (s *oauthClientStorage) insertOrReplaceLocked(clientID string, c *oauthClient) error {
-	redirects, grants, responses, err := marshalOAuthClientLists(c)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO oauth_clients (`+
-			`client_id, redirect_uris, client_name, grant_types, `+
-			`response_types, auth_method, issued_at`+
-			`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		clientID, redirects, c.clientName, grants, responses, c.authMethod, c.issuedAt)
-	return err
-}
-
-func (s *oauthClientStorage) insertIfAbsentLocked(clientID string, c *oauthClient) (bool, error) {
-	redirects, grants, responses, err := marshalOAuthClientLists(c)
-	if err != nil {
-		return false, err
-	}
-	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO oauth_clients (`+
-			`client_id, redirect_uris, client_name, grant_types, `+
-			`response_types, auth_method, issued_at`+
-			`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		clientID, redirects, c.clientName, grants, responses, c.authMethod, c.issuedAt)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-func marshalOAuthClientLists(c *oauthClient) (string, string, string, error) {
-	redirects, err := json.Marshal(c.redirectURIs)
-	if err != nil {
-		return "", "", "", err
-	}
-	grants, err := json.Marshal(c.grantTypes)
-	if err != nil {
-		return "", "", "", err
-	}
-	responses, err := json.Marshal(c.responseTypes)
-	if err != nil {
-		return "", "", "", err
-	}
-	return string(redirects), string(grants), string(responses), nil
-}
-
-var newOAuthClientID = randomOAuthClientID
-
-// randomOAuthClientID returns a 32-character hex string from crypto/rand —
-// 128 bits of entropy, large enough that collisions are not a concern
-// and unguessable enough that the value alone is not a credential.
-func randomOAuthClientID() (string, error) {
-	var buf [16]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
-}
+var newOAuthClientID = oauthpkg.NewClientID
 
 type oauthAuthCode = oauthpkg.AuthCode
 type oauthAuthCodeStorage = oauthpkg.AuthCodeStore
@@ -2183,8 +2038,8 @@ func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(
 			issuedAt: p.issuedAt,
 		}
 		if clients != nil {
-			if c := clients.lookup(p.clientID); c != nil {
-				row.clientName = c.clientName
+			if c := clients.Lookup(p.clientID); c != nil {
+				row.clientName = c.ClientName()
 			}
 		}
 		out = append(out, row)
@@ -2487,7 +2342,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 		fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 		return 1
 	}
-	if err := servingOAuthClients.attach(db); err != nil {
+	if err := servingOAuthClients.Attach(db); err != nil {
 		fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
 		return 1
 	}
@@ -4012,14 +3867,14 @@ func handleOAuthRegisterWithClientStore(
 			"client_name must be at most 80 characters and contain no control characters")
 		return
 	}
-	rec := &oauthClient{
-		redirectURIs:  append([]string(nil), req.RedirectURIs...),
-		clientName:    clientName,
-		grantTypes:    append([]string(nil), req.GrantTypes...),
-		responseTypes: append([]string(nil), req.ResponseTypes...),
-		authMethod:    authMethod,
-		issuedAt:      appNow().Unix(),
-	}
+	rec := oauthpkg.NewClient(oauthpkg.ClientSpec{
+		RedirectURIs:  req.RedirectURIs,
+		ClientName:    clientName,
+		GrantTypes:    req.GrantTypes,
+		ResponseTypes: req.ResponseTypes,
+		AuthMethod:    authMethod,
+		IssuedAt:      appNow().Unix(),
+	})
 	// R-19BA-4XX4: generated client_id values are unique among persisted
 	// registrations. A collision never overwrites the existing record; the
 	// handler retries a bounded number of times and only stores when the ID
@@ -4032,7 +3887,7 @@ func handleOAuthRegisterWithClientStore(
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if clients.putIfAbsent(clientID, rec) {
+		if clients.PutIfAbsent(clientID, rec) {
 			break
 		}
 		clientID = ""
@@ -4051,12 +3906,12 @@ func handleOAuthRegisterWithClientStore(
 		ClientName              string   `json:"client_name,omitempty"`
 	}{
 		ClientID:                clientID,
-		ClientIDIssuedAt:        rec.issuedAt,
-		RedirectURIs:            rec.redirectURIs,
-		TokenEndpointAuthMethod: rec.authMethod,
-		GrantTypes:              rec.grantTypes,
-		ResponseTypes:           rec.responseTypes,
-		ClientName:              rec.clientName,
+		ClientIDIssuedAt:        rec.IssuedAt(),
+		RedirectURIs:            rec.RedirectURIs(),
+		TokenEndpointAuthMethod: rec.AuthMethod(),
+		GrantTypes:              rec.GrantTypes(),
+		ResponseTypes:           rec.ResponseTypes(),
+		ClientName:              rec.ClientName(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -4156,7 +4011,7 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 		http.Error(w, "client_id is required", http.StatusBadRequest)
 		return
 	}
-	client := clients.lookup(clientID)
+	client := clients.Lookup(clientID)
 	if client == nil {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return
@@ -4167,7 +4022,7 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 		return
 	}
 	matched := false
-	for _, u := range client.redirectURIs {
+	for _, u := range client.RedirectURIs() {
 		if u == requested {
 			matched = true
 			break

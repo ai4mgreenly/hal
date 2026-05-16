@@ -40,6 +40,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	oauthpkg "github.com/mgreenly/hal/oauth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 )
@@ -101,11 +102,7 @@ func detachTestStoresFromDB(db *sql.DB) {
 		return
 	}
 	theCounter.DetachDBIf(db)
-	oauthClientStore.mu.Lock()
-	if oauthClientStore.db == db {
-		oauthClientStore.db = nil
-	}
-	oauthClientStore.mu.Unlock()
+	oauthClientStore.DetachDBIf(db)
 	oauthTokenStore.mu.Lock()
 	if oauthTokenStore.db == db {
 		oauthTokenStore.db = nil
@@ -514,7 +511,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	originalClients := oauthClientStore
 	originalTokens := oauthTokenStore
 	originalSessions := webSessionStore
-	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthClientStore = newOAuthClientStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 	webSessionStore = newWebSessionStorage()
 	t.Cleanup(func() {
@@ -10169,13 +10166,14 @@ func TestR_8OBG_7FST_dynamic_client_registration_requires_at_least_one_valid_red
 			t.Fatalf("response missing client_id; body=%q (R-8OBG-7FST)",
 				rec.Body.String())
 		}
-		recClient := oauthClientStore.lookup(clientID)
+		recClient := oauthClientStore.Lookup(clientID)
 		if recClient == nil {
 			t.Fatalf("client_id %q was not persisted (R-8OBG-7FST)", clientID)
 		}
-		if len(recClient.redirectURIs) != 1 || recClient.redirectURIs[0] != uri {
+		redirects := recClient.RedirectURIs()
+		if len(redirects) != 1 || redirects[0] != uri {
 			t.Fatalf("stored redirect_uris = %v, want [%s] (R-8OBG-7FST)",
-				recClient.redirectURIs, uri)
+				redirects, uri)
 		}
 	})
 }
@@ -10185,13 +10183,13 @@ func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id
 		existingID = "r19ba-existing-client"
 		freshID    = "r19ba-fresh-client"
 	)
-	existing := &oauthClient{
-		redirectURIs: []string{"http://127.0.0.1/existing-callback"},
-		clientName:   "Existing Client",
-		authMethod:   "none",
-		issuedAt:     1234,
-	}
-	oauthClientStore.put(existingID, existing)
+	existing := oauthpkg.NewClient(oauthpkg.ClientSpec{
+		RedirectURIs: []string{"http://127.0.0.1/existing-callback"},
+		ClientName:   "Existing Client",
+		AuthMethod:   "none",
+		IssuedAt:     1234,
+	})
+	oauthClientStore.Put(existingID, existing)
 
 	originalGenerator := newOAuthClientID
 	t.Cleanup(func() { newOAuthClientID = originalGenerator })
@@ -10225,14 +10223,15 @@ func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id
 		t.Fatalf("client_id = %q, want retry-generated %q (R-19BA-4XX4)",
 			got, freshID)
 	}
-	if rec := oauthClientStore.lookup(existingID); rec != existing {
+	if rec := oauthClientStore.Lookup(existingID); rec != existing {
 		t.Fatalf("existing client record was overwritten on ID collision (R-19BA-4XX4)")
 	}
-	if rec := oauthClientStore.lookup(freshID); rec == nil {
+	if rec := oauthClientStore.Lookup(freshID); rec == nil {
 		t.Fatalf("fresh client_id %q was not stored (R-19BA-4XX4)", freshID)
-	} else if len(rec.redirectURIs) != 1 || rec.redirectURIs[0] != "http://127.0.0.1/new-callback" {
+	} else if redirects := rec.RedirectURIs(); len(redirects) != 1 ||
+		redirects[0] != "http://127.0.0.1/new-callback" {
 		t.Fatalf("fresh client redirect_uris = %v, want new callback (R-19BA-4XX4)",
-			rec.redirectURIs)
+			rec.RedirectURIs())
 	}
 
 	before := oauthClientStoreCount()
@@ -10251,7 +10250,7 @@ func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id
 		t.Fatalf("all-colliding registration changed store count: before=%d after=%d (R-19BA-4XX4)",
 			before, after)
 	}
-	if rec := oauthClientStore.lookup(existingID); rec != existing {
+	if rec := oauthClientStore.Lookup(existingID); rec != existing {
 		t.Fatalf("existing client record changed after all-colliding failure (R-19BA-4XX4)")
 	}
 }
@@ -10274,8 +10273,8 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 	if err != nil {
 		t.Fatalf("open first db: %v (R-YRMT-B7LZ)", err)
 	}
-	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
-	if err := oauthClientStore.attach(db1); err != nil {
+	oauthClientStore = newOAuthClientStorage()
+	if err := oauthClientStore.Attach(db1); err != nil {
 		t.Fatalf("attach first store: %v (R-YRMT-B7LZ)", err)
 	}
 
@@ -10300,21 +10299,22 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 		t.Fatalf("open restarted db: %v (R-YRMT-B7LZ)", err)
 	}
 	defer db2.Close()
-	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
-	if err := oauthClientStore.attach(db2); err != nil {
+	oauthClientStore = newOAuthClientStorage()
+	if err := oauthClientStore.Attach(db2); err != nil {
 		t.Fatalf("attach restarted store: %v (R-YRMT-B7LZ)", err)
 	}
-	loaded := oauthClientStore.lookup(clientID)
+	loaded := oauthClientStore.Lookup(clientID)
 	if loaded == nil {
 		t.Fatalf("client_id %q not loaded after restart (R-YRMT-B7LZ)", clientID)
 	}
-	if len(loaded.redirectURIs) != 1 || loaded.redirectURIs[0] != redirectURI {
+	redirects := loaded.RedirectURIs()
+	if len(redirects) != 1 || redirects[0] != redirectURI {
 		t.Fatalf("loaded redirect_uris = %v, want [%s] (R-YRMT-B7LZ)",
-			loaded.redirectURIs, redirectURI)
+			redirects, redirectURI)
 	}
-	if loaded.clientName != "Restart Durable Client" {
+	if loaded.ClientName() != "Restart Durable Client" {
 		t.Fatalf("loaded clientName = %q, want persisted metadata (R-YRMT-B7LZ)",
-			loaded.clientName)
+			loaded.ClientName())
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet,
@@ -10369,11 +10369,11 @@ func TestR_JE3Z_IGI4_dynamic_client_registration_client_name_is_bounded_display_
 			got, named)
 	}
 	clientID, _ := named["client_id"].(string)
-	if rec := oauthClientStore.lookup(clientID); rec == nil {
+	if rec := oauthClientStore.Lookup(clientID); rec == nil {
 		t.Fatalf("registered client %q not stored (R-JE3Z-IGI4)", clientID)
-	} else if rec.clientName != "Friendly Client" {
+	} else if rec.ClientName() != "Friendly Client" {
 		t.Fatalf("stored clientName = %q, want trimmed display text (R-JE3Z-IGI4)",
-			rec.clientName)
+			rec.ClientName())
 	}
 
 	if doc := register(t, ""); doc["client_name"] != nil {
@@ -10492,11 +10492,11 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 			t.Fatalf("registration response missing client_id; doc=%v (R-KCBH-CXY9)",
 				doc)
 		}
-		if rec := oauthClientStore.lookup(clientID); rec == nil {
+		if rec := oauthClientStore.Lookup(clientID); rec == nil {
 			t.Fatalf("client %q not stored (R-KCBH-CXY9)", clientID)
-		} else if rec.authMethod != "none" {
+		} else if rec.AuthMethod() != "none" {
 			t.Fatalf("stored authMethod = %q, want none (R-KCBH-CXY9)",
-				rec.authMethod)
+				rec.AuthMethod())
 		}
 		return doc
 	}
@@ -10591,9 +10591,7 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 }
 
 func oauthClientStoreCount() int {
-	oauthClientStore.mu.Lock()
-	defer oauthClientStore.mu.Unlock()
-	return len(oauthClientStore.m)
+	return oauthClientStore.Count()
 }
 
 func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
@@ -10958,7 +10956,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
 	})
-	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthClientStore = newOAuthClientStorage()
 	states := newOAuthStateStorage()
 
 	const redirectURI = "http://127.0.0.1/cb-r-baxt"
@@ -11050,7 +11048,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		oauthClientStore = originalClients
 		oauthTokenStore = originalTokens
 	})
-	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthClientStore = newOAuthClientStorage()
 	states := newOAuthStateStorage()
 	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
@@ -15920,7 +15918,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	dir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/authcode.go", "oauth/state.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -16007,7 +16005,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	srcDir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/authcode.go", "oauth/state.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -17133,7 +17131,7 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 	t.Run("named_client_id_truncated_and_revoke_button", func(t *testing.T) {
 		email := "named-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "abcdef0123456789-tail"
-		oauthClientStore.put(clientID, &oauthClient{clientName: "Test Agent One"})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Test Agent One"}))
 		refresh, err := oauthTokenStore.issueRefresh(
 			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
@@ -17235,7 +17233,7 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 	email := "xss-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	clientID := "xssagent" + agentsBlockRandomEmailToken(t)
 	maliciousName := `<img src=x onerror="alert('owned')">&<script>bad()</script>`
-	oauthClientStore.put(clientID, &oauthClient{clientName: maliciousName})
+	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: maliciousName}))
 	refresh, err := oauthTokenStore.issueRefresh(
 		email, clientID, "http://127.0.0.1:3000/mcp")
 	if err != nil {
@@ -17426,7 +17424,7 @@ func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 	}
 	issueNamedChain := func(t *testing.T, email, clientID, clientName string) (string, string) {
 		t.Helper()
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		refresh, err := oauthTokenStore.issueRefresh(
 			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
@@ -17798,7 +17796,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		}
 		// Seed one live chain so the snapshot is non-empty.
 		clientID := "cli-" + agentsBlockRandomEmailToken(t)
-		oauthClientStore.put(clientID, &oauthClient{clientName: "StreamCo"})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "StreamCo"}))
 		if _, err := oauthTokenStore.issueRefresh(email, clientID,
 			canonicalResourceIdentifier()); err != nil {
 			t.Fatalf("issueRefresh seed: %v", err)
@@ -17831,7 +17829,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		// Issuing a second chain to the same email must surface within
 		// the 1000ms budget the requirement names.
 		clientID2 := "cli-" + agentsBlockRandomEmailToken(t)
-		oauthClientStore.put(clientID2, &oauthClient{clientName: "StreamCo2"})
+		oauthClientStore.Put(clientID2, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "StreamCo2"}))
 		start := time.Now()
 		if _, err := oauthTokenStore.issueRefresh(email, clientID2,
 			canonicalResourceIdentifier()); err != nil {
@@ -17874,7 +17872,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 			t.Fatalf("webSessionStore.issue: %v", err)
 		}
 		clientID := "cli-" + agentsBlockRandomEmailToken(t)
-		oauthClientStore.put(clientID, &oauthClient{clientName: "ScopeCo"})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "ScopeCo"}))
 		// Issue a chain to MINE before opening, plus a chain to OTHER.
 		if _, err := oauthTokenStore.issueRefresh(mine, clientID,
 			canonicalResourceIdentifier()); err != nil {
@@ -17916,7 +17914,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		// must still match `mine`'s live set, not contain OTHER's
 		// chain. Give it generous time to catch a leak.
 		otherClient := "cli-" + agentsBlockRandomEmailToken(t)
-		oauthClientStore.put(otherClient, &oauthClient{clientName: "Leak"})
+		oauthClientStore.Put(otherClient, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Leak"}))
 		leakChain, err := oauthTokenStore.issueRefresh(other, otherClient,
 			canonicalResourceIdentifier())
 		if err != nil {
@@ -20935,7 +20933,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 
 	issueChain := func(t *testing.T, email, clientID, clientName string) string {
 		t.Helper()
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21009,7 +21007,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		// R-VV71-J75U: when client_name is unset, row reads `undefined (id8)`.
 		email := "sig-undef-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "undef0001abcdef99-tail"
-		oauthClientStore.put(clientID, &oauthClient{clientName: ""})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: ""}))
 		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21077,7 +21075,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) string {
 		t.Helper()
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21183,7 +21181,7 @@ func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 func TestR_2ZZH_LJYA_banner_grows_for_identity_stack(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) {
 		t.Helper()
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		if _, err := oauthTokenStore.issueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21242,7 +21240,7 @@ func TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset(t *testing.T) {
 	email := "compact-bottom-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	for i, clientName := range []string{"Bottom Alpha", "Bottom Beta"} {
 		clientID := fmt.Sprintf("bottom%04d%s", i, agentsBlockRandomEmailToken(t))
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		if _, err := oauthTokenStore.issueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21310,7 +21308,7 @@ func TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding(t *testing.T)
 	email := "within8-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	for i, clientName := range []string{"Within Eight Alpha", "Within Eight Beta"} {
 		clientID := fmt.Sprintf("within8%04d%s", i, agentsBlockRandomEmailToken(t))
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		if _, err := oauthTokenStore.issueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -21447,7 +21445,7 @@ func TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows(t *testing.T) {
 	}
 
 	clientID := "compactone" + agentsBlockRandomEmailToken(t)
-	oauthClientStore.put(clientID, &oauthClient{clientName: "Compact Agent"})
+	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Compact Agent"}))
 	if _, err := oauthTokenStore.issueRefresh(email, clientID,
 		"http://127.0.0.1:3000/mcp"); err != nil {
 		t.Fatalf("issueRefresh: %v", err)
@@ -21521,7 +21519,7 @@ func TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth(t *testing.T) {
 	}
 
 	clientID := "o87hagent" + agentsBlockRandomEmailToken(t)
-	oauthClientStore.put(clientID, &oauthClient{clientName: "O87H Agent"})
+	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "O87H Agent"}))
 	if _, err := oauthTokenStore.issueRefresh(email, clientID,
 		"http://127.0.0.1:3000/mcp"); err != nil {
 		t.Fatalf("issueRefresh: %v", err)
@@ -21541,7 +21539,7 @@ func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
 	email := "shared-stack-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	for i, clientName := range []string{"Shared Alpha", "Shared Beta"} {
 		clientID := fmt.Sprintf("shared%04d%s", i, agentsBlockRandomEmailToken(t))
-		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
 		if _, err := oauthTokenStore.issueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
