@@ -15920,6 +15920,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
+		"jsonapi/jsonapi.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -16007,6 +16008,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
+		"jsonapi/jsonapi.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)

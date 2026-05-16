@@ -30,6 +30,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	jsonapipkg "github.com/mgreenly/hal/jsonapi"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	webpkg "github.com/mgreenly/hal/web"
 	websessionpkg "github.com/mgreenly/hal/websession"
@@ -922,19 +923,18 @@ func requireEnvFromLookup(lookup envLookup, name string) (string, error) {
 // wraps it with a fixed cap before parsing. One MiB is comfortably above
 // the normal JSON and form payloads this service accepts while preventing
 // an endpoint from buffering an unbounded body.
-const maxRequestBodyBytesR_VKZD_UKVS int64 = 1 << 20
+const maxRequestBodyBytesR_VKZD_UKVS int64 = jsonapipkg.MaxRequestBodyBytes
 
 func limitRequestBodyR_VKZD_UKVS(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytesR_VKZD_UKVS)
+	jsonapipkg.LimitRequestBody(w, r)
 }
 
 func requestBodyTooLargeR_VKZD_UKVS(err error) bool {
-	var maxErr *http.MaxBytesError
-	return errors.As(err, &maxErr)
+	return jsonapipkg.RequestBodyTooLarge(err)
 }
 
 func writeBodyTooLargeR_VKZD_UKVS(w http.ResponseWriter) {
-	http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+	jsonapipkg.WriteBodyTooLarge(w)
 }
 
 // R-3UT3-IKZG / R-75E8-YGGN: the service has a single configured
@@ -1013,23 +1013,7 @@ func googleWorkspaceDomain() string {
 // is case-normalized. Unknown values fall through to the local
 // observation rather than being trusted.
 func requestBaseURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if fp := r.Header.Get("X-Forwarded-Proto"); fp != "" {
-		first := fp
-		if i := strings.IndexByte(first, ','); i >= 0 {
-			first = first[:i]
-		}
-		switch strings.ToLower(strings.TrimSpace(first)) {
-		case "https":
-			scheme = "https"
-		case "http":
-			scheme = "http"
-		}
-	}
-	return scheme + "://" + r.Host
+	return jsonapipkg.RequestBaseURL(r)
 }
 
 // forwardedProtoHTTPS reports whether the standard forwarded-protocol
@@ -1458,6 +1442,25 @@ func setOAuthTokenAgentsBroadcaster(s *oauthTokenStorage, b *agentsBroadcaster) 
 		next = b.notify
 	}
 	return s.SetNotifier(next)
+}
+
+func jsonAPISurface(
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage,
+	clients *oauthClientStorage, authCodes *oauthAuthCodeStorage,
+) jsonapipkg.Surface {
+	return jsonapipkg.Surface{
+		Counter:                     c,
+		WebSessions:                 sessions,
+		OAuthTokens:                 tokens,
+		OAuthClients:                clients,
+		OAuthAuthCodes:              authCodes,
+		Now:                         appNow,
+		NewOAuthClientID:            newOAuthClientID,
+		CanonicalResourceIdentifier: canonicalResourceIdentifier,
+		AccessTokenTTL: func() time.Duration {
+			return authCfg().AccessTokenTTL
+		},
+	}
 }
 
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
@@ -2298,10 +2301,7 @@ func handleCounterRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCounterReadWithCounter(c *counterpkg.Counter, w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Value uint64 `json:"value"`
-	}{Value: c.Read()})
+	jsonAPISurface(c, nil, nil, nil, nil).HandleCounterRead(w, nil)
 }
 
 // R-FZC6-H2SB: GET /counter/stream is the live-update channel the index
@@ -2539,28 +2539,7 @@ func agentsStreamTickInterval() time.Duration {
 // MCP authorization spec's PKCE requirement on conformant clients.
 func handleOAuthAuthorizationServerMetadata(w http.ResponseWriter,
 	r *http.Request) {
-	base := requestBaseURL(r)
-	doc := struct {
-		Issuer                            string   `json:"issuer"`
-		AuthorizationEndpoint             string   `json:"authorization_endpoint"`
-		TokenEndpoint                     string   `json:"token_endpoint"`
-		RegistrationEndpoint              string   `json:"registration_endpoint"`
-		ResponseTypesSupported            []string `json:"response_types_supported"`
-		GrantTypesSupported               []string `json:"grant_types_supported"`
-		CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
-		TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
-	}{
-		Issuer:                            base,
-		AuthorizationEndpoint:             base + "/oauth/authorize",
-		TokenEndpoint:                     base + "/oauth/token",
-		RegistrationEndpoint:              base + "/oauth/register",
-		ResponseTypesSupported:            []string{"code"},
-		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none"},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(doc)
+	jsonAPISurface(nil, nil, nil, nil, nil).HandleOAuthAuthorizationServerMetadata(w, r)
 }
 
 // R-3UT3-IKZG: the canonical resource identifier is published verbatim
@@ -2570,18 +2549,7 @@ func handleOAuthAuthorizationServerMetadata(w http.ResponseWriter,
 // bearer-side validation comparison.
 func handleOAuthProtectedResourceMetadata(w http.ResponseWriter,
 	r *http.Request) {
-	base := requestBaseURL(r)
-	doc := struct {
-		Resource               string   `json:"resource"`
-		AuthorizationServers   []string `json:"authorization_servers"`
-		BearerMethodsSupported []string `json:"bearer_methods_supported"`
-	}{
-		Resource:               canonicalResourceIdentifier(),
-		AuthorizationServers:   []string{base},
-		BearerMethodsSupported: []string{"header"},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(doc)
+	jsonAPISurface(nil, nil, nil, nil, nil).HandleOAuthProtectedResourceMetadata(w, r)
 }
 
 // R-3JCR-C810 / R-25DN-9PUR: POST /oauth/register accepts a JSON
@@ -2604,134 +2572,11 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 func handleOAuthRegisterWithClientStore(
 	clients *oauthClientStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	limitRequestBodyR_VKZD_UKVS(w, r)
-	var req struct {
-		RedirectURIs            []string `json:"redirect_uris"`
-		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-		GrantTypes              []string `json:"grant_types"`
-		ResponseTypes           []string `json:"response_types"`
-		ClientName              string   `json:"client_name"`
-	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		if requestBodyTooLargeR_VKZD_UKVS(err) {
-			writeBodyTooLargeR_VKZD_UKVS(w)
-			return
-		}
-		writeOAuthError(w, http.StatusBadRequest,
-			"invalid_client_metadata", "request body is not valid JSON")
-		return
-	}
-	if len(req.RedirectURIs) == 0 {
-		// R-8OBG-7FST: DCR requires at least one redirect URI that passes
-		// the R-9OWM-O8XJ validation below; absent or empty lists cannot
-		// produce a usable authorization-time exact match.
-		writeOAuthError(w, http.StatusBadRequest,
-			"invalid_redirect_uri",
-			"redirect_uris is required and must be a non-empty array")
-		return
-	}
-	for _, u := range req.RedirectURIs {
-		if !validOAuthRedirectURI(u) {
-			writeOAuthError(w, http.StatusBadRequest,
-				"invalid_redirect_uri",
-				"each redirect_uris entry must be an absolute http or https URI with a host and no fragment")
-			return
-		}
-	}
-	authMethod := req.TokenEndpointAuthMethod
-	if authMethod == "" {
-		authMethod = "none"
-	}
-	if authMethod != "none" {
-		// R-KCBH-CXY9: MCP clients are public PKCE clients. Dynamic
-		// Client Registration therefore accepts omitted/none auth and
-		// rejects any client-secret-based or otherwise unsupported token
-		// endpoint authentication method before a client_id is issued.
-		writeOAuthError(w, http.StatusBadRequest,
-			"invalid_client_metadata",
-			"token_endpoint_auth_method must be none")
-		return
-	}
-	clientName, ok := normalizeOAuthClientName(req.ClientName)
-	if !ok {
-		// R-JE3Z-IGI4: DCR client_name is optional display text only.
-		// Reject overlong or ASCII-control-containing names before a
-		// client_id is issued; empty/whitespace-only input is normalized
-		// to unset below.
-		writeOAuthError(w, http.StatusBadRequest,
-			"invalid_client_metadata",
-			"client_name must be at most 80 characters and contain no control characters")
-		return
-	}
-	rec := oauthpkg.NewClient(oauthpkg.ClientSpec{
-		RedirectURIs:  req.RedirectURIs,
-		ClientName:    clientName,
-		GrantTypes:    req.GrantTypes,
-		ResponseTypes: req.ResponseTypes,
-		AuthMethod:    authMethod,
-		IssuedAt:      appNow().Unix(),
-	})
-	// R-19BA-4XX4: generated client_id values are unique among persisted
-	// registrations. A collision never overwrites the existing record; the
-	// handler retries a bounded number of times and only stores when the ID
-	// was absent at the same lock boundary used for the write.
-	var clientID string
-	for range 8 {
-		var err error
-		clientID, err = newOAuthClientID()
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if clients.PutIfAbsent(clientID, rec) {
-			break
-		}
-		clientID = ""
-	}
-	if clientID == "" {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	resp := struct {
-		ClientID                string   `json:"client_id"`
-		ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
-		RedirectURIs            []string `json:"redirect_uris"`
-		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
-		GrantTypes              []string `json:"grant_types,omitempty"`
-		ResponseTypes           []string `json:"response_types,omitempty"`
-		ClientName              string   `json:"client_name,omitempty"`
-	}{
-		ClientID:                clientID,
-		ClientIDIssuedAt:        rec.IssuedAt(),
-		RedirectURIs:            rec.RedirectURIs(),
-		TokenEndpointAuthMethod: rec.AuthMethod(),
-		GrantTypes:              rec.GrantTypes(),
-		ResponseTypes:           rec.ResponseTypes(),
-		ClientName:              rec.ClientName(),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(resp)
+	jsonAPISurface(nil, nil, nil, clients, nil).HandleOAuthRegister(w, r)
 }
 
 func normalizeOAuthClientName(raw string) (string, bool) {
-	name := strings.TrimSpace(raw)
-	if name == "" {
-		return "", true
-	}
-	count := 0
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
-			return "", false
-		}
-		count++
-		if count > 80 {
-			return "", false
-		}
-	}
-	return name, true
+	return jsonapipkg.NormalizeOAuthClientName(raw)
 }
 
 func validOAuthRedirectURI(raw string) bool {
@@ -2932,35 +2777,7 @@ func handleOAuthTokenWithAuthCodeStore(authCodes *oauthAuthCodeStorage, w http.R
 func handleOAuthTokenWithStores(
 	authCodes *oauthAuthCodeStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	limitRequestBodyR_VKZD_UKVS(w, r)
-	if err := r.ParseForm(); err != nil {
-		if requestBodyTooLargeR_VKZD_UKVS(err) {
-			writeBodyTooLargeR_VKZD_UKVS(w)
-			return
-		}
-		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
-			"could not parse request body")
-		return
-	}
-	// R-WLUL-MZCD: authorization-code and refresh-token grants may omit
-	// `resource`; omission targets the canonical resource already bound
-	// onto the authorization code or token chain. R-4GRA-EGBY still rejects
-	// any present non-canonical resource before a token can be issued or
-	// rotated.
-	if res := r.PostForm.Get("resource"); res != "" && res != canonicalResourceIdentifier() {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_target",
-			"resource parameter does not match this service's canonical identifier")
-		return
-	}
-	switch r.PostForm.Get("grant_type") {
-	case "authorization_code":
-		handleOAuthTokenAuthCodeWithStores(authCodes, tokens, w, r)
-	case "refresh_token":
-		handleOAuthTokenRefreshWithStore(tokens, w, r)
-	default:
-		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
-			"only authorization_code and refresh_token are supported")
-	}
+	jsonAPISurface(nil, nil, tokens, nil, authCodes).HandleOAuthToken(w, r)
 }
 
 func handleOAuthTokenAuthCode(w http.ResponseWriter, r *http.Request) {
@@ -2976,42 +2793,7 @@ func handleOAuthTokenAuthCodeWithAuthCodeStore(
 func handleOAuthTokenAuthCodeWithStores(
 	authCodes *oauthAuthCodeStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	code := r.PostForm.Get("code")
-	clientID := r.PostForm.Get("client_id")
-	redirectURI := r.PostForm.Get("redirect_uri")
-	codeVerifier := r.PostForm.Get("code_verifier")
-	if code == "" || clientID == "" || redirectURI == "" || codeVerifier == "" {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
-			"authorization_code grant requires code, client_id, "+
-				"redirect_uri, code_verifier")
-		return
-	}
-	rec, err := authCodes.Redeem(code, clientID, redirectURI, codeVerifier)
-	if err != nil {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
-		return
-	}
-	access, refresh, err := tokens.IssueInitialTokenPair(
-		rec.OwnerEmail(), rec.ClientID(), rec.Resource())
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	// R-KX4N-DZ44: successful token responses contain bearer-token
-	// plaintext and must not be stored by clients or intermediaries.
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-		RefreshToken string `json:"refresh_token"`
-	}{
-		AccessToken:  access,
-		TokenType:    "Bearer",
-		ExpiresIn:    int(authCfg().AccessTokenTTL / time.Second),
-		RefreshToken: refresh,
-	})
+	jsonAPISurface(nil, nil, tokens, nil, authCodes).HandleOAuthTokenAuthCode(w, r)
 }
 
 func handleOAuthTokenRefresh(w http.ResponseWriter, r *http.Request) {
@@ -3019,43 +2801,11 @@ func handleOAuthTokenRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOAuthTokenRefreshWithStore(tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request) {
-	refreshToken := r.PostForm.Get(oauthRefreshTokenFormField)
-	clientID := r.PostForm.Get("client_id")
-	if refreshToken == "" || clientID == "" {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
-			"refresh_token grant requires refresh_token and client_id")
-		return
-	}
-	// R-B78O-8X0F: the refresh-token grant rotates a valid refresh
-	// token into a fresh bearer access token plus successor refresh
-	// token without any browser or Google round trip.
-	access, refresh, err := tokens.RotateRefreshForClient(refreshToken, clientID)
-	if err != nil {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		ExpiresIn    int    `json:"expires_in"`
-		RefreshToken string `json:"refresh_token"`
-	}{
-		AccessToken:  access,
-		TokenType:    "Bearer",
-		ExpiresIn:    int(authCfg().AccessTokenTTL / time.Second),
-		RefreshToken: refresh,
-	})
+	jsonAPISurface(nil, nil, tokens, nil, nil).HandleOAuthTokenRefresh(w, r)
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description,omitempty"`
-	}{Error: code, ErrorDescription: desc})
+	jsonapipkg.WriteOAuthError(w, status, code, desc)
 }
 
 // checkMutationAuth reports whether r presents valid authentication for
@@ -3085,57 +2835,21 @@ func checkMutationAuth(r *http.Request) (bool, int, string, string) {
 func checkMutationAuthWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, r *http.Request,
 ) (bool, int, string, string) {
-	cookiePresented := false
-	cookieRejectedByOrigin := false
-	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		cookiePresented = true
-		if sess := sessions.Lookup(c.Value); sess != nil {
-			if sameOriginBrowserMutationR_R4RG_O4Y9(r) {
+	ok, status, errCode, errDesc := jsonAPISurface(nil, sessions, tokens, nil, nil).CheckMutationAuth(r)
+	if ok {
+		if c, err := r.Cookie(webSessionCookieName); err == nil {
+			if sess := sessions.Lookup(c.Value); sess != nil && sameOriginBrowserMutationR_R4RG_O4Y9(r) {
 				setAuthedUserR_D56D_EBP3(r, sess.OwnerEmail())
 				return true, 0, "", ""
 			}
-			cookieRejectedByOrigin = true
 		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	plaintext, bearerOK := bearerTokenFromRequest(r)
-	if !bearerOK {
-		if cookieRejectedByOrigin {
-			return false, http.StatusForbidden, "invalid_request",
-				"same-origin browser request required"
-		}
-		if authHeader == "" {
-			if cookiePresented {
-				return false, http.StatusUnauthorized, "invalid_token",
-					"session cookie not recognized"
+		if plaintext, parsed := bearerTokenFromRequest(r); parsed {
+			if rec, _ := tokens.LookupAccessReason(plaintext); rec != nil {
+				setAuthedUserR_D56D_EBP3(r, rec.OwnerEmail)
 			}
-			return false, http.StatusUnauthorized, "invalid_request",
-				"no credentials presented"
 		}
-		return false, http.StatusUnauthorized, "invalid_token",
-			"bearer authorization header malformed"
 	}
-	rec, reason := tokens.LookupAccessReason(plaintext)
-	if rec != nil {
-		if rec.Resource != canonicalResourceIdentifier() {
-			return false, http.StatusUnauthorized, "invalid_token",
-				"bearer token resource binding does not match"
-		}
-		setAuthedUserR_D56D_EBP3(r, rec.OwnerEmail)
-		return true, 0, "", ""
-	}
-	if cookieRejectedByOrigin {
-		return false, http.StatusForbidden, "invalid_request",
-			"same-origin browser request required"
-	}
-	switch reason {
-	case "expired":
-		return false, http.StatusUnauthorized, "invalid_token", "bearer token expired"
-	case "revoked":
-		return false, http.StatusUnauthorized, "invalid_token", "bearer token revoked"
-	default:
-		return false, http.StatusUnauthorized, "invalid_token", "bearer token not recognized"
-	}
+	return ok, status, errCode, errDesc
 }
 
 // R-R4RG-O4Y9: browser requests that rely on a web session cookie for a
@@ -3144,18 +2858,7 @@ func checkMutationAuthWithStores(
 // must match. Non-browser clients often send neither header, so absence alone
 // is not treated as cross-site.
 func sameOriginBrowserMutationR_R4RG_O4Y9(r *http.Request) bool {
-	want := requestBaseURL(r)
-	if got := r.Header.Get("Origin"); got != "" {
-		return got == want
-	}
-	if got := r.Header.Get("Referer"); got != "" {
-		u, err := url.Parse(got)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return false
-		}
-		return u.Scheme+"://"+u.Host == want
-	}
-	return true
+	return jsonapipkg.SameOriginBrowserMutation(r)
 }
 
 // bearerTokenFromRequest extracts the opaque token from an
@@ -3164,23 +2867,11 @@ func sameOriginBrowserMutationR_R4RG_O4Y9(r *http.Request) bool {
 // trimmed. Returns ("", false) when no Authorization header is
 // present, the scheme is not Bearer, or the token value is empty.
 func bearerTokenFromRequest(r *http.Request) (string, bool) {
-	return parseBearerAuthHeader(r.Header.Get("Authorization"))
+	return jsonapipkg.BearerTokenFromRequest(r)
 }
 
 func parseBearerAuthHeader(h string) (string, bool) {
-	if h == "" {
-		return "", false
-	}
-	const prefix = "Bearer"
-	if len(h) <= len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) ||
-		(h[len(prefix)] != ' ' && h[len(prefix)] != '\t') {
-		return "", false
-	}
-	tok := strings.TrimSpace(h[len(prefix):])
-	if tok == "" {
-		return "", false
-	}
-	return tok, true
+	return jsonapipkg.ParseBearerAuthHeader(h)
 }
 
 // checkMCPBearer validates the Authorization header carried by an MCP
@@ -3312,21 +3003,15 @@ func jsonRPCInvokesGatedTool(buf []byte) bool {
 // and an `error_description` string that discriminates the failure
 // cause; checkMutationAuth picks both.
 func writeMutationUnauthorized(w http.ResponseWriter, errCode, errDesc string) {
-	writeMutationAuthFailure(w, http.StatusUnauthorized, errCode, errDesc)
+	jsonapipkg.WriteMutationUnauthorized(w, errCode, errDesc)
 }
 
 func writeMutationAuthFailure(w http.ResponseWriter, status int, errCode, errDesc string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description,omitempty"`
-	}{Error: errCode, ErrorDescription: errDesc})
+	jsonapipkg.WriteMutationAuthFailure(w, status, errCode, errDesc)
 }
 
 func writeSameOriginForbiddenR_R4RG_O4Y9(w http.ResponseWriter) {
-	writeMutationAuthFailure(w, http.StatusForbidden, "invalid_request",
-		"same-origin browser request required")
+	jsonapipkg.WriteSameOriginForbidden(w)
 }
 
 // R-340Z-T6K2: POST /counter/increment adds one to the counter and
@@ -3352,11 +3037,7 @@ func handleCounterIncrementWithCounterAndStores(
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
-	v := c.Increment()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Value uint64 `json:"value"`
-	}{Value: v})
+	jsonAPISurface(c, sessions, tokens, nil, nil).HandleCounterIncrement(w, r)
 }
 
 // R-H3FE-QFC0: POST /counter/decrement subtracts one from the counter
@@ -3384,18 +3065,7 @@ func handleCounterDecrementWithCounterAndStores(
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	v, ok := c.Decrement()
-	if !ok {
-		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(struct {
-			Error string `json:"error"`
-		}{Error: "counter at zero"})
-		return
-	}
-	_ = json.NewEncoder(w).Encode(struct {
-		Value uint64 `json:"value"`
-	}{Value: v})
+	jsonAPISurface(c, sessions, tokens, nil, nil).HandleCounterDecrement(w, r)
 }
 
 // R-78B7-YKKL: `hal reset` returns the SQLite database at --db to a
