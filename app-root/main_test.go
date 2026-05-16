@@ -18165,7 +18165,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		agentsBcast := &agentsBroadcaster{}
 		prevAgentsBcast := setOAuthTokenAgentsBroadcaster(oauthTokenStore, agentsBcast)
 		t.Cleanup(func() { oauthTokenStore.SetNotifier(prevAgentsBcast) })
-		baseline := agentsBcast.subscriberCount()
+		baseline := agentsBcast.SubscriberCount()
 
 		clientConn, serverConn := net.Pipe()
 		mux := http.NewServeMux()
@@ -18207,21 +18207,21 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		}
 		_ = clientConn.SetReadDeadline(time.Time{})
 
-		if got := agentsBcast.subscriberCount(); got != baseline+1 {
+		if got := agentsBcast.SubscriberCount(); got != baseline+1 {
 			t.Fatalf("agentsBcast.subscriberCount=%d after subscribe, "+
 				"want %d (R-T6VA-9U84)", got, baseline+1)
 		}
 
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			if agentsBcast.subscriberCount() == baseline {
+			if agentsBcast.SubscriberCount() == baseline {
 				return
 			}
 			time.Sleep(25 * time.Millisecond)
 		}
 		t.Fatalf("agents-stream subscriber not released within 5s of "+
 			"client going silent; count=%d, want %d (R-T6VA-9U84)",
-			agentsBcast.subscriberCount(), baseline)
+			agentsBcast.SubscriberCount(), baseline)
 	})
 }
 

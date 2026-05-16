@@ -54,29 +54,23 @@ columns, and the static binary still builds.
 
 ## Result — 2026-05-16
 
-Completed a coherent JSON-API extraction slice into `app-root/jsonapi`.
-Moved the shared request body cap/error helpers, request-base URL helper,
-OAuth metadata JSON documents, OAuth DCR JSON endpoint, OAuth token JSON
-endpoint, bearer/mutation auth error shaping, and counter read/mutation
-JSON response logic behind `jsonapi.Surface`. The main package now wires
-that surface through thin adapters so existing routing, test seams, access-log
-user attribution, browser flows, and MCP transport behavior remain unchanged.
-Agent SSE JSON remains in `main.go` because it is still coupled to the
-main-owned broadcaster and stream timing state.
+Completed the remaining agent-management JSON-API extraction slice. Moved the
+`/agents/revoke` action, `/agents/stream` SSE JSON snapshot formatting, and
+per-owner agent stream broadcaster into `app-root/jsonapi`, with `main.go`
+left as routing, context-default, timing, and notifier wiring. The main package
+keeps thin compatibility wrappers for existing tests and call sites.
 
 Files changed: `app-root/jsonapi/jsonapi.go`, `app-root/main.go`,
 `app-root/main_test.go`, `NEXT.md`.
 
-Verification: `env -u GOROOT go test -run '^$' .` passed; focused
-JSON/API/build tests passed with `env -u GOROOT go test -run
-'TestR_(SAK8_WB9W|8OAK_OKFV|8PIH_2C6K|2I2S_XB7K|340Z_T6K2|H3FE_QFC0|3JCR_C810|2XEK_GCOI|3UT3_IKZG|27SO_F63X|B78O_8X0F)' .`;
-focused race run passed with the same `-run` set; `env -u GOROOT go vet
-./...` passed; line-length scan for Go files passed; `env -u GOROOT
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` passed.
-Broad `env -u GOROOT go test ./...` and `env -u GOROOT go test -race
-./...` still fail only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests`
-because `.ralph/requirements-verified.jsonl` is permission denied; per
-`helper/REFACTOR.md`, that local Ralph state is out of scope for this
-refactor iteration. Running Go commands without unsetting the inherited
-`GOROOT` also fails before project compilation because it points at a
-Go 1.23.5 tree while the active tool is Go 1.26.2.
+Verification: `env -u GOROOT go test -run
+'TestR_(D0XD_1YT0|0TVF_0BKI|T6VA_9U84|R4RG_O4Y9)' .` passed; the same focused
+set passed under `-race`; `env -u GOROOT go test -run '^$' .` passed;
+`env -u GOROOT go vet ./...` passed; Go source line-length scan passed;
+`git diff --check` passed; `env -u GOROOT CGO_ENABLED=0 GOOS=linux
+GOARCH=amd64 go build -o hal .` passed. Broad `env -u GOROOT go test ./...`
+and `env -u GOROOT go test -race ./...` still fail only at
+`TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+`.ralph/requirements-verified.jsonl` is permission denied; per
+`helper/REFACTOR.md`, that local Ralph state is out of scope for this refactor
+iteration.

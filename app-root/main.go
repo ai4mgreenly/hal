@@ -102,6 +102,10 @@ func appNewTicker(d time.Duration) appTicker {
 	return c.NewTicker(d)
 }
 
+func appNewJSONAPITicker(d time.Duration) jsonapipkg.Ticker {
+	return appNewTicker(d)
+}
+
 // R-Z3LX-89W1: tool names and descriptions registered below are written
 // for a model audience — each name is the verb-on-resource form
 // (counter_read / counter_increment / counter_decrement) and each
@@ -295,69 +299,7 @@ func counterFromContext(ctx context.Context) *counterpkg.Counter {
 	return newCounter()
 }
 
-// R-0TVF-0BKI: the agents block's live-update channel is fed by an
-// email-scoped fan-out broadcaster. Subscribers register a bounded
-// coalescing channel (capacity 1) and an owner email; notify(email)
-// wakes only the subscribers whose email matches, so a connected
-// visitor sees their own chain events and nothing else. The wake is a
-// payload-less tick — the handler re-reads the visitor's current
-// chains under the token-store lock and writes the result. This keeps
-// the broadcaster free of stale snapshots and serializes every
-// observer on the same authoritative read, regardless of which write
-// site (issueRefresh, rotateRefresh reuse-detection, manual revoke)
-// triggered the notification.
-type agentsBroadcaster struct {
-	mu   sync.Mutex
-	subs map[*agentsSubscriber]struct{}
-}
-
-type agentsSubscriber struct {
-	email string
-	ch    chan struct{}
-}
-
-func (b *agentsBroadcaster) subscribe(email string) *agentsSubscriber {
-	sub := &agentsSubscriber{email: email, ch: make(chan struct{}, 1)}
-	b.mu.Lock()
-	if b.subs == nil {
-		b.subs = make(map[*agentsSubscriber]struct{})
-	}
-	b.subs[sub] = struct{}{}
-	b.mu.Unlock()
-	return sub
-}
-
-func (b *agentsBroadcaster) unsubscribe(sub *agentsSubscriber) {
-	b.mu.Lock()
-	delete(b.subs, sub)
-	b.mu.Unlock()
-}
-
-func (b *agentsBroadcaster) subscriberCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.subs)
-}
-
-func (b *agentsBroadcaster) notify(email string) {
-	if email == "" {
-		return
-	}
-	b.mu.Lock()
-	targets := make([]*agentsSubscriber, 0, len(b.subs))
-	for s := range b.subs {
-		if s.email == email {
-			targets = append(targets, s)
-		}
-	}
-	b.mu.Unlock()
-	for _, s := range targets {
-		select {
-		case s.ch <- struct{}{}:
-		default:
-		}
-	}
-}
+type agentsBroadcaster = jsonapipkg.AgentsBroadcaster
 
 // openCounterDB opens (or creates) the SQLite database at path, ensures
 // the single-row counter table exists, and returns the open handle. The
@@ -1439,7 +1381,7 @@ func oauthTokenHash(plaintext string) string {
 func setOAuthTokenAgentsBroadcaster(s *oauthTokenStorage, b *agentsBroadcaster) func(string) {
 	var next func(string)
 	if b != nil {
-		next = b.notify
+		next = b.Notify
 	}
 	return s.SetNotifier(next)
 }
@@ -1455,12 +1397,25 @@ func jsonAPISurface(
 		OAuthClients:                clients,
 		OAuthAuthCodes:              authCodes,
 		Now:                         appNow,
+		NewTicker:                   appNewJSONAPITicker,
 		NewOAuthClientID:            newOAuthClientID,
 		CanonicalResourceIdentifier: canonicalResourceIdentifier,
 		AccessTokenTTL: func() time.Duration {
 			return authCfg().AccessTokenTTL
 		},
+		StreamHeartbeatInterval:  streamHeartbeatInterval,
+		StreamWriteTimeout:       streamWriteTimeout,
+		AgentsStreamTickInterval: agentsStreamTickInterval,
 	}
+}
+
+func jsonAPISurfaceWithAgents(
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage,
+	clients *oauthClientStorage, authCodes *oauthAuthCodeStorage, agents *agentsBroadcaster,
+) jsonapipkg.Surface {
+	s := jsonAPISurface(c, sessions, tokens, clients, authCodes)
+	s.Agents = agents
+	return s
 }
 
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
@@ -2263,34 +2218,7 @@ func handleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
 func handleAgentsRevokeWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	var session *webSession
-	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.Lookup(c.Value)
-	}
-	if session == nil {
-		writeMutationUnauthorized(w, "invalid_token",
-			"web session required")
-		return
-	}
-	if !sameOriginBrowserMutationR_R4RG_O4Y9(r) {
-		writeSameOriginForbiddenR_R4RG_O4Y9(w)
-		return
-	}
-	limitRequestBodyR_VKZD_UKVS(w, r)
-	if err := r.ParseForm(); err != nil {
-		if requestBodyTooLargeR_VKZD_UKVS(err) {
-			writeBodyTooLargeR_VKZD_UKVS(w)
-			return
-		}
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	chainID := r.PostForm.Get("chain_id")
-	if !tokens.RevokeChain(chainID, session.OwnerEmail()) {
-		http.Error(w, "chain not found", http.StatusNotFound)
-		return
-	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	jsonAPISurface(nil, sessions, tokens, nil, nil).HandleAgentsRevoke(w, r)
 }
 
 // R-2I2S-XB7K: GET /counter returns HTTP 200 with a JSON object carrying
@@ -2387,98 +2315,7 @@ func handleAgentsStreamWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
 	bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request,
 ) {
-	var session *webSession
-	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.Lookup(c.Value)
-	}
-	if session == nil {
-		http.Error(w, "web session required",
-			http.StatusUnauthorized)
-		return
-	}
-	email := session.OwnerEmail()
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported",
-			http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-"+"stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	rc := http.NewResponseController(w)
-
-	sub := bcast.subscribe(email)
-	defer bcast.unsubscribe(sub)
-
-	writeBytes := func(p []byte) error {
-		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))
-		if _, err := w.Write(p); err != nil {
-			return err
-		}
-		flusher.Flush()
-		_ = rc.SetWriteDeadline(time.Time{})
-		return nil
-	}
-	writeSnapshot := func() error {
-		chains := tokens.LiveAgentChains(email, clients)
-		webpkg.SortAgentChainsByRenderedIdentity(chains)
-		type item struct {
-			ChainID    string `json:"chain_id"`
-			ClientID   string `json:"client_id"`
-			ClientName string `json:"client_name"`
-			IssuedAt   string `json:"issued_at"`
-		}
-		out := make([]item, 0, len(chains))
-		for _, c := range chains {
-			out = append(out, item{
-				ChainID:    c.ChainID,
-				ClientID:   c.ClientID,
-				ClientName: c.ClientName,
-				IssuedAt:   c.IssuedAt.UTC().Format(time.RFC3339Nano),
-			})
-		}
-		payload, err := json.Marshal(out)
-		if err != nil {
-			return err
-		}
-		return writeBytes([]byte("data: " + string(payload) + "\n\n"))
-	}
-
-	if err := writeSnapshot(); err != nil {
-		return
-	}
-
-	hb := appNewTicker(streamHeartbeatInterval())
-	defer hb.Stop()
-	// R-8UAA-YKR9: passive TTL crossings have no write event; a 1s
-	// ticker recomputes the snapshot so the page converges within the
-	// R-0TVF-0BKI budget.
-	tick := appNewTicker(agentsStreamTickInterval())
-	defer tick.Stop()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-sub.ch:
-			if err := writeSnapshot(); err != nil {
-				return
-			}
-		case <-tick.C():
-			if err := writeSnapshot(); err != nil {
-				return
-			}
-		case <-hb.C():
-			if err := writeBytes([]byte(":hb\n\n")); err != nil {
-				return
-			}
-		}
-	}
+	jsonAPISurfaceWithAgents(nil, sessions, tokens, clients, nil, bcast).HandleAgentsStream(w, r)
 }
 
 // agentsStreamTickInterval is the cadence at which handleAgentsStream

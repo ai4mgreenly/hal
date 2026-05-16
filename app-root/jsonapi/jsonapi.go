@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
@@ -26,10 +28,33 @@ type Surface struct {
 	OAuthTokens                 *oauthpkg.TokenStore
 	OAuthClients                *oauthpkg.ClientStore
 	OAuthAuthCodes              *oauthpkg.AuthCodeStore
+	Agents                      *AgentsBroadcaster
 	Now                         func() time.Time
+	NewTicker                   func(time.Duration) Ticker
 	NewOAuthClientID            func() (string, error)
 	CanonicalResourceIdentifier func() string
 	AccessTokenTTL              func() time.Duration
+	StreamHeartbeatInterval     func() time.Duration
+	StreamWriteTimeout          func() time.Duration
+	AgentsStreamTickInterval    func() time.Duration
+}
+
+// Ticker is the timer surface used by long-lived JSON streams.
+type Ticker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type realTicker struct {
+	t *time.Ticker
+}
+
+func (t realTicker) C() <-chan time.Time {
+	return t.t.C
+}
+
+func (t realTicker) Stop() {
+	t.t.Stop()
 }
 
 func (s Surface) now() time.Time {
@@ -37,6 +62,13 @@ func (s Surface) now() time.Time {
 		return s.Now()
 	}
 	return time.Now()
+}
+
+func (s Surface) newTicker(d time.Duration) Ticker {
+	if s.NewTicker != nil {
+		return s.NewTicker(d)
+	}
+	return realTicker{t: time.NewTicker(d)}
 }
 
 func (s Surface) newOAuthClientID() (string, error) {
@@ -58,6 +90,93 @@ func (s Surface) accessTokenTTL() time.Duration {
 		return s.AccessTokenTTL()
 	}
 	return time.Hour
+}
+
+func (s Surface) streamHeartbeatInterval() time.Duration {
+	if s.StreamHeartbeatInterval != nil {
+		return s.StreamHeartbeatInterval()
+	}
+	return 2 * time.Second
+}
+
+func (s Surface) streamWriteTimeout() time.Duration {
+	if s.StreamWriteTimeout != nil {
+		return s.StreamWriteTimeout()
+	}
+	return time.Second
+}
+
+func (s Surface) agentsStreamTickInterval() time.Duration {
+	if s.AgentsStreamTickInterval != nil {
+		return s.AgentsStreamTickInterval()
+	}
+	return 500 * time.Millisecond
+}
+
+func (s Surface) agents() *AgentsBroadcaster {
+	if s.Agents != nil {
+		return s.Agents
+	}
+	return &AgentsBroadcaster{}
+}
+
+// AgentsBroadcaster fans out per-owner agent-list changes to stream subscribers.
+type AgentsBroadcaster struct {
+	mu   sync.Mutex
+	subs map[*AgentsSubscriber]struct{}
+}
+
+// AgentsSubscriber is one live /agents/stream subscriber.
+type AgentsSubscriber struct {
+	email string
+	ch    chan struct{}
+}
+
+// Subscribe registers a bounded per-owner wake channel.
+func (b *AgentsBroadcaster) Subscribe(email string) *AgentsSubscriber {
+	sub := &AgentsSubscriber{email: email, ch: make(chan struct{}, 1)}
+	b.mu.Lock()
+	if b.subs == nil {
+		b.subs = make(map[*AgentsSubscriber]struct{})
+	}
+	b.subs[sub] = struct{}{}
+	b.mu.Unlock()
+	return sub
+}
+
+// Unsubscribe releases a subscriber.
+func (b *AgentsBroadcaster) Unsubscribe(sub *AgentsSubscriber) {
+	b.mu.Lock()
+	delete(b.subs, sub)
+	b.mu.Unlock()
+}
+
+// SubscriberCount returns the current subscriber count.
+func (b *AgentsBroadcaster) SubscriberCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
+}
+
+// Notify wakes subscribers for one owner email.
+func (b *AgentsBroadcaster) Notify(email string) {
+	if email == "" {
+		return
+	}
+	b.mu.Lock()
+	targets := make([]*AgentsSubscriber, 0, len(b.subs))
+	for s := range b.subs {
+		if s.email == email {
+			targets = append(targets, s)
+		}
+	}
+	b.mu.Unlock()
+	for _, s := range targets {
+		select {
+		case s.ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // LimitRequestBody wraps r.Body with the shared fixed cap before parsing.
@@ -103,6 +222,164 @@ func (s Surface) HandleCounterRead(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(struct {
 		Value uint64 `json:"value"`
 	}{Value: s.Counter.Read()})
+}
+
+// HandleAgentsRevoke revokes one OAuth token chain for the signed-in visitor.
+func (s Surface) HandleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
+	var session *websessionpkg.Session
+	if c, err := r.Cookie(websessionpkg.CookieName); err == nil {
+		session = s.WebSessions.Lookup(c.Value)
+	}
+	if session == nil {
+		WriteMutationUnauthorized(w, "invalid_token", "web session required")
+		return
+	}
+	if !SameOriginBrowserMutation(r) {
+		WriteSameOriginForbidden(w)
+		return
+	}
+	LimitRequestBody(w, r)
+	if err := r.ParseForm(); err != nil {
+		if RequestBodyTooLarge(err) {
+			WriteBodyTooLarge(w)
+			return
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	chainID := r.PostForm.Get("chain_id")
+	if !s.OAuthTokens.RevokeChain(chainID, session.OwnerEmail()) {
+		http.Error(w, "chain not found", http.StatusNotFound)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// HandleAgentsStream streams the signed-in visitor's live agent chains as SSE JSON.
+func (s Surface) HandleAgentsStream(w http.ResponseWriter, r *http.Request) {
+	var session *websessionpkg.Session
+	if c, err := r.Cookie(websessionpkg.CookieName); err == nil {
+		session = s.WebSessions.Lookup(c.Value)
+	}
+	if session == nil {
+		http.Error(w, "web session required", http.StatusUnauthorized)
+		return
+	}
+	email := session.OwnerEmail()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-"+"stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	rc := http.NewResponseController(w)
+
+	agents := s.agents()
+	sub := agents.Subscribe(email)
+	defer agents.Unsubscribe(sub)
+
+	writeBytes := func(p []byte) error {
+		_ = rc.SetWriteDeadline(s.now().Add(s.streamWriteTimeout()))
+		if _, err := w.Write(p); err != nil {
+			return err
+		}
+		flusher.Flush()
+		_ = rc.SetWriteDeadline(time.Time{})
+		return nil
+	}
+	writeSnapshot := func() error {
+		payload, err := s.marshalAgentSnapshot(email)
+		if err != nil {
+			return err
+		}
+		return writeBytes([]byte("data: " + string(payload) + "\n\n"))
+	}
+
+	if err := writeSnapshot(); err != nil {
+		return
+	}
+
+	hb := s.newTicker(s.streamHeartbeatInterval())
+	defer hb.Stop()
+	tick := s.newTicker(s.agentsStreamTickInterval())
+	defer tick.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sub.ch:
+			if err := writeSnapshot(); err != nil {
+				return
+			}
+		case <-tick.C():
+			if err := writeSnapshot(); err != nil {
+				return
+			}
+		case <-hb.C():
+			if err := writeBytes([]byte(":hb\n\n")); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s Surface) marshalAgentSnapshot(email string) ([]byte, error) {
+	chains := s.OAuthTokens.LiveAgentChains(email, s.OAuthClients)
+	sortAgentChainsByRenderedIdentity(chains)
+	type item struct {
+		ChainID    string `json:"chain_id"`
+		ClientID   string `json:"client_id"`
+		ClientName string `json:"client_name"`
+		IssuedAt   string `json:"issued_at"`
+	}
+	out := make([]item, 0, len(chains))
+	for _, c := range chains {
+		out = append(out, item{
+			ChainID:    c.ChainID,
+			ClientID:   c.ClientID,
+			ClientName: c.ClientName,
+			IssuedAt:   c.IssuedAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return json.Marshal(out)
+}
+
+func sortAgentChainsByRenderedIdentity(chains []oauthpkg.AgentChain) {
+	sort.SliceStable(chains, func(i, j int) bool {
+		leftName := strings.ToLower(agentChainRenderedName(chains[i]))
+		rightName := strings.ToLower(agentChainRenderedName(chains[j]))
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		leftPrefix := agentChainRenderedIDPrefix(chains[i])
+		rightPrefix := agentChainRenderedIDPrefix(chains[j])
+		if leftPrefix != rightPrefix {
+			return leftPrefix < rightPrefix
+		}
+		return chains[i].ChainID < chains[j].ChainID
+	})
+}
+
+func agentChainRenderedName(ch oauthpkg.AgentChain) string {
+	if ch.ClientName == "" {
+		return "undefined"
+	}
+	return ch.ClientName
+}
+
+func agentChainRenderedIDPrefix(ch oauthpkg.AgentChain) string {
+	prefix := ch.ClientID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return prefix
 }
 
 // HandleOAuthAuthorizationServerMetadata writes the OAuth AS metadata document.
