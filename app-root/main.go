@@ -2833,6 +2833,8 @@ var onListenerReady func(net.Addr)
 // hook; runServe checks for cancellation before calling net.Listen.
 var onPortParsed func(int)
 
+const serveShutdownGrace = 500 * time.Millisecond
+
 // R-75VF-7137: `hal serve` accepts --port (default 3000), --ip (default
 // 127.0.0.1), and --db (default ./hal.db); with defaults it binds a TCP
 // listener at 127.0.0.1:3000 and serves it. Plain HTTP per R-PVA6-Q6OB —
@@ -2897,23 +2899,20 @@ func runServeWithEnvAndClock(
 			fmt.Fprintf(stderr, "serve: open db %q: %v\n", *dbPath, err)
 			return 1
 		}
+		defer func() { _ = db.Close() }()
 		if err := theCounter.attach(db); err != nil {
-			_ = db.Close()
 			fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 			return 1
 		}
 		if err := oauthClientStore.attach(db); err != nil {
-			_ = db.Close()
 			fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
 			return 1
 		}
 		if err := webSessionStore.attach(db); err != nil {
-			_ = db.Close()
 			fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
 			return 1
 		}
 		if err := oauthTokenStore.attach(db); err != nil {
-			_ = db.Close()
 			fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
 			return 1
 		}
@@ -3055,7 +3054,12 @@ func runServeWithEnvAndClock(
 	go func() { done <- srv.Serve(ln) }()
 	select {
 	case <-ctx.Done():
-		_ = srv.Close()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownGrace)
+		err := srv.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
+			_ = srv.Close()
+		}
 		<-done
 		return 0
 	case err := <-done:

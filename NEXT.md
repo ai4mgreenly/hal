@@ -1,39 +1,46 @@
 # NEXT — one transformation
 
-## Route all time access through one injected clock
+## Complete shutdown so it drains in-flight requests and releases the database
 
-**Outcome.** Every reading of the current time and every timer or ticker
-the application creates resolves through a single clock abstraction that
-the program entry point supplies as a parameter — not through direct
-`time.Now`, `time.NewTicker`, `time.NewTimer`, `time.After`, or
-`time.Sleep` calls spread through the code. The clock provides at least
-the current instant and the creation of tickers; deadlines currently
-derived from the current time (write deadlines and the like) are computed
-from that injected clock's notion of now. Duration values themselves
-(heartbeat interval, tick interval, write timeout) keep coming from
-configuration as they do today — this seam governs *when it is now* and
-*who issues timers*, not how long the intervals are.
+**Outcome.** When the lifecycle context the entry point already owns and
+threads inward is cancelled (operator signal, or a test cancelling its
+own context), the running server stops accepting new connections, lets
+in-flight requests finish within a single bounded grace period, and only
+then forces any still-open connections closed — instead of severing
+connections abruptly the instant the context is done. As part of the
+same teardown, the database opened at serve startup is closed on every
+path the serve routine returns through, including the normal
+signal-driven shutdown that today returns without closing it. The
+signal-derived cancellation context remains the single lifecycle source
+the entry point supplies and threads inward; this transformation routes
+teardown *through that existing seam* and does not introduce a new one.
 
-**Why.** The entry point must be able to run the entire application
-against a controllable clock, so time-dependent behavior — expiry
-checks, heartbeats, stream ticks, deadlines — is exercisable
-deterministically without real sleeps or dependence on wall-clock
-progression. This mirrors the environment seam already in place and
-establishes the time seam the lifecycle/cancellation transformation
-that follows will build on.
+**Why.** The cancellation seam is already in place — context is threaded
+from the entry point through the serve wrappers. But the teardown riding
+on it is incomplete: shutdown severs live connections mid-request, and
+the startup-opened database handle is leaked on the normal shutdown path
+(it is closed only on start-up attach-error paths). Idiomatic Go drains
+then releases. Every owned resource having exactly one open/close
+lifecycle is the precondition the singleton-strangling and
+package-extraction steps that follow depend on; completing teardown now,
+on the existing seam, establishes it.
 
 ## Scope
 
-- In production the injected clock *is* the real time source, so
-  observable behavior is identical and every existing test continues to
-  pass unchanged.
-- Thread the clock the same way the environment lookup is threaded: the
-  entry point owns the real clock and passes it inward; the existing
-  test-facing wrappers remain the substitution point.
-- Do **only** the clock seam. Do **not** also introduce a
-  lifecycle/cancellation context, graceful shutdown, database-close
-  handling, singleton strangling, package extraction, or removal of any
-  under-test branch — each of those is a separate later iteration.
+- The grace period is bounded: if in-flight requests do not finish
+  within it, fall back to forcing connections closed, so a slow or hung
+  request cannot wedge shutdown. Context cancellation must still return
+  promptly — the existing tests that cancel the context and expect a
+  clean, timely return depend on that.
+- Close exactly the database the serve routine opened, on every path
+  that routine returns — and only that. Tests do not open it on this
+  path (it is opened only outside `testing.Testing()`), and their
+  behavior must remain unaffected.
+- This is a move through the existing context seam, not a new seam. Do
+  **only** the shutdown-drain and database-release completion. Do
+  **not** also strangle singletons, extract packages, remove any
+  under-test branch, or change request handling, routing, or the entry
+  point's signal set.
 - Do not modify, weaken, or skip any test. Do not edit reqs/ (the
   behavioral contract) or helper/.
 
@@ -45,33 +52,27 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result - 2026-05-16
 
-Completed the clock-seam iteration. Added a single `appClock` abstraction
-with `Now` and ticker creation, installed by the serve entry path, and routed
-production time reads/tickers/write-deadline calculations through it while
-leaving the existing test-facing `*Now` function variables as substitution
-points.
+Completed the shutdown-drain/database-release iteration. `runServe` now
+uses the existing lifecycle context to stop accepting new connections,
+wait through a single 500ms graceful shutdown window, and force-close any
+remaining connections if that window expires. The database opened by the
+non-test serve startup path is now closed by one deferred owner path on
+every return after open, including startup configuration failures and
+normal context-driven shutdown.
 
 Files changed:
 - `app-root/main.go`
 - `NEXT.md`
 
 Verification:
-- `GOROOT=/usr/local/go go test ./...` compiled and ran, but failed only at
-  `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because local
-  `.ralph/requirements-verified.jsonl` is permission-denied; this is the
-  out-of-scope Ralph-state failure covered by `helper/REFACTOR.md`.
-- `GOROOT=/usr/local/go go test -race ./...` reached the same `.ralph`
-  permission-denied failure.
-- `GOROOT=/usr/local/go go test -run 'TestR_(ZBV4_KEJ6|TNXJ_ZWQ0|E5GH_PN6G|KJ15_9P17|3JCR_C810|19BA_4XX4|FZC6_H2SB|T4FH_IAQQ|T5ND_W2HF|D3YH_0JYE|DB9V_B6EK|0TVF_0BKI|T6VA_9U84|195O_JBGX|MTRN_DL9W|B78O_8X0F|8UAA_YKR9)' ./...` passed.
-- `GOROOT=/usr/local/go go test -race -run 'TestR_(FZC6_H2SB|T5ND_W2HF|D3YH_0JYE|0TVF_0BKI|195O_JBGX|TNXJ_ZWQ0|KJ15_9P17)' ./...` passed.
-- `GOROOT=/usr/local/go go vet ./...` passed.
-- `gofmt -w main.go main_test.go` completed; line-length scan over
-  `main.go` and `main_test.go` found no lines over 120 columns.
-- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` passed.
+- `env -u GOROOT go test -run 'TestR_K7DK_LSJ6_serve_exits_within_1s_on_signal|TestR_FZC6_H2SB_counter_stream_live_updates|TestR_T4FH_IAQQ_service_responsive_with_many_streams|TestR_T6VA_9U84_agents_stream_resource_budget'` passed.
+- `env -u GOROOT go test -run 'TestR_K7DK_LSJ6_serve_exits_within_1s_on_signal|TestR_FZC6_H2SB_counter_stream_live_updates|TestR_T4FH_IAQQ_service_responsive_with_many_streams|TestR_T6VA_9U84_agents_stream_resource_budget|TestR_195O_JBGX_access_log_concurrent_writes_race_free'` passed.
+- `env -u GOROOT go test -race -run 'TestR_K7DK_LSJ6_serve_exits_within_1s_on_signal|TestR_FZC6_H2SB_counter_stream_live_updates|TestR_T4FH_IAQQ_service_responsive_with_many_streams|TestR_T6VA_9U84_agents_stream_resource_budget|TestR_195O_JBGX_access_log_concurrent_writes_race_free'` passed.
+- `env -u GOROOT go vet ./...` passed.
+- `gofmt -w main.go` completed; line-length scan over Go sources found no lines over 120 columns.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal ./...` passed.
+- `env -u GOROOT go test ./...` and `env -u GOROOT go test -race ./...` both failed only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because local `.ralph/requirements-verified.jsonl` is permission-denied; this is the out-of-scope Ralph-state failure covered by `helper/REFACTOR.md`.
 
 Blockers / follow-up risks:
-- The shell environment has `GOROOT` set to an older Go tree
-  (`/home/mgreenly/.local/go1.23.5.linux-amd64`) while `go` reports
-  `go1.26.2`; verification required `GOROOT=/usr/local/go`.
-- Broad full-suite and race commands remain blocked by local `.ralph`
-  permission state, not by this refactor.
+- The shell has `GOROOT` set to `/home/mgreenly/.local/go1.23.5.linux-amd64` while `go` reports `go1.26.2`; verification required unsetting `GOROOT`.
+- Broad full-suite and broad race commands remain blocked by local `.ralph` permission state, not by this refactor.
