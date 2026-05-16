@@ -34,6 +34,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	oauthpkg "github.com/mgreenly/hal/oauth"
 	websessionpkg "github.com/mgreenly/hal/websession"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
@@ -1384,46 +1385,19 @@ func ncsaEscapeR_D8U2_JMX6(s string) string {
 // no token chain is issued. The store is in-memory: the single-process
 // deployment topology (R-MOIF-IUXZ) does not need cross-instance sharing,
 // and the 5-minute TTL bounds memory growth.
-type oauthStateRecord struct {
-	bindingID string
-	expiresAt time.Time
-	consumed  bool
-	// R-MTRN-DL9W: the origin discriminator names which redirect-to-
-	// Google code path created this record. Exactly two values exist
-	// today: "web" (the /login redirect) and "mcp" (the
-	// /oauth/authorize redirect). Recorded at state-creation time;
-	// never mutated. R-MUZJ-RD0L dispatches on this value after the
-	// state-binding and workspace-domain checks have both passed.
-	origin string
-	// R-MTRN-DL9W: for "mcp"-origin records, the originating
-	// authorize-request context the callback needs to complete its
-	// work without consulting any other source. Nil for "web"-origin
-	// records (no extra context is required to establish a web
-	// session and redirect to /).
-	mcp *oauthStateMCPContext
-}
-
-// oauthStateMCPContext carries the byte-for-byte authorize-request
-// values R-MTRN-DL9W pins onto an "mcp"-origin state record. The
-// callback consults these (not the callback request's query
-// parameters) when minting the HAL authorization code and building
-// the redirect to the MCP client's registered callback URL.
-type oauthStateMCPContext struct {
-	clientID            string
-	redirectURI         string
-	codeChallenge       string
-	codeChallengeMethod string
-	clientState         string
-	resource            string
-}
-
-type oauthStateStorage struct {
-	mu sync.Mutex
-	m  map[string]*oauthStateRecord
-}
+type oauthStateRecord = oauthpkg.StateRecord
+type oauthStateMCPContext = oauthpkg.StateMCPContext
+type oauthStateStorage = oauthpkg.StateStore
 
 func newOAuthStateStorage() *oauthStateStorage {
-	return &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+	return oauthpkg.NewStateStore(oauthpkg.StateOptions{
+		Now: func() time.Time {
+			return oauthStateNow()
+		},
+		TTL: func() time.Duration {
+			return authCfg().OAuthStateTTL
+		},
+	})
 }
 
 // oauthStateNow is the clock the state store reads for expiry comparisons.
@@ -1438,96 +1412,25 @@ var oauthStateNow = appNow
 // oauthStateCookieName is the cookie that binds a /login redirect to the
 // originating browser session for R-ETP6-60VA. Its value is the random
 // bindingID recorded server-side alongside the state.
-const oauthStateCookieName = "hal_oauth_state"
-
-// putWeb records a "web"-origin state value (the /login redirect to
-// Google) with its session-binding ID and the configured TTL.
-// R-MTRN-DL9W: web-origin records carry the origin discriminator
-// but no additional context — establishing the eventual web session
-// (R-CXJ2-R3BN) needs nothing more from the originating request.
-func (s *oauthStateStorage) putWeb(state, bindingID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[state] = &oauthStateRecord{
-		bindingID: bindingID,
-		expiresAt: oauthStateNow().Add(authCfg().OAuthStateTTL),
-		origin:    "web",
-	}
-}
-
-// putMCP records an "mcp"-origin state value (the /oauth/authorize
-// redirect to Google) with its session-binding ID, the configured
-// TTL, and the byte-for-byte authorize-request context R-MTRN-DL9W
-// pins. The callback (R-MUZJ-RD0L) reads these recorded values when
-// minting the HAL authorization code and building the redirect to
-// the MCP client's registered callback URL — it does NOT re-read
-// them from the callback request's query parameters.
-func (s *oauthStateStorage) putMCP(state, bindingID string,
-	ctx oauthStateMCPContext) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[state] = &oauthStateRecord{
-		bindingID: bindingID,
-		expiresAt: oauthStateNow().Add(authCfg().OAuthStateTTL),
-		origin:    "mcp",
-		mcp:       &ctx,
-	}
-}
+const oauthStateCookieName = oauthpkg.StateCookieName
 
 // errOAuthState* enumerate the distinct rejection causes the callback
 // surfaces, mirroring the R-EV2D-QTR1 posture of "one description per
 // distinct failure".
 var (
-	errOAuthStateMissing      = errors.New("state parameter missing")
-	errOAuthStateUnknown      = errors.New("state value not recognized")
-	errOAuthStateExpired      = errors.New("state value expired")
-	errOAuthStateConsumed     = errors.New("state value already used")
-	errOAuthBindingMissing    = errors.New("session-binding cookie missing")
-	errOAuthBindingMismatched = errors.New("session-binding cookie does not match")
+	errOAuthStateMissing      = oauthpkg.ErrStateMissing
+	errOAuthStateUnknown      = oauthpkg.ErrStateUnknown
+	errOAuthStateExpired      = oauthpkg.ErrStateExpired
+	errOAuthStateConsumed     = oauthpkg.ErrStateConsumed
+	errOAuthBindingMissing    = oauthpkg.ErrBindingMissing
+	errOAuthBindingMismatched = oauthpkg.ErrBindingMismatched
 )
-
-// consume looks up `state` in the store, verifies the presented
-// `bindingID` matches the bound session, and marks the record consumed on
-// success. A second call with the same state value reports
-// errOAuthStateConsumed. Expiry is checked against oauthStateNow().
-//
-// On success the record is returned (in its now-consumed form) so the
-// caller can dispatch on R-MTRN-DL9W's origin discriminator and read
-// the R-MUZJ-RD0L mcp context byte-for-byte from the recorded values —
-// it MUST NOT re-read these from the callback request's query
-// parameters.
-func (s *oauthStateStorage) consume(state, bindingID string) (*oauthStateRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.m[state]
-	if !ok {
-		return nil, errOAuthStateUnknown
-	}
-	if rec.consumed {
-		return nil, errOAuthStateConsumed
-	}
-	if !oauthStateNow().Before(rec.expiresAt) {
-		return nil, errOAuthStateExpired
-	}
-	if bindingID == "" {
-		return nil, errOAuthBindingMissing
-	}
-	if rec.bindingID != bindingID {
-		return nil, errOAuthBindingMismatched
-	}
-	rec.consumed = true
-	return rec, nil
-}
 
 // newOAuthStateValue returns a 32-character hex string drawn from
 // crypto/rand — 128 bits of entropy, sufficient for the "fresh
 // unguessable" property R-ETP6-60VA names.
 func newOAuthStateValue() (string, error) {
-	var buf [16]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
+	return oauthpkg.NewStateValue()
 }
 
 // R-3JCR-C810: a registered OAuth client record. R-YRMT-B7LZ keeps the
@@ -3547,7 +3450,7 @@ func handleLoginWithGoogleIDPAndStateStore(
 	// R-MTRN-DL9W: record the origin discriminator ("web") so the
 	// Google callback's dispatch (R-MUZJ-RD0L) can route this record
 	// to the web-session establishment path.
-	states.putWeb(state, bindingID)
+	states.PutWeb(state, bindingID)
 	// R-AYLJ-8SYX: the binding cookie is HttpOnly + SameSite=Lax, with
 	// `Secure` set only when the request reached the service over HTTPS
 	// (production posture detected via the forwarded-protocol signal,
@@ -3613,7 +3516,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 	if c, err := r.Cookie(oauthStateCookieName); err == nil {
 		presentedBinding = c.Value
 	}
-	stateRec, err := states.consume(state, presentedBinding)
+	stateRec, err := states.Consume(state, presentedBinding)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -3654,11 +3557,11 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// before origin dispatch, so neither web-origin nor mcp-origin
 		// callbacks mint a web session, HAL authorization code, or token
 		// chain from an unverified email claim.
-		if stateRec.origin == "mcp" && stateRec.mcp != nil {
-			writeOAuthErrorRedirect(w, r, stateRec.mcp.redirectURI,
+		if mcpCtx := stateRec.MCPContext(); stateRec.Origin() == "mcp" && mcpCtx != nil {
+			writeOAuthErrorRedirect(w, r, mcpCtx.RedirectURI,
 				"access_denied",
 				"Google email address is not verified",
-				stateRec.mcp.clientState)
+				mcpCtx.ClientState)
 			return
 		}
 		http.Error(w, "Google email address is not verified",
@@ -3671,11 +3574,11 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// mcp-origin gets the OAuth `error=access_denied` redirect back
 		// to the MCP client's registered redirect_uri with the client's
 		// original `state` echoed.
-		if stateRec.origin == "mcp" && stateRec.mcp != nil {
-			writeOAuthErrorRedirect(w, r, stateRec.mcp.redirectURI,
+		if mcpCtx := stateRec.MCPContext(); stateRec.Origin() == "mcp" && mcpCtx != nil {
+			writeOAuthErrorRedirect(w, r, mcpCtx.RedirectURI,
 				"access_denied",
 				"identity is not in the allowed Workspace domain",
-				stateRec.mcp.clientState)
+				mcpCtx.ClientState)
 			return
 		}
 		http.Error(w,
@@ -3687,9 +3590,10 @@ func handleGoogleCallbackWithGoogleIDPStores(
 	// state-binding (R-T37L-4J01) and workspace-domain (R-5LQM-O89D)
 	// checks above have both passed; only now is an authenticated
 	// artifact produced.
-	switch stateRec.origin {
+	switch stateRec.Origin() {
 	case "mcp":
-		if stateRec.mcp == nil {
+		mcpCtx := stateRec.MCPContext()
+		if mcpCtx == nil {
 			http.Error(w, "mcp state record missing context",
 				http.StatusInternalServerError)
 			return
@@ -3702,12 +3606,12 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// the code so token exchange can propagate it onto the
 		// access-token record.
 		code, err := authCodes.issueWithResource(
-			stateRec.mcp.clientID,
-			stateRec.mcp.redirectURI,
-			stateRec.mcp.codeChallenge,
-			stateRec.mcp.codeChallengeMethod,
+			mcpCtx.ClientID,
+			mcpCtx.RedirectURI,
+			mcpCtx.CodeChallenge,
+			mcpCtx.CodeChallengeMethod,
 			identity.Email,
-			stateRec.mcp.resource,
+			mcpCtx.Resource,
 		)
 		if err != nil {
 			http.Error(w, "authorization code issuance failed",
@@ -3718,9 +3622,9 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// using the RECORDED redirect_uri and the RECORDED original
 		// MCP `state` (echoed back). Do not establish a web session;
 		// do not touch the web-session store.
-		target := stateRec.mcp.redirectURI +
+		target := mcpCtx.RedirectURI +
 			"?code=" + url.QueryEscape(code) +
-			"&state=" + url.QueryEscape(stateRec.mcp.clientState)
+			"&state=" + url.QueryEscape(mcpCtx.ClientState)
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	case "web":
@@ -4445,13 +4349,13 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 	// canonical, either explicitly per R-4GRA-EGBY or by the
 	// R-WLUL-MZCD omission default. PKCE values are recorded byte-for-byte
 	// from the request.
-	states.putMCP(state, bindingID, oauthStateMCPContext{
-		clientID:            clientID,
-		redirectURI:         requested,
-		codeChallenge:       q.Get("code_challenge"),
-		codeChallengeMethod: q.Get("code_challenge_method"),
-		clientState:         q.Get("state"),
-		resource:            requestedResource,
+	states.PutMCP(state, bindingID, oauthStateMCPContext{
+		ClientID:            clientID,
+		RedirectURI:         requested,
+		CodeChallenge:       q.Get("code_challenge"),
+		CodeChallengeMethod: q.Get("code_challenge_method"),
+		ClientState:         q.Get("state"),
+		Resource:            requestedResource,
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookieName,

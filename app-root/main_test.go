@@ -8735,17 +8735,15 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 		state, bindingID := loginAndExtract(t)
 		// The recorded state must be present in the store and bound to
 		// the cookie value just written.
-		states.mu.Lock()
-		rec, ok := states.m[state]
-		states.mu.Unlock()
+		rec, ok := states.Snapshot(state)
 		if !ok {
 			t.Fatalf("state %q not recorded server-side (R-ETP6-60VA)", state)
 		}
-		if rec.bindingID != bindingID {
+		if rec.BindingID() != bindingID {
 			t.Fatalf("recorded bindingID = %q, want %q (R-ETP6-60VA)",
-				rec.bindingID, bindingID)
+				rec.BindingID(), bindingID)
 		}
-		if rec.consumed {
+		if rec.Consumed() {
 			t.Fatalf("newly recorded state is already consumed (R-ETP6-60VA)")
 		}
 	})
@@ -8808,10 +8806,8 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 				"(R-ETP6-60VA)", res.StatusCode)
 		}
 		// The state must still be unconsumed after a rejected callback.
-		states.mu.Lock()
-		rec := states.m[state]
-		states.mu.Unlock()
-		if rec != nil && rec.consumed {
+		rec, _ := states.Snapshot(state)
+		if rec != nil && rec.Consumed() {
 			t.Fatalf("rejected callback consumed the state (R-ETP6-60VA)")
 		}
 	})
@@ -11027,7 +11023,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := len(states.m)
+			before := states.Count()
 			v := url.Values{}
 			for key, vals := range base {
 				v[key] = append([]string(nil), vals...)
@@ -11041,7 +11037,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 			if loc := rec.Header().Get("Location"); loc != "" {
 				t.Fatalf("Location = %q, want no redirect (R-BAXT-SBU9)", loc)
 			}
-			if after := len(states.m); after != before {
+			if after := states.Count(); after != before {
 				t.Fatalf("oauth state records changed from %d to %d on rejection (R-BAXT-SBU9)",
 					before, after)
 			}
@@ -11107,7 +11103,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		{"other", func(v url.Values) { v.Set("code_challenge_method", "S384") }},
 	} {
 		t.Run("authorize_rejects_"+tc.name, func(t *testing.T) {
-			before := len(states.m)
+			before := states.Count()
 			v := url.Values{}
 			for key, vals := range base {
 				v[key] = append([]string(nil), vals...)
@@ -11121,7 +11117,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 			if loc := rec.Header().Get("Location"); loc != "" {
 				t.Fatalf("Location = %q, want no redirect (R-JTTZ-CG5J)", loc)
 			}
-			if after := len(states.m); after != before {
+			if after := states.Count(); after != before {
 				t.Fatalf("oauth state records changed from %d to %d on rejection (R-JTTZ-CG5J)",
 					before, after)
 			}
@@ -11605,14 +11601,13 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		t.Fatalf("authorize omitted resource did not yield state/binding " +
 			"(R-WLUL-MZCD)")
 	}
-	states.mu.Lock()
-	stateRec := states.m[state]
-	states.mu.Unlock()
-	if stateRec == nil || stateRec.mcp == nil {
+	stateRec, _ := states.Snapshot(state)
+	mcpCtx := stateRec.MCPContext()
+	if stateRec == nil || mcpCtx == nil {
 		t.Fatalf("authorize omitted resource missing MCP state context " +
 			"(R-WLUL-MZCD)")
 	}
-	if got := stateRec.mcp.resource; got != canonical {
+	if got := mcpCtx.Resource; got != canonical {
 		t.Fatalf("authorize omitted resource bound %q, want canonical %q "+
 			"(R-WLUL-MZCD)", got, canonical)
 	}
@@ -15927,7 +15922,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	dir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "websession/session.go",
+		"counter/counter.go", "oauth/state.go", "websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
@@ -16013,7 +16008,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	srcDir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "websession/session.go",
+		"counter/counter.go", "oauth/state.go", "websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
@@ -18367,15 +18362,13 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 			t.Fatalf("Location missing state= (R-T37L-4J01)")
 		}
 		// State must be recorded server-side bound to the cookie value.
-		states.mu.Lock()
-		rec, ok := states.m[state]
-		states.mu.Unlock()
+		rec, ok := states.Snapshot(state)
 		if !ok {
 			t.Fatalf("state %q not recorded server-side (R-T37L-4J01)", state)
 		}
-		if rec.bindingID != bindingID {
+		if rec.BindingID() != bindingID {
 			t.Fatalf("recorded bindingID = %q, want %q (R-T37L-4J01)",
-				rec.bindingID, bindingID)
+				rec.BindingID(), bindingID)
 		}
 		return state, bindingID
 	}
@@ -18506,19 +18499,17 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 		if state == "" {
 			t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
 		}
-		states.mu.Lock()
-		stateRec, ok := states.m[state]
-		states.mu.Unlock()
+		stateRec, ok := states.Snapshot(state)
 		if !ok {
 			t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
 		}
-		if stateRec.origin != "web" {
-			t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.origin, "web")
+		if stateRec.Origin() != "web" {
+			t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.Origin(), "web")
 		}
-		if stateRec.mcp != nil {
+		if mcpCtx := stateRec.MCPContext(); mcpCtx != nil {
 			t.Fatalf("web-origin record carries non-nil mcp context = %+v "+
 				"(R-MTRN-DL9W: web records require no extra context)",
-				*stateRec.mcp)
+				*mcpCtx)
 		}
 	})
 
@@ -18576,30 +18567,29 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 		if state == "" {
 			t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
 		}
-		states.mu.Lock()
-		stateRec, ok := states.m[state]
-		states.mu.Unlock()
+		stateRec, ok := states.Snapshot(state)
 		if !ok {
 			t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
 		}
-		if stateRec.origin != "mcp" {
-			t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.origin, "mcp")
+		if stateRec.Origin() != "mcp" {
+			t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.Origin(), "mcp")
 		}
-		if stateRec.mcp == nil {
+		mcpCtx := stateRec.MCPContext()
+		if mcpCtx == nil {
 			t.Fatalf("mcp-origin record missing mcp context (R-MTRN-DL9W)")
 		}
-		got := *stateRec.mcp
+		got := *mcpCtx
 		checks := []struct {
 			name string
 			got  string
 			want string
 		}{
-			{"clientID", got.clientID, mcpClientID},
-			{"redirectURI", got.redirectURI, wantRedirect},
-			{"codeChallenge", got.codeChallenge, wantChallenge},
-			{"codeChallengeMethod", got.codeChallengeMethod, wantChallengeAlg},
-			{"clientState", got.clientState, wantClientState},
-			{"resource", got.resource, wantResource},
+			{"clientID", got.ClientID, mcpClientID},
+			{"redirectURI", got.RedirectURI, wantRedirect},
+			{"codeChallenge", got.CodeChallenge, wantChallenge},
+			{"codeChallengeMethod", got.CodeChallengeMethod, wantChallengeAlg},
+			{"clientState", got.ClientState, wantClientState},
+			{"resource", got.Resource, wantResource},
 		}
 		for _, c := range checks {
 			if c.got != c.want {
