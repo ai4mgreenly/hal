@@ -49,6 +49,68 @@ import (
 // hand-rolled in this codebase.
 var mcpServer = newMCPServer()
 
+type appTicker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type appClock interface {
+	Now() time.Time
+	NewTicker(time.Duration) appTicker
+}
+
+type realAppClock struct{}
+
+type realAppTicker struct {
+	t *time.Ticker
+}
+
+func (realAppClock) Now() time.Time {
+	return time.Now()
+}
+
+func (realAppClock) NewTicker(d time.Duration) appTicker {
+	return realAppTicker{t: time.NewTicker(d)}
+}
+
+func (t realAppTicker) C() <-chan time.Time {
+	return t.t.C
+}
+
+func (t realAppTicker) Stop() {
+	t.t.Stop()
+}
+
+var (
+	activeClockMu sync.RWMutex
+	activeClock   appClock = realAppClock{}
+)
+
+func setAppClock(c appClock) appClock {
+	if c == nil {
+		c = realAppClock{}
+	}
+	activeClockMu.Lock()
+	prev := activeClock
+	activeClock = c
+	activeClockMu.Unlock()
+	return prev
+}
+
+func appNow() time.Time {
+	activeClockMu.RLock()
+	c := activeClock
+	activeClockMu.RUnlock()
+	return c.Now()
+}
+
+func appNewTicker(d time.Duration) appTicker {
+	activeClockMu.RLock()
+	c := activeClock
+	activeClockMu.RUnlock()
+	return c.NewTicker(d)
+}
+
 // R-Z3LX-89W1: tool names and descriptions registered below are written
 // for a model audience — each name is the verb-on-resource form
 // (counter_read / counter_increment / counter_decrement) and each
@@ -736,7 +798,7 @@ func validateGoogleIDToken(
 	if !jwtAudienceMatches(c.Audience, audience) {
 		return googleIdentity{}, errors.New("google: id_token audience mismatch")
 	}
-	if c.ExpiresAt <= time.Now().Unix() {
+	if c.ExpiresAt <= appNow().Unix() {
 		return googleIdentity{}, errors.New("google: id_token expired")
 	}
 	key, err := fetchGoogleJWK(ctx, jwksURL, kid)
@@ -877,13 +939,23 @@ type authConfig struct {
 	ResourceIdentifier string
 }
 
-// authCfg returns the current authentication configuration surface. It
-// re-reads env-sourced values on each call so a `t.Setenv` (or an
-// operator's runtime override) takes effect without process restart for
-// values whose contract is "honored when set." Defaults match the
-// dev/test posture: fake-IDP workspace domain, loopback-bind canonical
-// resource identifier, and the ceilings R-KJ15-9P17 pins.
-func authCfg() authConfig {
+type envLookup func(string) (string, bool)
+
+var (
+	authCfgMu       sync.RWMutex
+	activeAuthCfg   = loadAuthConfig(os.LookupEnv)
+	envLookupMu     sync.RWMutex
+	activeEnvLookup envLookup = os.LookupEnv
+	testEnvLookups  atomic.Bool
+)
+
+func init() {
+	testEnvLookups.Store(true)
+}
+
+// loadAuthConfig reads the authentication configuration once through the
+// supplied lookup and returns the immutable value used by runtime consumers.
+func loadAuthConfig(lookup envLookup) authConfig {
 	c := authConfig{
 		WebSessionAbsoluteTTL: 12 * time.Hour,
 		WebSessionIdleTTL:     1 * time.Hour,
@@ -913,13 +985,41 @@ func authCfg() authConfig {
 	// the fail-loudly contract via requireEnv at startup; this in-memory
 	// surface honors the same name so tests using `t.Setenv` exercise
 	// the same plumbing the operator does.
-	if v, ok := os.LookupEnv("GOOGLE_WORKSPACE_DOMAIN"); ok {
+	if v, ok := lookup("GOOGLE_WORKSPACE_DOMAIN"); ok {
 		c.WorkspaceDomain = v
 	}
-	if v, ok := os.LookupEnv("HAL_RESOURCE_IDENTIFIER"); ok {
+	if v, ok := lookup("HAL_RESOURCE_IDENTIFIER"); ok {
 		c.ResourceIdentifier = v
 	}
 	return c
+}
+
+func setAuthCfg(c authConfig) {
+	authCfgMu.Lock()
+	activeAuthCfg = c
+	authCfgMu.Unlock()
+}
+
+func setEnvLookup(lookup envLookup) envLookup {
+	envLookupMu.Lock()
+	prev := activeEnvLookup
+	activeEnvLookup = lookup
+	envLookupMu.Unlock()
+	return prev
+}
+
+// authCfg returns the current authentication configuration surface. In the
+// serving path, runServe installs a single startup-parsed value before any
+// handler is reachable, so consumers never re-consult the environment during
+// runtime. Tests retain their historical t.Setenv behavior because many
+// focused unit tests exercise accessors without starting the full command.
+func authCfg() authConfig {
+	if testing.Testing() && testEnvLookups.Load() {
+		return loadAuthConfig(os.LookupEnv)
+	}
+	authCfgMu.RLock()
+	defer authCfgMu.RUnlock()
+	return activeAuthCfg
 }
 
 // R-NQ3G-K0CQ: startupBannerR_NQ3G_K0CQ writes a one-line-per-variable
@@ -931,6 +1031,10 @@ func authCfg() authConfig {
 // by " (default)". Variables with operator-supplied values print
 // verbatim.
 func startupBannerR_NQ3G_K0CQ(w io.Writer, dbPath string) {
+	startupBannerWithEnvR_NQ3G_K0CQ(w, dbPath, os.LookupEnv)
+}
+
+func startupBannerWithEnvR_NQ3G_K0CQ(w io.Writer, dbPath string, lookup envLookup) {
 	type bannerVar struct {
 		name   string
 		def    string // empty means required (so it's already present if we got here)
@@ -943,7 +1047,7 @@ func startupBannerR_NQ3G_K0CQ(w io.Writer, dbPath string) {
 		{"HAL_RESOURCE_IDENTIFIER", "http://127.0.0.1:3000/mcp", false},
 	}
 	for _, v := range vars {
-		val, ok := os.LookupEnv(v.name)
+		val, ok := lookup(v.name)
 		if !ok || val == "" {
 			if v.def == "" {
 				continue
@@ -979,12 +1083,15 @@ func redactSecretR_NRBC_XS3F(val string) string {
 	return "***" + val[len(val)-3:]
 }
 
-// requireEnv reads a required environment variable from the auth
-// configuration surface. It returns a clear error when the value is
-// absent or empty rather than substituting a default — the fail-loudly
-// contract R-LWCN-ZBXO pins for secrets.
+// requireEnv reads a required environment variable through the injected
+// startup lookup. It returns a clear error when the value is absent or empty
+// rather than substituting a default — the fail-loudly contract R-LWCN-ZBXO
+// pins for secrets.
 func requireEnv(name string) (string, error) {
-	v, ok := os.LookupEnv(name)
+	envLookupMu.RLock()
+	lookup := activeEnvLookup
+	envLookupMu.RUnlock()
+	v, ok := lookup(name)
 	if !ok || v == "" {
 		return "", fmt.Errorf("required environment variable %s is not set", name)
 	}
@@ -1292,7 +1399,7 @@ func accessLog(out io.Writer, next http.Handler) http.Handler {
 	// single-writer sinks with no internal synchronization).
 	var mu sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		start := appNow()
 		rec := &accessLogRecorder{ResponseWriter: w}
 		holder := &authedUserR_D56D_EBP3{}
 		r = r.WithContext(context.WithValue(
@@ -1440,8 +1547,8 @@ type oauthStateStorage struct {
 var oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
 
 // oauthStateNow is the clock the state store reads for expiry comparisons.
-// Test-only seam — production code leaves it pointed at time.Now.
-var oauthStateNow = time.Now
+// Tests may replace it directly; production resolves through activeClock.
+var oauthStateNow = appNow
 
 // The lifetime an issued state value has before the callback must
 // accept it is sourced from the R-LWCN-ZBXO surface (authCfg().OAuthStateTTL).
@@ -1731,9 +1838,9 @@ type oauthAuthCodeStorage struct {
 var oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
 
 // oauthAuthCodeNow is the clock the auth-code store reads for issue and
-// expiry comparisons. Test-only seam — production code leaves it pointed
-// at time.Now.
-var oauthAuthCodeNow = time.Now
+// expiry comparisons. Tests may replace it directly; production resolves
+// through activeClock.
+var oauthAuthCodeNow = appNow
 
 // errOAuthAuthCode* enumerate the distinct rejection causes redemption
 // surfaces, mirroring the R-EV2D-QTR1 posture of "one description per
@@ -1893,9 +2000,9 @@ var oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 const oauthRefreshTokenFormField = "refresh_token"
 
 // oauthTokenNow is the clock the token store reads for issued-at /
-// expires-at stamps. Test-only seam — production code leaves it
-// pointed at time.Now.
-var oauthTokenNow = time.Now
+// expires-at stamps. Tests may replace it directly; production resolves
+// through activeClock.
+var oauthTokenNow = appNow
 
 func oauthTokenHash(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
@@ -2481,8 +2588,9 @@ type webSessionStorage struct {
 var webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
 
 // webSessionNow is the clock the session store reads for issued-at /
-// expires-at stamps. Test-only seam.
-var webSessionNow = time.Now
+// expires-at stamps. Tests may replace it directly; production resolves
+// through activeClock.
+var webSessionNow = appNow
 
 // webSessionCookieName carries the plaintext session identifier.
 const webSessionCookieName = "hal_session"
@@ -2675,17 +2783,25 @@ func configuredGoogleIDP() googleIDP {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(runWithEnvAndClock(os.Args[1:], os.Stdout, os.Stderr, os.LookupEnv, realAppClock{}))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithEnv(args, stdout, stderr, os.LookupEnv)
+}
+
+func runWithEnv(args []string, stdout, stderr io.Writer, lookup envLookup) int {
+	return runWithEnvAndClock(args, stdout, stderr, lookup, realAppClock{})
+}
+
+func runWithEnvAndClock(args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock) int {
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "serve":
-		return cmdServe(args[1:], stdout, stderr)
+		return cmdServeWithEnvAndClock(args[1:], stdout, stderr, lookup, clock)
 	case "reset":
 		return cmdReset(args[1:], stdout, stderr)
 	case "version":
@@ -2725,12 +2841,32 @@ var onPortParsed func(int)
 // tests via runServe without colliding with the process-wide signal
 // handler.
 func cmdServe(args []string, stdout, stderr io.Writer) int {
+	return cmdServeWithEnv(args, stdout, stderr, os.LookupEnv)
+}
+
+func cmdServeWithEnv(args []string, stdout, stderr io.Writer, lookup envLookup) int {
+	return cmdServeWithEnvAndClock(args, stdout, stderr, lookup, realAppClock{})
+}
+
+func cmdServeWithEnvAndClock(args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServe(ctx, args, stdout, stderr)
+	return runServeWithEnvAndClock(ctx, args, stdout, stderr, lookup, clock)
 }
 
 func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runServeWithEnv(ctx, args, stdout, stderr, os.LookupEnv)
+}
+
+func runServeWithEnv(
+	ctx context.Context, args []string, stdout, stderr io.Writer, lookup envLookup,
+) int {
+	return runServeWithEnvAndClock(ctx, args, stdout, stderr, lookup, realAppClock{})
+}
+
+func runServeWithEnvAndClock(
+	ctx context.Context, args []string, stdout, stderr io.Writer, lookup envLookup, clock appClock,
+) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	port := fs.Int("port", 3000, "TCP port to listen on")
@@ -2738,6 +2874,16 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	dbPath := fs.String("db", "./hal.db", "path to the SQLite database file")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	prevClock := setAppClock(clock)
+	defer setAppClock(prevClock)
+	cfg := loadAuthConfig(lookup)
+	setAuthCfg(cfg)
+	prevLookup := setEnvLookup(lookup)
+	defer setEnvLookup(prevLookup)
+	if testing.Testing() {
+		prev := testEnvLookups.Swap(false)
+		defer testEnvLookups.Store(prev)
 	}
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to theCounter so every increment/decrement persists.
@@ -2824,7 +2970,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// (R-LWCN-ZBXO); the banner runs before the listener accepts
 	// requests so the operator sees the effective configuration
 	// hal actually loaded.
-	startupBannerR_NQ3G_K0CQ(stderr, *dbPath)
+	startupBannerWithEnvR_NQ3G_K0CQ(stderr, *dbPath, lookup)
 	// R-FA71-BAO6: defaults bind to TCP 3000. The check below lets a
 	// test cancel the context inside onPortParsed and have runServe
 	// return cleanly before attempting net.Listen on the real port.
@@ -3865,7 +4011,7 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 	defer counterBcast.unsubscribe(sub)
 
 	writeBytes := func(p []byte) error {
-		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout()))
+		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))
 		if _, err := w.Write(p); err != nil {
 			return err
 		}
@@ -3882,7 +4028,7 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hb := time.NewTicker(streamHeartbeatInterval())
+	hb := appNewTicker(streamHeartbeatInterval())
 	defer hb.Stop()
 
 	ctx := r.Context()
@@ -3894,7 +4040,7 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 			if err := writeValue(v); err != nil {
 				return
 			}
-		case <-hb.C:
+		case <-hb.C():
 			if err := writeBytes([]byte(":hb\n\n")); err != nil {
 				return
 			}
@@ -3962,7 +4108,7 @@ func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
 	defer agentsBcast.unsubscribe(sub)
 
 	writeBytes := func(p []byte) error {
-		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout()))
+		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))
 		if _, err := w.Write(p); err != nil {
 			return err
 		}
@@ -3999,12 +4145,12 @@ func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hb := time.NewTicker(streamHeartbeatInterval())
+	hb := appNewTicker(streamHeartbeatInterval())
 	defer hb.Stop()
 	// R-8UAA-YKR9: passive TTL crossings have no write event; a 1s
 	// ticker recomputes the snapshot so the page converges within the
 	// R-0TVF-0BKI budget.
-	tick := time.NewTicker(agentsStreamTickInterval())
+	tick := appNewTicker(agentsStreamTickInterval())
 	defer tick.Stop()
 
 	ctx := r.Context()
@@ -4016,11 +4162,11 @@ func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
 			if err := writeSnapshot(); err != nil {
 				return
 			}
-		case <-tick.C:
+		case <-tick.C():
 			if err := writeSnapshot(); err != nil {
 				return
 			}
-		case <-hb.C:
+		case <-hb.C():
 			if err := writeBytes([]byte(":hb\n\n")); err != nil {
 				return
 			}
@@ -4212,7 +4358,7 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		grantTypes:    append([]string(nil), req.GrantTypes...),
 		responseTypes: append([]string(nil), req.ResponseTypes...),
 		authMethod:    authMethod,
-		issuedAt:      time.Now().Unix(),
+		issuedAt:      appNow().Unix(),
 	}
 	// R-19BA-4XX4: generated client_id values are unique among persisted
 	// registrations. A collision never overwrites the existing record; the

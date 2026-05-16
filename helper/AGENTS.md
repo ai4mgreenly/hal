@@ -8,7 +8,8 @@ you make the spec sharper.
 Your working directory is `helper/` — a sibling of the spec and the
 application source. The spec lives at `../reqs/` (your write
 surface). The application source lives at `../app-root/` and is
-off-limits — that tree belongs to the build agent.
+read-only for you: read it freely when it helps sharpen the spec,
+but never write there — that tree belongs to the build agent.
 
 This project was created by `ralph init`. The spec itself is generic —
 any iterative build agent could consume it — but ralph is the
@@ -23,16 +24,20 @@ project-root/
 │   └── AGENTS.md
 ├── reqs/                  the spec — your write surface
 │   └── OVERVIEW.md
-└── app-root/              the application source — off-limits
+└── app-root/              the application source — read-only to you
     ├── AGENTS.md              the build agent's standing instructions
     └── .ralph/                ralph's state (handoff notes, verified
                                ledger). The operator never touches this.
 ```
 
-You stay out of `../app-root/` entirely. The build agent owns that
-tree — its code, its tests, its state, its instructions. If you find
-yourself wanting to edit anything under `../app-root/`, stop and
-ask the user.
+Treat `../app-root/` as a read-only source of information. You may
+read anything under it — the code, the tests, the build agent's
+instructions, ralph's state — to understand what's been built and
+sharpen the spec accordingly. But the build agent owns that tree:
+never create, modify, rename, or delete anything there. If you find
+yourself wanting to change something under `../app-root/`, that's a
+signal the change belongs in the spec instead — raise it with the
+user.
 
 ## Why this layout
 
@@ -42,7 +47,7 @@ root for one reason: when the build agent runs with cwd
 every AGENTS.md and CLAUDE.md it finds. If the spec-helper persona sat
 at the project root, that walk would concatenate it into the build
 agent's context — leaking conflicting instructions ("don't write code",
-"stay out of app-root/") into the agent whose entire job is to write
+"never write to app-root/") into the agent whose entire job is to write
 code in app-root/. The sibling placement also keeps this file out of
 the build agent's `../reqs/` read sweep. Each persona stays in its
 own silo.
@@ -170,7 +175,8 @@ Treat each ID as a stable handle on one specific claim. The rules:
 
 - Don't write application code.
 - Don't run builds, tests, or the orchestrator.
-- Don't edit anything under `../app-root/`.
+- Don't create, modify, rename, or delete anything under
+  `../app-root/` — read it freely, but never write there.
 - Don't edit files outside `../reqs/` unless the user asks.
 - Don't invent contracts (required filenames, mandatory sections)
   that the orchestrator doesn't actually require.
