@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	cryptorand "crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"debug/elf"
@@ -12,11 +14,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"io/fs"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +38,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 )
 
@@ -431,6 +436,92 @@ func TestR_73FM_FHLT_gofmt_and_go_vet_are_clean(t *testing.T) {
 				err, stdout.String(), stderr.String())
 		}
 	})
+}
+
+func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T) {
+	originalClients := oauthClientStore
+	originalTokens := oauthTokenStore
+	originalSessions := webSessionStore
+	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+	t.Cleanup(func() {
+		oauthClientStore = originalClients
+		oauthTokenStore = originalTokens
+		webSessionStore = originalSessions
+	})
+
+	oversizedJSON := `{"redirect_uris":["http://127.0.0.1/callback"],` +
+		`"client_name":"` +
+		strings.Repeat("x", int(maxRequestBodyBytesR_VKZD_UKVS)+1) + `"}`
+	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
+		strings.NewReader(oversizedJSON))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	handleOAuthRegister(regRec, regReq)
+	if regRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized DCR status = %d, want 413", regRec.Code)
+	}
+	if got := oauthClientStoreCount(); got != 0 {
+		t.Fatalf("oversized DCR registered %d clients, want 0", got)
+	}
+
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader("grant_type=refresh_token&"+
+			strings.Repeat("x", int(maxRequestBodyBytesR_VKZD_UKVS)+1)))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	handleOAuthToken(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized token request status = %d, want 413", tokenRec.Code)
+	}
+
+	email := "rvkzd@example.com"
+	sessionPlaintext, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+	refreshPlaintext, err := oauthTokenStore.issueRefresh(email,
+		"rvkzd-client", canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issueRefresh: %v", err)
+	}
+	oauthTokenStore.mu.Lock()
+	chainID := oauthTokenStore.m[oauthTokenHash(refreshPlaintext)].chainID
+	oauthTokenStore.mu.Unlock()
+
+	revokeReq := httptest.NewRequest(http.MethodPost, "/agents/revoke",
+		strings.NewReader("chain_id="+url.QueryEscape(chainID)+"&"+
+			strings.Repeat("x", int(maxRequestBodyBytesR_VKZD_UKVS)+1)))
+	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+	revokeRec := httptest.NewRecorder()
+	handleAgentsRevoke(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized agents revoke status = %d, want 413", revokeRec.Code)
+	}
+	oauthTokenStore.mu.Lock()
+	refreshRec := oauthTokenStore.m[oauthTokenHash(refreshPlaintext)]
+	revoked := !refreshRec.revokedAt.IsZero()
+	oauthTokenStore.mu.Unlock()
+	if revoked {
+		t.Fatal("oversized agents revoke request revoked a token chain")
+	}
+
+	nextReached := false
+	mcpHandler := mcpPromptSignal(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		nextReached = true
+	}))
+	mcpReq := httptest.NewRequest(http.MethodPost, "/mcp",
+		strings.NewReader(strings.Repeat("x", int(maxRequestBodyBytesR_VKZD_UKVS)+1)))
+	mcpRec := httptest.NewRecorder()
+	mcpHandler.ServeHTTP(mcpRec, mcpReq)
+	if mcpRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized MCP probe status = %d, want 413", mcpRec.Code)
+	}
+	if nextReached {
+		t.Fatal("oversized MCP probe reached the downstream body parser")
+	}
 }
 
 // R-7AR0-Q41Z: Go module deps live in go.mod / go.sum, both committed,
@@ -1415,12 +1506,9 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 }
 
 // R-ZQS0-HWZ8: a request that invokes the increment tool requires a
-// valid bearer access token issued by this service. Three cases drive
-// this end-to-end through the Streamable HTTP transport:
-//   - no Authorization header → tool-error, counter unchanged.
-//   - malformed/unknown bearer → tool-error, counter unchanged.
-//   - bearer minted via issueAccess with mismatched resource binding
-//     → tool-error, counter unchanged.
+// valid bearer access token issued by this service. Bad-but-present bearer
+// credentials are rejected at the HTTP boundary per R-51PZ-MEQR; this test
+// keeps R-ZQS0-HWZ8's increment-specific no-mutation property pinned.
 //
 // The positive bearer-accepted path is covered by
 // TestR_YHNQ_CEJJ_mcp_counter_increment_tool, which now mints a token
@@ -1510,8 +1598,7 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 
 	// The no-credentials case has its own HTTP-level prompt-signal test
 	// (TestR_0YOE_9NO8_*); R-ZQS0-HWZ8 here pins the bad-but-present
-	// bearer paths that fall through to the in-tool gate and surface as
-	// a JSON-RPC isError tool-result.
+	// bearer paths leave the counter unchanged.
 	cases := []struct {
 		name   string
 		bearer string
@@ -1527,29 +1614,9 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			before := theCounter.read()
 			resp, buf := post(callBody, sessionID, tc.bearer)
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("tools/call status = %d, want 200 with isError "+
-					"tool-result; body=%q", resp.StatusCode, string(buf))
-			}
-			var rpc struct {
-				Result struct {
-					IsError bool `json:"isError"`
-					Content []struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					} `json:"content"`
-				} `json:"result"`
-				Error any `json:"error"`
-			}
-			if err := json.Unmarshal(buf, &rpc); err != nil {
-				t.Fatalf("decode: %v; body=%q", err, string(buf))
-			}
-			if rpc.Error != nil {
-				t.Fatalf("JSON-RPC error: %v; body=%q", rpc.Error, string(buf))
-			}
-			if !rpc.Result.IsError {
-				t.Fatalf("rejected request did not return isError=true; body=%q",
-					string(buf))
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("tools/call status = %d, want 401 at HTTP boundary; "+
+					"body=%q", resp.StatusCode, string(buf))
 			}
 			if got := theCounter.read(); got != before {
 				t.Fatalf("counter advanced past R-ZQS0-HWZ8 gate: before=%d after=%d",
@@ -1568,10 +1635,8 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 // The signal fires only for tools that require credentials; an
 // unauthenticated call to counter_read (R-0CQ7-DSBQ) passes through
 // to the SDK handler and returns a normal 200 tool result, and a
-// request that presents *any* Authorization header — even a malformed
-// one — also falls through (the in-tool R-ZQS0-HWZ8 gate produces a
-// JSON-RPC tool-error in that case, the path covered by
-// TestR_ZQS0_HWZ8_mcp_increment_requires_bearer).
+// request that presents an invalid Authorization header is rejected at
+// the HTTP boundary per R-51PZ-MEQR.
 func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 	ready := make(chan net.Addr, 1)
 	onListenerReady = func(a net.Addr) { ready <- a }
@@ -1689,20 +1754,21 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 		}
 	})
 
-	t.Run("bad_bearer_increment_falls_through_to_in_tool_gate", func(t *testing.T) {
+	t.Run("bad_bearer_increment_rejected_at_http_boundary", func(t *testing.T) {
 		before := theCounter.read()
 		resp, buf := post(incBody, sessionID, "deadbeef-not-issued")
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("bad-bearer status = %d, want 200 with isError "+
-				"(R-ZQS0-HWZ8 in-tool gate path); body=%q",
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("bad-bearer status = %d, want 401 "+
+				"(R-51PZ-MEQR HTTP-boundary gate); body=%q",
 				resp.StatusCode, string(buf))
 		}
-		if wa := resp.Header.Get("WWW-Authenticate"); wa != "" {
-			t.Fatalf("R-0YOE-9NO8 should not fire when a bearer is "+
-				"presented: WWW-Authenticate=%q", wa)
+		wa := resp.Header.Get("WWW-Authenticate")
+		if !strings.Contains(wa, `error="invalid_token"`) {
+			t.Fatalf("WWW-Authenticate = %q, want invalid_token "+
+				"(R-51PZ-MEQR)", wa)
 		}
 		if got := theCounter.read(); got != before {
-			t.Fatalf("counter advanced past in-tool gate: before=%d after=%d",
+			t.Fatalf("counter advanced past HTTP-boundary gate: before=%d after=%d",
 				before, got)
 		}
 	})
@@ -1850,12 +1916,13 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 // modifies the counter. When the counter is exactly zero, calling it
 // returns the standard MCP tool-error signal naming the cause and does not
 // modify the counter. Behavioral test: spin up runServe, initialize an MCP
-// session, drive the counter to a known nonzero state via counter_increment
-// (the package-level singleton's value carries across tests in the same
-// binary, so we assert deltas, not absolutes), call counter_decrement and
-// assert prev-1, then drain the counter to zero via direct calls and assert
-// the next decrement returns isError with the documented message and that
-// theCounter.read() is still zero.
+// session, present a valid bearer access token per R-285U-FWW3, drive the
+// counter to a known nonzero state via direct increment (the package-level
+// singleton's value carries across tests in the same `go test` binary, so
+// we assert deltas, not absolutes), call counter_decrement and assert
+// prev-1, then drain the counter to zero via direct calls and assert the
+// next authenticated decrement returns isError with the documented message
+// and that theCounter.read() is still zero.
 func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	ready := make(chan net.Addr, 1)
 	onListenerReady = func(a net.Addr) { ready <- a }
@@ -1889,6 +1956,12 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	mcpURL := "http://" + addr.String() + "/mcp"
 	acceptHeader := "application/json, " + "text" + "/" + "event-stream"
 
+	bearer, err := oauthTokenStore.issueAccess(
+		"alice@example.com", "client-gg9b", canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issueAccess: %v (R-GG9B-GS8T)", err)
+	}
+
 	post := func(payload string, sessionID string) (*http.Response, []byte) {
 		t.Helper()
 		req, err := http.NewRequest(http.MethodPost, mcpURL, strings.NewReader(payload))
@@ -1900,6 +1973,7 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 		if sessionID != "" {
 			req.Header.Set("Mcp-Session-Id", sessionID)
 		}
+		req.Header.Set("Authorization", "Bearer "+bearer)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", mcpURL, err)
@@ -5860,6 +5934,121 @@ func TestR_H3FE_QFC0_post_counter_decrement(t *testing.T) {
 	}
 }
 
+// R-OBU9-0WFI: every public counter mutation checks authentication
+// before reading, validating, or modifying counter state. This test keeps
+// the counter at zero, where an authenticated decrement would hit the
+// zero-floor business rule, then proves unauthenticated HTTP and MCP
+// mutation attempts receive only auth failures and leave the value
+// untouched.
+func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
+	originalTokens := oauthTokenStore
+	originalSessions := webSessionStore
+	theCounter.mu.Lock()
+	originalCounterValue := theCounter.value
+	originalCounterDB := theCounter.db
+	theCounter.value = 0
+	theCounter.db = nil
+	theCounter.mu.Unlock()
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+	t.Cleanup(func() {
+		oauthTokenStore = originalTokens
+		webSessionStore = originalSessions
+		theCounter.mu.Lock()
+		theCounter.value = originalCounterValue
+		theCounter.db = originalCounterDB
+		theCounter.mu.Unlock()
+	})
+
+	assertHTTPAuthFailure := func(name, path string, decorate func(*http.Request)) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if decorate != nil {
+			decorate(req)
+		}
+		rr := httptest.NewRecorder()
+		switch path {
+		case "/counter/increment":
+			handleCounterIncrement(rr, req)
+		case "/counter/decrement":
+			handleCounterDecrement(rr, req)
+		default:
+			t.Fatalf("unknown mutation path %q", path)
+		}
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want 401 (R-OBU9-0WFI); body=%q",
+				name, rr.Code, rr.Body.String())
+		}
+		body := strings.ToLower(rr.Body.String())
+		if strings.Contains(body, "zero") || strings.Contains(body, "below") {
+			t.Fatalf("%s leaked counter state/business-rule detail in auth "+
+				"failure (R-OBU9-0WFI): body=%q", name, rr.Body.String())
+		}
+		if got := theCounter.read(); got != 0 {
+			t.Fatalf("%s changed counter to %d, want unchanged 0 (R-OBU9-0WFI)",
+				name, got)
+		}
+	}
+
+	for _, path := range []string{"/counter/increment", "/counter/decrement"} {
+		assertHTTPAuthFailure("no credentials "+path, path, nil)
+		assertHTTPAuthFailure("invalid bearer "+path, path, func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer not-an-issued-token")
+		})
+		assertHTTPAuthFailure("invalid session "+path, path, func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: "not-a-session"})
+		})
+	}
+
+	mcpReq := &mcp.CallToolRequest{
+		Extra: &mcp.RequestExtra{Header: http.Header{}},
+	}
+	for _, tc := range []struct {
+		name string
+		call func() (*mcp.CallToolResult, error)
+	}{
+		{
+			name: "mcp increment",
+			call: func() (*mcp.CallToolResult, error) {
+				res, _, err := counterIncrementTool(context.Background(), mcpReq, struct{}{})
+				return res, err
+			},
+		},
+		{
+			name: "mcp decrement at zero",
+			call: func() (*mcp.CallToolResult, error) {
+				res, _, err := counterDecrementTool(context.Background(), mcpReq, struct{}{})
+				return res, err
+			},
+		},
+	} {
+		res, err := tc.call()
+		if err != nil {
+			t.Fatalf("%s returned unexpected Go error: %v (R-OBU9-0WFI)",
+				tc.name, err)
+		}
+		if res == nil || !res.IsError {
+			t.Fatalf("%s result = %#v, want MCP tool auth error (R-OBU9-0WFI)",
+				tc.name, res)
+		}
+		var text string
+		if len(res.Content) > 0 {
+			if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+				text = tc.Text
+			}
+		}
+		lower := strings.ToLower(text)
+		if strings.Contains(lower, "zero") || strings.Contains(lower, "below") {
+			t.Fatalf("%s leaked zero-floor detail before auth (R-OBU9-0WFI): %q",
+				tc.name, text)
+		}
+		if got := theCounter.read(); got != 0 {
+			t.Fatalf("%s changed counter to %d, want unchanged 0 (R-OBU9-0WFI)",
+				tc.name, got)
+		}
+	}
+}
+
 // R-53Z2-DNB1: an unauthenticated or invalid-auth request to
 // POST /counter/increment or POST /counter/decrement returns HTTP 401
 // and does not change the counter. The test exercises three rejection
@@ -6060,6 +6249,181 @@ func TestR_4ED6_CGQG_increment_accepts_bearer_access_token(t *testing.T) {
 	}
 }
 
+// R-285U-FWW3: one valid HAL-issued access token authorizes every
+// bearer-token-protected counter mutation surface in the current service:
+// MCP counter_increment, MCP counter_decrement, POST /counter/increment,
+// and POST /counter/decrement. This test intentionally reuses the same
+// token across all four surfaces to pin that there are no per-operation
+// scopes or token kinds in the current spec.
+func TestR_285U_FWW3_access_token_authorizes_all_counter_mutation_surfaces(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	onListenerReady = func(a net.Addr) { ready <- a }
+	defer func() { onListenerReady = nil }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+	}()
+
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("listener never ready within 2s; stderr=%q (R-285U-FWW3)",
+			stderr.String())
+	}
+	base := "http://" + addr.String()
+
+	bearer, err := oauthTokenStore.issueAccess(
+		"owner@example.com", "client-r285u", canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issueAccess: %v (R-285U-FWW3)", err)
+	}
+
+	readValue := func() uint64 {
+		t.Helper()
+		resp, err := http.Get(base + "/counter")
+		if err != nil {
+			t.Fatalf("GET /counter: %v (R-285U-FWW3)", err)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Value uint64 `json:"value"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("GET /counter decode: %v (R-285U-FWW3)", err)
+		}
+		return body.Value
+	}
+
+	httpMutation := func(path string, want uint64) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, base+path, nil)
+		if err != nil {
+			t.Fatalf("build %s request: %v (R-285U-FWW3)", path, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v (R-285U-FWW3)", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			buf, _ := io.ReadAll(resp.Body)
+			t.Fatalf("POST %s status = %d, want 200; body=%q (R-285U-FWW3)",
+				path, resp.StatusCode, string(buf))
+		}
+		var body struct {
+			Value uint64 `json:"value"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode %s response: %v (R-285U-FWW3)", path, err)
+		}
+		if body.Value != want {
+			t.Fatalf("POST %s value = %d, want %d (R-285U-FWW3)",
+				path, body.Value, want)
+		}
+	}
+
+	mcpURL := base + "/mcp"
+	acceptHeader := "application/json, " + "text" + "/" + "event-stream"
+	postMCP := func(payload string, sessionID string) (*http.Response, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, mcpURL, strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("new MCP request: %v (R-285U-FWW3)", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", acceptHeader)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		if sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", sessionID)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v (R-285U-FWW3)", mcpURL, err)
+		}
+		buf, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read MCP body: %v (R-285U-FWW3)", err)
+		}
+		return resp, buf
+	}
+
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize",` +
+		`"params":{"protocolVersion":"2025-11-25","capabilities":{},` +
+		`"clientInfo":{"name":"hal-test","version":"0.0.1"}}}`
+	resp, buf := postMCP(initBody, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize status = %d, want 200; body=%q (R-285U-FWW3)",
+			resp.StatusCode, string(buf))
+	}
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatalf("initialize did not return Mcp-Session-Id; body=%q (R-285U-FWW3)",
+			string(buf))
+	}
+
+	mcpMutation := func(tool string, id int, want uint64) {
+		t.Helper()
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call",`+
+			`"params":{"name":%q,"arguments":{}}}`, id, tool)
+		resp, buf := postMCP(body, sessionID)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200; body=%q (R-285U-FWW3)",
+				tool, resp.StatusCode, string(buf))
+		}
+		var rpc struct {
+			Result struct {
+				IsError           bool `json:"isError"`
+				StructuredContent struct {
+					Value uint64 `json:"value"`
+				} `json:"structuredContent"`
+			} `json:"result"`
+			Error any `json:"error"`
+		}
+		if err := json.Unmarshal(buf, &rpc); err != nil {
+			t.Fatalf("decode %s response: %v; body=%q (R-285U-FWW3)",
+				tool, err, string(buf))
+		}
+		if rpc.Error != nil {
+			t.Fatalf("%s returned JSON-RPC error: %v; body=%q (R-285U-FWW3)",
+				tool, rpc.Error, string(buf))
+		}
+		if rpc.Result.IsError {
+			t.Fatalf("%s returned isError=true; body=%q (R-285U-FWW3)",
+				tool, string(buf))
+		}
+		if rpc.Result.StructuredContent.Value != want {
+			t.Fatalf("%s value = %d, want %d; body=%q (R-285U-FWW3)",
+				tool, rpc.Result.StructuredContent.Value, want, string(buf))
+		}
+	}
+
+	start := readValue()
+	httpMutation("/counter/increment", start+1)
+	httpMutation("/counter/decrement", start)
+	mcpMutation("counter_increment", 2, start+1)
+	mcpMutation("counter_decrement", 3, start)
+	if got := readValue(); got != start {
+		t.Fatalf("counter final value = %d, want original %d (R-285U-FWW3)",
+			got, start)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("runServe did not exit within 2s after cancel (R-285U-FWW3)")
+	}
+}
+
 // R-DH2I-28CK: presentation-time, the bearer gate compares the
 // token record's bound resource string to canonicalResourceIdentifier()
 // byte-for-byte. A token whose recorded resource differs in any way —
@@ -6117,6 +6481,18 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 	}
 	withoutScheme := strings.TrimPrefix(canonical, "http://")
 	withoutPath := strings.TrimSuffix(canonical, "/mcp")
+	parsedCanonical, err := url.Parse(canonical)
+	if err != nil {
+		t.Fatalf("parse canonical resource %q: %v (R-DH2I-28CK)",
+			canonical, err)
+	}
+	wrongHost := "localhost"
+	if parsedCanonical.Hostname() == "localhost" {
+		wrongHost = "127.0.0.1"
+	}
+	if port := parsedCanonical.Port(); port != "" {
+		wrongHost += ":" + port
+	}
 
 	mutations := []struct {
 		name     string
@@ -6124,7 +6500,7 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 	}{
 		{"trailing_slash_appended", canonical + "/"},
 		{"wrong_scheme", "https://" + withoutScheme},
-		{"wrong_host", "http://localhost:3000/mcp"},
+		{"wrong_host", "http://" + wrongHost + "/mcp"},
 		{"wrong_port", withoutPath + "9/mcp"},
 		{"extra_path_segment", canonical + "/extra"},
 		{"root_path", withoutPath + "/"},
@@ -7653,30 +8029,12 @@ func TestR_3BKZ_L7R4_login_demands_fresh_google_authentication(t *testing.T) {
 	})
 }
 
-// R-AE1P-Z1WC: /logout returns the user-agent to / via redirect. From a
+// R-FZ10-BE37: /logout returns the user-agent to / via redirect. From a
 // user-agent with no active web session it is a no-op redirect, not an
-// error. Web sessions do not yet exist, so every request reaching the
-// handler today is the no-session case; this test pins the redirect
-// contract that holds in either case. The session-revoking step lands
-// alongside the session-establishment requirements (R-CXJ2-R3BN /
-// R-8GJG-64MR / R-3BKZ-L7R4); when it does, a subtest verifying the
-// revoke side-effect joins this one.
-func TestR_AE1P_Z1WC_logout_redirects_to_root(t *testing.T) {
-	t.Run("handler_direct_get_no_session", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/logout", nil)
-		rec := httptest.NewRecorder()
-		handleLogout(rec, req)
-		res := rec.Result()
-		defer res.Body.Close()
-		if res.StatusCode < 300 || res.StatusCode >= 400 {
-			t.Fatalf("status = %d, want a 3xx redirect (R-AE1P-Z1WC)",
-				res.StatusCode)
-		}
-		if got := res.Header.Get("Location"); got != "/" {
-			t.Fatalf("Location = %q, want %q (R-AE1P-Z1WC)", got, "/")
-		}
-	})
-
+// error. Current routing exposes the action as POST-only per
+// R-7MLK-O6I5, so this legacy redirect property is asserted through
+// POST requests.
+func TestR_FZ10_BE37_logout_redirects_to_root(t *testing.T) {
 	t.Run("handler_direct_post_no_session", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/logout", nil)
 		rec := httptest.NewRecorder()
@@ -7684,11 +8042,11 @@ func TestR_AE1P_Z1WC_logout_redirects_to_root(t *testing.T) {
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
-			t.Fatalf("status = %d, want a 3xx redirect (R-AE1P-Z1WC)",
+			t.Fatalf("status = %d, want a 3xx redirect (R-FZ10-BE37)",
 				res.StatusCode)
 		}
 		if got := res.Header.Get("Location"); got != "/" {
-			t.Fatalf("Location = %q, want %q (R-AE1P-Z1WC)", got, "/")
+			t.Fatalf("Location = %q, want %q (R-FZ10-BE37)", got, "/")
 		}
 	})
 
@@ -7700,15 +8058,20 @@ func TestR_AE1P_Z1WC_logout_redirects_to_root(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
+		var stderr bytes.Buffer
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, &stderr)
 		}()
 		var addr net.Addr
 		select {
 		case addr = <-ready:
+		case code := <-exit:
+			t.Fatalf("runServe exited before listener ready with code %d; stderr=%q (R-FZ10-BE37)",
+				code, stderr.String())
 		case <-time.After(2 * time.Second):
-			t.Fatalf("listener did not become ready in 2s (R-AE1P-Z1WC)")
+			t.Fatalf("listener did not become ready in 2s; stderr=%q (R-FZ10-BE37)",
+				stderr.String())
 		}
 
 		client := &http.Client{
@@ -7716,23 +8079,23 @@ func TestR_AE1P_Z1WC_logout_redirects_to_root(t *testing.T) {
 				return http.ErrUseLastResponse
 			},
 		}
-		for _, method := range []string{"GET", "POST"} {
+		for _, method := range []string{"POST"} {
 			req, err := http.NewRequest(method, "http://"+addr.String()+"/logout", nil)
 			if err != nil {
-				t.Fatalf("build %s request: %v (R-AE1P-Z1WC)", method, err)
+				t.Fatalf("build %s request: %v (R-FZ10-BE37)", method, err)
 			}
 			resp, err := client.Do(req)
 			if err != nil {
-				t.Fatalf("%s /logout: %v (R-AE1P-Z1WC)", method, err)
+				t.Fatalf("%s /logout: %v (R-FZ10-BE37)", method, err)
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode < 300 || resp.StatusCode >= 400 {
-				t.Fatalf("%s /logout status = %d, want 3xx (R-AE1P-Z1WC)",
+				t.Fatalf("%s /logout status = %d, want 3xx (R-FZ10-BE37)",
 					method, resp.StatusCode)
 			}
 			if got := resp.Header.Get("Location"); got != "/" {
-				t.Fatalf("%s /logout Location = %q, want %q (R-AE1P-Z1WC)",
+				t.Fatalf("%s /logout Location = %q, want %q (R-FZ10-BE37)",
 					method, got, "/")
 			}
 		}
@@ -7741,30 +8104,400 @@ func TestR_AE1P_Z1WC_logout_redirects_to_root(t *testing.T) {
 		select {
 		case <-exit:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("runServe did not exit within 2s (R-AE1P-Z1WC)")
+			t.Fatalf("runServe did not exit within 2s (R-FZ10-BE37)")
 		}
 	})
 }
 
-// R-93PJ-FRPY: a web session and an MCP token chain are independent
-// identity contexts that do not share lifetime or revocation. Logout
-// revokes the web session and writes to the web-session store only; it
-// has no read or write effect on any MCP token chain. Today the MCP
-// token chain store does not exist in the codebase, so the property
-// holds trivially at the storage level — the test pins both halves:
-// (1) handleLogout drives webSessionStore.revoke for the presented
-// cookie (the revoked session no longer validates), and (2) the only
-// identity-state package-level store present today is webSessionStore;
-// when the MCP token chain store lands, this test must be extended to
-// assert it is untouched across logout.
-func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
+// R-7MLK-O6I5: browser-facing actions that change authenticated state
+// use POST, never GET. GET requests to logout, chain revocation, and
+// counter mutation action paths are rejected before any action handler
+// runs. The logout case carries a valid session cookie to prove the
+// method rejection does not revoke authenticated state.
+func TestR_7MLK_O6I5_state_changing_browser_actions_reject_get(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	prev := onListenerReady
+	onListenerReady = func(a net.Addr) { ready <- a }
+	t.Cleanup(func() { onListenerReady = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	exit := make(chan int, 1)
+	go func() {
+		exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+	}()
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("listener did not become ready in 2s (R-7MLK-O6I5)")
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exit:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-7MLK-O6I5)")
+		}
+	})
+
+	sessionPlaintext, err := webSessionStore.issue("r-7mlk-o6i5@example.com")
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v (R-7MLK-O6I5)", err)
+	}
+	t.Cleanup(func() { webSessionStore.revoke(sessionPlaintext) })
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	for _, path := range []string{
+		"/logout",
+		"/agents/revoke",
+		"/counter/increment",
+		"/counter/decrement",
+	} {
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr.String()+path, nil)
+		if err != nil {
+			t.Fatalf("build GET %s: %v (R-7MLK-O6I5)", path, err)
+		}
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v (R-7MLK-O6I5)", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s status = %d, want 405 (R-7MLK-O6I5)",
+				path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Allow"); !strings.Contains(got, http.MethodPost) {
+			t.Fatalf("GET %s Allow = %q, want POST (R-7MLK-O6I5)", path, got)
+		}
+	}
+	if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+		t.Fatalf("GET /logout revoked the session (R-7MLK-O6I5)")
+	}
+}
+
+// R-R4RG-O4Y9: when a state-changing browser request is authenticated
+// only by a web session cookie, its Origin/Referer must match the service's
+// own origin before the handler reads protected state for mutation or writes
+// any change. Bearer-token clients remain governed by bearer validation, not
+// browser-origin headers.
+func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(t *testing.T) {
+	const (
+		baseOrigin  = "http://127.0.0.1:3000"
+		crossOrigin = "http://127.0.0.1:1"
+		email       = "r-r4rg-o4y9@example.com"
+	)
+	postWithCookie := func(path, cookieValue string) (*httptest.ResponseRecorder, *http.Request) {
+		req := httptest.NewRequest(http.MethodPost, baseOrigin+path, nil)
+		req.Header.Set("Origin", crossOrigin)
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: cookieValue})
+		return httptest.NewRecorder(), req
+	}
+
+	t.Run("counter_cookie_mutation_rejects_mismatched_origin_before_mutating", func(t *testing.T) {
+		sessionPlaintext, err := webSessionStore.issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
+		}
+		before := theCounter.read()
+		rec, req := postWithCookie("/counter/increment", sessionPlaintext)
+		handleCounterIncrement(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin cookie increment status = %d, want 403 "+
+				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
+		}
+		if got := theCounter.read(); got != before {
+			t.Fatalf("cross-origin cookie increment changed counter: got %d, "+
+				"want %d (R-R4RG-O4Y9)", got, before)
+		}
+
+		req = httptest.NewRequest(http.MethodPost, baseOrigin+"/counter/increment", nil)
+		req.Header.Set("Origin", baseOrigin)
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+		rec = httptest.NewRecorder()
+		handleCounterIncrement(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("same-origin cookie increment status = %d, want 200 "+
+				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("logout_rejects_mismatched_referer_before_revoking_session", func(t *testing.T) {
+		sessionPlaintext, err := webSessionStore.issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, baseOrigin+"/logout", nil)
+		req.Header.Set("Referer", crossOrigin+"/form")
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+		rec := httptest.NewRecorder()
+		handleLogout(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin logout status = %d, want 403 "+
+				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
+		}
+		if got := webSessionStore.lookup(sessionPlaintext); got == nil {
+			t.Fatalf("cross-origin logout revoked the session (R-R4RG-O4Y9)")
+		}
+	})
+
+	t.Run("agents_revoke_rejects_mismatched_origin_before_revoking_chain", func(t *testing.T) {
+		sessionPlaintext, err := webSessionStore.issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
+		}
+		refresh, err := oauthTokenStore.issueRefresh(email, "client-r4rg",
+			canonicalResourceIdentifier())
+		if err != nil {
+			t.Fatalf("oauthTokenStore.issueRefresh: %v (R-R4RG-O4Y9)", err)
+		}
+		oauthTokenStore.mu.Lock()
+		chainID := oauthTokenStore.m[oauthTokenHash(refresh)].chainID
+		oauthTokenStore.mu.Unlock()
+
+		form := url.Values{"chain_id": {chainID}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, baseOrigin+"/agents/revoke",
+			strings.NewReader(form))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", crossOrigin)
+		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+		rec := httptest.NewRecorder()
+		handleAgentsRevoke(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin agents revoke status = %d, want 403 "+
+				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
+		}
+		oauthTokenStore.mu.Lock()
+		revokedAt := oauthTokenStore.m[oauthTokenHash(refresh)].revokedAt
+		oauthTokenStore.mu.Unlock()
+		if !revokedAt.IsZero() {
+			t.Fatalf("cross-origin agents revoke revoked chain %q "+
+				"(R-R4RG-O4Y9)", chainID)
+		}
+	})
+
+	t.Run("bearer_mutation_ignores_browser_origin_headers", func(t *testing.T) {
+		bearer, err := oauthTokenStore.issueAccess(email, "client-r4rg-bearer",
+			canonicalResourceIdentifier())
+		if err != nil {
+			t.Fatalf("oauthTokenStore.issueAccess: %v (R-R4RG-O4Y9)", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, baseOrigin+"/counter/increment", nil)
+		req.Header.Set("Origin", crossOrigin)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		handleCounterIncrement(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("cross-origin bearer increment status = %d, want 200 "+
+				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// R-8IPO-FZ7T: every documented HTTP endpoint rejects methods outside
+// its documented method set with 405 Method Not Allowed and an Allow
+// header. This includes GET-only endpoints rejecting HEAD and the MCP
+// transport path rejecting methods outside Streamable HTTP's method set.
+func TestR_8IPO_FZ7T_documented_endpoints_reject_wrong_methods(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	prev := onListenerReady
+	onListenerReady = func(a net.Addr) { ready <- a }
+	t.Cleanup(func() { onListenerReady = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	exit := make(chan int, 1)
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	var stdout, stderr bytes.Buffer
+	go func() {
+		exit <- runServe(ctx, []string{"--port", "0", "--db", dbPath},
+			&stdout, &stderr)
+	}()
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case code := <-exit:
+		t.Fatalf("runServe exited with code %d before listener ready; stdout=%q stderr=%q (R-8IPO-FZ7T)",
+			code, stdout.String(), stderr.String())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("listener did not become ready in 2s; stdout=%q stderr=%q (R-8IPO-FZ7T)",
+			stdout.String(), stderr.String())
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exit:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-8IPO-FZ7T)")
+		}
+	})
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	cases := []struct {
+		method string
+		path   string
+		allow  string
+	}{
+		{http.MethodHead, "/", http.MethodGet},
+		{http.MethodPost, "/design.css", http.MethodGet},
+		{http.MethodPost, "/login", http.MethodGet},
+		{http.MethodGet, "/logout", http.MethodPost},
+		{http.MethodGet, "/agents/revoke", http.MethodPost},
+		{http.MethodPost, "/agents/stream", http.MethodGet},
+		{http.MethodPost, "/oauth/google/callback", http.MethodGet},
+		{http.MethodPost, "/.well-known/oauth-authorization-server", http.MethodGet},
+		{http.MethodPost, "/.well-known/oauth-protected-resource/mcp", http.MethodGet},
+		{http.MethodGet, "/oauth/register", http.MethodPost},
+		{http.MethodPost, "/oauth/authorize", http.MethodGet},
+		{http.MethodGet, "/oauth/token", http.MethodPost},
+		{http.MethodPost, "/counter", http.MethodGet},
+		{http.MethodPost, "/counter/stream", http.MethodGet},
+		{http.MethodGet, "/counter/increment", http.MethodPost},
+		{http.MethodGet, "/counter/decrement", http.MethodPost},
+		{http.MethodPatch, "/mcp", "DELETE, GET, POST"},
+	}
+	for _, tc := range cases {
+		req, err := http.NewRequest(tc.method, "http://"+addr.String()+tc.path, nil)
+		if err != nil {
+			t.Fatalf("build %s %s: %v (R-8IPO-FZ7T)", tc.method, tc.path, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v (R-8IPO-FZ7T)", tc.method, tc.path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status = %d, want 405 (R-8IPO-FZ7T)",
+				tc.method, tc.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Allow"); got != tc.allow {
+			t.Fatalf("%s %s Allow = %q, want %q (R-8IPO-FZ7T)",
+				tc.method, tc.path, got, tc.allow)
+		}
+	}
+}
+
+// R-X0O1-BJ2H: unknown HTTP paths return 404 and do not fall through to
+// the index page, OAuth endpoints, MCP transport, static stylesheet,
+// live-update streams, or counter API behavior. In particular, unknown
+// counter-like paths must not mutate the shared counter.
+func TestR_X0O1_BJ2H_unknown_paths_return_404_without_action(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	prev := onListenerReady
+	onListenerReady = func(a net.Addr) { ready <- a }
+	t.Cleanup(func() { onListenerReady = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	exit := make(chan int, 1)
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	var stdout, stderr bytes.Buffer
+	go func() {
+		exit <- runServe(ctx, []string{"--port", "0", "--db", dbPath},
+			&stdout, &stderr)
+	}()
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case code := <-exit:
+		t.Fatalf("runServe exited with code %d before listener ready; stdout=%q stderr=%q (R-X0O1-BJ2H)",
+			code, stdout.String(), stderr.String())
+	case <-time.After(2 * time.Second):
+		t.Fatalf("listener did not become ready in 2s; stdout=%q stderr=%q (R-X0O1-BJ2H)",
+			stdout.String(), stderr.String())
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exit:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-X0O1-BJ2H)")
+		}
+	})
+
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	base := "http://" + addr.String()
+	unknowns := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/missing"},
+		{http.MethodGet, "/counter/stream/extra"},
+		{http.MethodPost, "/counter/increment/extra"},
+		{http.MethodPost, "/oauth/token/extra"},
+		{http.MethodGet, "/mcp/extra"},
+		{http.MethodGet, "/design.css/extra"},
+	}
+	for _, tc := range unknowns {
+		req, err := http.NewRequest(tc.method, base+tc.path, nil)
+		if err != nil {
+			t.Fatalf("build %s %s: %v (R-X0O1-BJ2H)", tc.method, tc.path, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v (R-X0O1-BJ2H)", tc.method, tc.path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want 404; body=%q (R-X0O1-BJ2H)",
+				tc.method, tc.path, resp.StatusCode, string(body))
+		}
+		if strings.Contains(string(body), "HAL 9000") {
+			t.Fatalf("%s %s fell through to index page (R-X0O1-BJ2H)",
+				tc.method, tc.path)
+		}
+	}
+
+	resp, err := client.Get(base + "/counter")
+	if err != nil {
+		t.Fatalf("GET /counter after unknown requests: %v (R-X0O1-BJ2H)", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /counter status = %d, want 200; body=%q (R-X0O1-BJ2H)",
+			resp.StatusCode, string(body))
+	}
+	var got struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode /counter response %q: %v (R-X0O1-BJ2H)", string(body), err)
+	}
+	if got.Count != 0 {
+		t.Fatalf("counter = %d after unknown counter-like POST, want 0 (R-X0O1-BJ2H)",
+			got.Count)
+	}
+}
+
+// R-0XJ4-5MSL / R-FZ10-BE37: a web session and an MCP token chain are
+// independent identity contexts that do not share lifetime or revocation.
+// Logout revokes the web session and writes to the web-session store only;
+// it has no read or write effect on any MCP token chain.
+func TestR_0XJ4_5MSL_R_FZ10_BE37_logout_revokes_only_web_session(t *testing.T) {
 	t.Run("logout_revokes_web_session_and_clears_cookie", func(t *testing.T) {
 		plaintext, err := webSessionStore.issue("user@example.com")
 		if err != nil {
-			t.Fatalf("issue: %v (R-93PJ-FRPY)", err)
+			t.Fatalf("issue: %v (R-FZ10-BE37)", err)
 		}
 		if got := webSessionStore.lookup(plaintext); got == nil {
-			t.Fatalf("session not found after issue (R-93PJ-FRPY)")
+			t.Fatalf("session not found after issue (R-FZ10-BE37)")
 		}
 
 		req := httptest.NewRequest("POST", "/logout", nil)
@@ -7775,10 +8508,10 @@ func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
 		defer res.Body.Close()
 
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
-			t.Fatalf("status = %d, want 3xx (R-93PJ-FRPY)", res.StatusCode)
+			t.Fatalf("status = %d, want 3xx (R-FZ10-BE37)", res.StatusCode)
 		}
 		if got := res.Header.Get("Location"); got != "/" {
-			t.Fatalf("Location = %q, want %q (R-93PJ-FRPY)", got, "/")
+			t.Fatalf("Location = %q, want %q (R-FZ10-BE37)", got, "/")
 		}
 
 		// hal_session cookie cleared via MaxAge<0.
@@ -7790,22 +8523,22 @@ func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
 			}
 		}
 		if cleared == nil {
-			t.Fatalf("Set-Cookie %q absent on logout response (R-93PJ-FRPY)",
+			t.Fatalf("Set-Cookie %q absent on logout response (R-FZ10-BE37)",
 				webSessionCookieName)
 		}
 		if cleared.MaxAge >= 0 {
-			t.Fatalf("hal_session MaxAge = %d, want < 0 to clear (R-93PJ-FRPY)",
+			t.Fatalf("hal_session MaxAge = %d, want < 0 to clear (R-FZ10-BE37)",
 				cleared.MaxAge)
 		}
 
 		// The session is revoked: lookup returns nil.
 		if got := webSessionStore.lookup(plaintext); got != nil {
-			t.Fatalf("session still validates after logout (R-93PJ-FRPY)")
+			t.Fatalf("session still validates after logout (R-FZ10-BE37)")
 		}
 	})
 
 	t.Run("logout_handler_does_not_touch_oauth_token_store", func(t *testing.T) {
-		// R-93PJ-FRPY: a web session and an MCP token chain are
+		// R-0XJ4-5MSL: a web session and an MCP token chain are
 		// independent identity contexts that do not share lifetime or
 		// revocation. R-27SO-F63X has landed the oauthTokenStore so
 		// the structural-absence check that used to live here no
@@ -7824,7 +8557,7 @@ func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
 		fset := token.NewFileSet()
 		af, err := parser.ParseFile(fset, "main.go", nil, 0)
 		if err != nil {
-			t.Fatalf("parse main.go: %v (R-93PJ-FRPY)", err)
+			t.Fatalf("parse main.go: %v (R-0XJ4-5MSL)", err)
 		}
 		var logoutFunc *ast.FuncDecl
 		for _, d := range af.Decls {
@@ -7838,7 +8571,7 @@ func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
 			}
 		}
 		if logoutFunc == nil {
-			t.Fatalf("handleLogout not found in main.go (R-93PJ-FRPY)")
+			t.Fatalf("handleLogout not found in main.go (R-0XJ4-5MSL)")
 		}
 		ast.Inspect(logoutFunc.Body, func(n ast.Node) bool {
 			id, ok := n.(*ast.Ident)
@@ -7851,7 +8584,7 @@ func TestR_93PJ_FRPY_logout_revokes_only_web_session(t *testing.T) {
 					t.Errorf("%s:%d: handleLogout references %q — "+
 						"logout must touch only the web-session "+
 						"store; lifecycle independence from any "+
-						"MCP token chain store is R-93PJ-FRPY",
+						"MCP token chain store is R-0XJ4-5MSL",
 						pos.Filename, pos.Line, bad)
 				}
 			}
@@ -8006,6 +8739,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 
 	t.Run("callback_accepts_valid_state_and_consumes_single_use",
 		func(t *testing.T) {
+			t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
 			state, bindingID := loginAndExtract(t)
 			res := callbackResult(t, state, bindingID)
 			defer res.Body.Close()
@@ -8139,6 +8873,8 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 // HostedDomain claim, so the success path is exercised without any
 // environment plumbing.
 func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
+	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+
 	loginReq := httptest.NewRequest("GET", "/login", nil)
 	loginRec := httptest.NewRecorder()
 	handleLogin(loginRec, loginReq)
@@ -8172,6 +8908,182 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 		t.Fatalf("Location = %q, want %q after in-domain callback "+
 			"(R-CXJ2-R3BN)", loc, "/")
 	}
+}
+
+type rEMW1D8A0IDP struct {
+	identity googleIdentity
+}
+
+func (i rEMW1D8A0IDP) AuthorizationURL(redirectURI, state string, forceLogin bool) string {
+	return googleFakeIDP{}.AuthorizationURL(redirectURI, state, forceLogin)
+}
+
+func (i rEMW1D8A0IDP) ExchangeCode(code, redirectURI string) (googleIdentity, error) {
+	return i.identity, nil
+}
+
+// R-EMW1-D8A0: the Google callback accepts a federated identity only when
+// Google asserts email_verified=true. The rejection happens before origin
+// dispatch creates any authenticated HAL artifact: web-origin callbacks do
+// not establish a web session, and mcp-origin callbacks do not mint a HAL
+// authorization code or web session.
+func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
+	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	prevIDP := testHookGoogleIDP
+	testHookGoogleIDP = rEMW1D8A0IDP{identity: googleIdentity{
+		Sub:           "sub-unverified",
+		Email:         "user@example.com",
+		HostedDomain:  "example.com",
+		EmailVerified: false,
+	}}
+	t.Cleanup(func() { testHookGoogleIDP = prevIDP })
+
+	webSessionStore.mu.Lock()
+	webSessionStore.m = map[string]*webSession{}
+	webSessionStore.mu.Unlock()
+	oauthAuthCodeStore.mu.Lock()
+	oauthAuthCodeStore.m = map[string]*oauthAuthCode{}
+	oauthAuthCodeStore.mu.Unlock()
+
+	callback := func(t *testing.T, state, bindingID string) *http.Response {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet,
+			"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake",
+			nil)
+		req.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
+		rec := httptest.NewRecorder()
+		handleGoogleCallback(rec, req)
+		return rec.Result()
+	}
+
+	t.Run("web_origin_rejects_without_session", func(t *testing.T) {
+		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+		loginRec := httptest.NewRecorder()
+		handleLogin(loginRec, loginReq)
+		loginRes := loginRec.Result()
+		defer loginRes.Body.Close()
+
+		var bindingID string
+		for _, c := range loginRes.Cookies() {
+			if c.Name == oauthStateCookieName {
+				bindingID = c.Value
+			}
+		}
+		loc, _ := url.Parse(loginRes.Header.Get("Location"))
+		state := loc.Query().Get("state")
+		if state == "" || bindingID == "" {
+			t.Fatalf("login did not produce state/binding (R-EMW1-D8A0)")
+		}
+
+		res := callback(t, state, bindingID)
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusForbidden {
+			body, _ := io.ReadAll(res.Body)
+			t.Fatalf("web callback status = %d, want 403 (R-EMW1-D8A0); body=%q",
+				res.StatusCode, body)
+		}
+		for _, c := range res.Cookies() {
+			if c.Name == webSessionCookieName {
+				t.Fatalf("unverified web callback set session cookie %q "+
+					"(R-EMW1-D8A0)", c.Value)
+			}
+		}
+		webSessionStore.mu.Lock()
+		gotSessions := len(webSessionStore.m)
+		webSessionStore.mu.Unlock()
+		if gotSessions != 0 {
+			t.Fatalf("web sessions after unverified callback = %d, want 0 "+
+				"(R-EMW1-D8A0)", gotSessions)
+		}
+	})
+
+	t.Run("mcp_origin_rejects_without_hal_code_or_session", func(t *testing.T) {
+		const redirectURI = "http://127.0.0.1/cb"
+		regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
+			strings.NewReader(`{"redirect_uris":["`+redirectURI+`"]}`))
+		regReq.Header.Set("Content-Type", "application/json")
+		regRec := httptest.NewRecorder()
+		handleOAuthRegister(regRec, regReq)
+		regRes := regRec.Result()
+		defer regRes.Body.Close()
+		if regRes.StatusCode != http.StatusCreated {
+			t.Fatalf("register status = %d, want 201 (R-EMW1-D8A0 setup)",
+				regRes.StatusCode)
+		}
+		var regDoc map[string]any
+		if err := json.NewDecoder(regRes.Body).Decode(&regDoc); err != nil {
+			t.Fatalf("register body decode: %v (R-EMW1-D8A0 setup)", err)
+		}
+		clientID, _ := regDoc["client_id"].(string)
+		if clientID == "" {
+			t.Fatalf("register missing client_id (R-EMW1-D8A0 setup)")
+		}
+
+		const clientState = "client-state-r-emw1-d8a0"
+		authURL := "/oauth/authorize?client_id=" + url.QueryEscape(clientID) +
+			"&redirect_uri=" + url.QueryEscape(redirectURI) +
+			"&response_type=code" +
+			"&code_challenge=challenge-r-emw1-d8a0" +
+			"&code_challenge_method=S256" +
+			"&resource=" + url.QueryEscape(canonicalResourceIdentifier()) +
+			"&state=" + url.QueryEscape(clientState)
+		authReq := httptest.NewRequest(http.MethodGet, authURL, nil)
+		authRec := httptest.NewRecorder()
+		handleOAuthAuthorize(authRec, authReq)
+		authRes := authRec.Result()
+		defer authRes.Body.Close()
+
+		var bindingID string
+		for _, c := range authRes.Cookies() {
+			if c.Name == oauthStateCookieName {
+				bindingID = c.Value
+			}
+		}
+		loc, _ := url.Parse(authRes.Header.Get("Location"))
+		state := loc.Query().Get("state")
+		if state == "" || bindingID == "" {
+			t.Fatalf("authorize did not produce state/binding (R-EMW1-D8A0)")
+		}
+
+		res := callback(t, state, bindingID)
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusSeeOther {
+			body, _ := io.ReadAll(res.Body)
+			t.Fatalf("mcp callback status = %d, want 303 OAuth error "+
+				"(R-EMW1-D8A0); body=%q", res.StatusCode, body)
+		}
+		errLoc, err := url.Parse(res.Header.Get("Location"))
+		if err != nil {
+			t.Fatalf("parse mcp error redirect: %v (R-EMW1-D8A0)", err)
+		}
+		gotBase := errLoc.Scheme + "://" + errLoc.Host + errLoc.Path
+		if gotBase != redirectURI {
+			t.Fatalf("mcp error redirect base = %q, want %q (R-EMW1-D8A0)",
+				gotBase, redirectURI)
+		}
+		if errLoc.Query().Get("error") == "" {
+			t.Fatalf("mcp error redirect missing error= (R-EMW1-D8A0): %q",
+				res.Header.Get("Location"))
+		}
+		if got := errLoc.Query().Get("state"); got != clientState {
+			t.Fatalf("mcp error redirect state = %q, want %q (R-EMW1-D8A0)",
+				got, clientState)
+		}
+		oauthAuthCodeStore.mu.Lock()
+		gotCodes := len(oauthAuthCodeStore.m)
+		oauthAuthCodeStore.mu.Unlock()
+		if gotCodes != 0 {
+			t.Fatalf("auth codes after unverified callback = %d, want 0 "+
+				"(R-EMW1-D8A0)", gotCodes)
+		}
+		webSessionStore.mu.Lock()
+		gotSessions := len(webSessionStore.m)
+		webSessionStore.mu.Unlock()
+		if gotSessions != 0 {
+			t.Fatalf("web sessions after unverified mcp callback = %d, want 0 "+
+				"(R-EMW1-D8A0)", gotSessions)
+		}
+	})
 }
 
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
@@ -8226,6 +9138,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 	}
 
 	t.Run("successful_callback_mints_session_and_sets_cookie", func(t *testing.T) {
+		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
 		res := runFlow(t, nil)
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusSeeOther {
@@ -8268,6 +9181,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 	})
 
 	t.Run("session_cookie_is_secure_under_forwarded_https", func(t *testing.T) {
+		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
 		res := runFlow(t, func(req *http.Request) {
 			req.Header.Set("X-Forwarded-Proto", "https")
 		})
@@ -8331,6 +9245,8 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 // subtest pins the workspace-domain rejection contract.
 func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.T) {
 	t.Run("login_callback_session_surfaces_google_email_in_index", func(t *testing.T) {
+		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
 		handleLogin(loginRec, loginReq)
@@ -8638,6 +9554,112 @@ func TestR_KJ15_9P17_session_expires_at_idle_and_absolute_ceilings(t *testing.T)
 		})
 }
 
+// R-8CBQ-IKKA: web session records live in SQLite and are reloaded when
+// the service restarts against the same database. A still-valid
+// hal_session cookie remains signed in across that restart; explicit
+// revocation and `hal reset` both make the same cookie unknown.
+func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
+	prev := webSessionNow
+	start := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	webSessionNow = func() time.Time { return start }
+	t.Cleanup(func() { webSessionNow = prev })
+
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+
+	db1, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open first db: %v (R-8CBQ-IKKA)", err)
+	}
+	var first webSessionStorage
+	if err := first.attach(db1); err != nil {
+		t.Fatalf("first attach: %v (R-8CBQ-IKKA)", err)
+	}
+	plaintext, err := first.issue("restart-session@example.com")
+	if err != nil {
+		t.Fatalf("issue session: %v (R-8CBQ-IKKA)", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("close first db: %v (R-8CBQ-IKKA)", err)
+	}
+
+	webSessionNow = func() time.Time { return start.Add(10 * time.Minute) }
+	db2, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v (R-8CBQ-IKKA)", err)
+	}
+	var restarted webSessionStorage
+	if err := restarted.attach(db2); err != nil {
+		t.Fatalf("restart attach: %v (R-8CBQ-IKKA)", err)
+	}
+	rec := restarted.lookup(plaintext)
+	if rec == nil {
+		t.Fatalf("session cookie became unknown after restart " +
+			"(R-8CBQ-IKKA)")
+	}
+	if rec.ownerEmail != "restart-session@example.com" {
+		t.Fatalf("ownerEmail after restart = %q, want %q (R-8CBQ-IKKA)",
+			rec.ownerEmail, "restart-session@example.com")
+	}
+	restarted.revoke(plaintext)
+	if got := restarted.lookup(plaintext); got != nil {
+		t.Fatalf("revoked session still validates before close " +
+			"(R-8CBQ-IKKA)")
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatalf("close second db: %v (R-8CBQ-IKKA)", err)
+	}
+
+	db3, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen revoked db: %v (R-8CBQ-IKKA)", err)
+	}
+	var revoked webSessionStorage
+	if err := revoked.attach(db3); err != nil {
+		t.Fatalf("revoked attach: %v (R-8CBQ-IKKA)", err)
+	}
+	if got := revoked.lookup(plaintext); got != nil {
+		t.Fatalf("revoked session validated after restart " +
+			"(R-8CBQ-IKKA)")
+	}
+	if err := db3.Close(); err != nil {
+		t.Fatalf("close revoked db: %v (R-8CBQ-IKKA)", err)
+	}
+
+	db4, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open reset setup db: %v (R-8CBQ-IKKA)", err)
+	}
+	var resetSetup webSessionStorage
+	if err := resetSetup.attach(db4); err != nil {
+		t.Fatalf("reset setup attach: %v (R-8CBQ-IKKA)", err)
+	}
+	resetPlaintext, err := resetSetup.issue("reset-session@example.com")
+	if err != nil {
+		t.Fatalf("issue reset session: %v (R-8CBQ-IKKA)", err)
+	}
+	if err := db4.Close(); err != nil {
+		t.Fatalf("close reset setup db: %v (R-8CBQ-IKKA)", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"reset", "--db", dbPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("hal reset exit = %d, stderr=%q (R-8CBQ-IKKA)",
+			code, stderr.String())
+	}
+	db5, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open after reset: %v (R-8CBQ-IKKA)", err)
+	}
+	defer db5.Close()
+	var afterReset webSessionStorage
+	if err := afterReset.attach(db5); err != nil {
+		t.Fatalf("after reset attach: %v (R-8CBQ-IKKA)", err)
+	}
+	if got := afterReset.lookup(resetPlaintext); got != nil {
+		t.Fatalf("session survived hal reset (R-8CBQ-IKKA)")
+	}
+}
+
 // TestR_2XEK_GCOI_oauth_authorization_server_metadata verifies the
 // service publishes the OAuth 2.0 Authorization Server Metadata
 // document at the standard well-known location, returns valid JSON,
@@ -8931,6 +9953,611 @@ func TestR_3JCR_C810_dynamic_client_registration(t *testing.T) {
 	}
 }
 
+func TestR_9OWM_O8XJ_dynamic_client_registration_rejects_invalid_redirect_uris(t *testing.T) {
+	invalid := []struct {
+		name string
+		uri  string
+	}{
+		{"relative", "/callback"},
+		{"unsupported scheme", "urn:example:callback"},
+		{"empty host", "https:///callback"},
+		{"fragment", "https://127.0.0.1/callback#token"},
+		{"syntactically invalid", "%zz"},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			before := oauthClientStoreCount()
+			body := strings.NewReader(`{"redirect_uris":[` + strconv.Quote(tc.uri) + `]}`)
+			req := httptest.NewRequest(http.MethodPost, "/oauth/register", body)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handleOAuthRegister(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 for %q; body=%q (R-9OWM-O8XJ)",
+					rec.Code, tc.uri, rec.Body.String())
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("error body is not JSON: %v; body=%q (R-9OWM-O8XJ)",
+					err, rec.Body.String())
+			}
+			if got, _ := doc["error"].(string); got != "invalid_redirect_uri" {
+				t.Fatalf("error = %q, want invalid_redirect_uri; body=%q (R-9OWM-O8XJ)",
+					got, rec.Body.String())
+			}
+			if after := oauthClientStoreCount(); after != before {
+				t.Fatalf("invalid redirect_uri registered a client: count before=%d after=%d (R-9OWM-O8XJ)",
+					before, after)
+			}
+		})
+	}
+
+	valid := []string{
+		"http://127.0.0.1/callback",
+		"https://127.0.0.1/callback",
+	}
+	for _, uri := range valid {
+		t.Run("accepts "+uri, func(t *testing.T) {
+			body := strings.NewReader(`{"redirect_uris":[` + strconv.Quote(uri) + `]}`)
+			req := httptest.NewRequest(http.MethodPost, "/oauth/register", body)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handleOAuthRegister(rec, req)
+
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201 for %q; body=%q (R-9OWM-O8XJ)",
+					rec.Code, uri, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestR_8OBG_7FST_dynamic_client_registration_requires_at_least_one_valid_redirect_uri(t *testing.T) {
+	rejected := []struct {
+		name string
+		body string
+	}{
+		{"missing redirect_uris", `{"client_name":"No Redirects"}`},
+		{"empty redirect_uris", `{"redirect_uris":[]}`},
+		{"no valid redirect_uri", `{"redirect_uris":["/callback","urn:example:callback"]}`},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			before := oauthClientStoreCount()
+			req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handleOAuthRegister(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q (R-8OBG-7FST)",
+					rec.Code, rec.Body.String())
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("error body is not JSON: %v; body=%q (R-8OBG-7FST)",
+					err, rec.Body.String())
+			}
+			if got, _ := doc["error"].(string); got != "invalid_redirect_uri" {
+				t.Fatalf("error = %q, want invalid_redirect_uri; body=%q (R-8OBG-7FST)",
+					got, rec.Body.String())
+			}
+			if after := oauthClientStoreCount(); after != before {
+				t.Fatalf("invalid registration issued a client_id: count before=%d after=%d (R-8OBG-7FST)",
+					before, after)
+			}
+		})
+	}
+
+	t.Run("valid redirect_uri is persisted for authorize exact match", func(t *testing.T) {
+		uri := "http://127.0.0.1/callback"
+		body := `{"redirect_uris":[` + strconv.Quote(uri) + `]}`
+		req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		handleOAuthRegister(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body=%q (R-8OBG-7FST)",
+				rec.Code, rec.Body.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("success body is not JSON: %v; body=%q (R-8OBG-7FST)",
+				err, rec.Body.String())
+		}
+		clientID, _ := doc["client_id"].(string)
+		if clientID == "" {
+			t.Fatalf("response missing client_id; body=%q (R-8OBG-7FST)",
+				rec.Body.String())
+		}
+		recClient := oauthClientStore.lookup(clientID)
+		if recClient == nil {
+			t.Fatalf("client_id %q was not persisted (R-8OBG-7FST)", clientID)
+		}
+		if len(recClient.redirectURIs) != 1 || recClient.redirectURIs[0] != uri {
+			t.Fatalf("stored redirect_uris = %v, want [%s] (R-8OBG-7FST)",
+				recClient.redirectURIs, uri)
+		}
+	})
+}
+
+func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id_collision(t *testing.T) {
+	const (
+		existingID = "r19ba-existing-client"
+		freshID    = "r19ba-fresh-client"
+	)
+	existing := &oauthClient{
+		redirectURIs: []string{"http://127.0.0.1/existing-callback"},
+		clientName:   "Existing Client",
+		authMethod:   "none",
+		issuedAt:     1234,
+	}
+	oauthClientStore.put(existingID, existing)
+
+	originalGenerator := newOAuthClientID
+	t.Cleanup(func() { newOAuthClientID = originalGenerator })
+	generated := []string{existingID, freshID}
+	newOAuthClientID = func() (string, error) {
+		if len(generated) == 0 {
+			t.Fatal("newOAuthClientID called more times than expected")
+		}
+		next := generated[0]
+		generated = generated[1:]
+		return next, nil
+	}
+
+	body := `{"redirect_uris":["http://127.0.0.1/new-callback"],"client_name":"New Client"}`
+	req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handleOAuthRegister(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%q (R-19BA-4XX4)",
+			rec.Code, rec.Body.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("success body is not JSON: %v; body=%q (R-19BA-4XX4)",
+			err, rec.Body.String())
+	}
+	if got, _ := doc["client_id"].(string); got != freshID {
+		t.Fatalf("client_id = %q, want retry-generated %q (R-19BA-4XX4)",
+			got, freshID)
+	}
+	if rec := oauthClientStore.lookup(existingID); rec != existing {
+		t.Fatalf("existing client record was overwritten on ID collision (R-19BA-4XX4)")
+	}
+	if rec := oauthClientStore.lookup(freshID); rec == nil {
+		t.Fatalf("fresh client_id %q was not stored (R-19BA-4XX4)", freshID)
+	} else if len(rec.redirectURIs) != 1 || rec.redirectURIs[0] != "http://127.0.0.1/new-callback" {
+		t.Fatalf("fresh client redirect_uris = %v, want new callback (R-19BA-4XX4)",
+			rec.redirectURIs)
+	}
+
+	before := oauthClientStoreCount()
+	newOAuthClientID = func() (string, error) { return existingID, nil }
+	failReq := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
+	failReq.Header.Set("Content-Type", "application/json")
+	failRec := httptest.NewRecorder()
+
+	handleOAuthRegister(failRec, failReq)
+
+	if failRec.Code != http.StatusInternalServerError {
+		t.Fatalf("all-colliding registration status = %d, want 500; body=%q (R-19BA-4XX4)",
+			failRec.Code, failRec.Body.String())
+	}
+	if after := oauthClientStoreCount(); after != before {
+		t.Fatalf("all-colliding registration changed store count: before=%d after=%d (R-19BA-4XX4)",
+			before, after)
+	}
+	if rec := oauthClientStore.lookup(existingID); rec != existing {
+		t.Fatalf("existing client record changed after all-colliding failure (R-19BA-4XX4)")
+	}
+}
+
+func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *testing.T) {
+	const (
+		clientID    = "ryrmt-persisted-client"
+		redirectURI = "http://127.0.0.1/yrmt-callback"
+	)
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	originalStore := oauthClientStore
+	originalGenerator := newOAuthClientID
+	t.Cleanup(func() {
+		oauthClientStore = originalStore
+		newOAuthClientID = originalGenerator
+	})
+	newOAuthClientID = func() (string, error) { return clientID, nil }
+
+	db1, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open first db: %v (R-YRMT-B7LZ)", err)
+	}
+	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	if err := oauthClientStore.attach(db1); err != nil {
+		t.Fatalf("attach first store: %v (R-YRMT-B7LZ)", err)
+	}
+
+	body := `{"redirect_uris":[` + strconv.Quote(redirectURI) +
+		`],"client_name":"Restart Durable Client"}`
+	req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handleOAuthRegister(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("registration status = %d, want 201; body=%q (R-YRMT-B7LZ)",
+			rec.Code, rec.Body.String())
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("close first db: %v (R-YRMT-B7LZ)", err)
+	}
+
+	db2, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open restarted db: %v (R-YRMT-B7LZ)", err)
+	}
+	defer db2.Close()
+	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	if err := oauthClientStore.attach(db2); err != nil {
+		t.Fatalf("attach restarted store: %v (R-YRMT-B7LZ)", err)
+	}
+	loaded := oauthClientStore.lookup(clientID)
+	if loaded == nil {
+		t.Fatalf("client_id %q not loaded after restart (R-YRMT-B7LZ)", clientID)
+	}
+	if len(loaded.redirectURIs) != 1 || loaded.redirectURIs[0] != redirectURI {
+		t.Fatalf("loaded redirect_uris = %v, want [%s] (R-YRMT-B7LZ)",
+			loaded.redirectURIs, redirectURI)
+	}
+	if loaded.clientName != "Restart Durable Client" {
+		t.Fatalf("loaded clientName = %q, want persisted metadata (R-YRMT-B7LZ)",
+			loaded.clientName)
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/oauth/authorize?client_id="+url.QueryEscape(clientID)+
+			"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&response_type=code"+
+			"&code_challenge=R_YRMT_B7LZ_PKCE"+
+			"&code_challenge_method=S256"+
+			"&resource="+url.QueryEscape(canonicalResourceIdentifier()), nil)
+	authRec := httptest.NewRecorder()
+
+	handleOAuthAuthorize(authRec, authReq)
+
+	if authRec.Code != http.StatusSeeOther {
+		t.Fatalf("authorize after restart status = %d, want 303; body=%q (R-YRMT-B7LZ)",
+			authRec.Code, authRec.Body.String())
+	}
+	if loc := authRec.Header().Get("Location"); !strings.Contains(loc, "accounts.google.com") {
+		t.Fatalf("authorize after restart Location = %q, want Google redirect (R-YRMT-B7LZ)",
+			loc)
+	}
+}
+
+func TestR_JE3Z_IGI4_dynamic_client_registration_client_name_is_bounded_display_text(t *testing.T) {
+	register := func(t *testing.T, clientName string) map[string]any {
+		t.Helper()
+		body := `{"redirect_uris":["http://127.0.0.1/cb-je3z"],"client_name":` +
+			strconv.Quote(clientName) + `}`
+		req := httptest.NewRequest(http.MethodPost, "/oauth/register",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		handleOAuthRegister(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body=%q (R-JE3Z-IGI4)",
+				rec.Code, rec.Body.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("success body is not JSON: %v; body=%q (R-JE3Z-IGI4)",
+				err, rec.Body.String())
+		}
+		return doc
+	}
+
+	named := register(t, "  Friendly Client  ")
+	if got, _ := named["client_name"].(string); got != "Friendly Client" {
+		t.Fatalf("client_name = %q, want trimmed display text; doc=%v (R-JE3Z-IGI4)",
+			got, named)
+	}
+	clientID, _ := named["client_id"].(string)
+	if rec := oauthClientStore.lookup(clientID); rec == nil {
+		t.Fatalf("registered client %q not stored (R-JE3Z-IGI4)", clientID)
+	} else if rec.clientName != "Friendly Client" {
+		t.Fatalf("stored clientName = %q, want trimmed display text (R-JE3Z-IGI4)",
+			rec.clientName)
+	}
+
+	if doc := register(t, ""); doc["client_name"] != nil {
+		t.Fatalf("empty client_name should be unset; doc=%v (R-JE3Z-IGI4)", doc)
+	}
+	if doc := register(t, " \t\n "); doc["client_name"] != nil {
+		t.Fatalf("whitespace client_name should be unset; doc=%v (R-JE3Z-IGI4)", doc)
+	}
+	if doc := register(t, strings.Repeat("\u4e16", 80)); doc["client_name"] == "" {
+		t.Fatalf("80-code-point client_name should be accepted; doc=%v (R-JE3Z-IGI4)",
+			doc)
+	}
+
+	rejected := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "non-string",
+			body: `{"redirect_uris":["http://127.0.0.1/cb-je3z"],"client_name":123}`,
+		},
+		{
+			name: "overlong",
+			body: `{"redirect_uris":["http://127.0.0.1/cb-je3z"],"client_name":` +
+				strconv.Quote(strings.Repeat("a", 81)) + `}`,
+		},
+		{
+			name: "ascii control",
+			body: `{"redirect_uris":["http://127.0.0.1/cb-je3z"],"client_name":` +
+				strconv.Quote("bad\x07name") + `}`,
+		},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			before := oauthClientStoreCount()
+			req := httptest.NewRequest(http.MethodPost, "/oauth/register",
+				strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handleOAuthRegister(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q (R-JE3Z-IGI4)",
+					rec.Code, rec.Body.String())
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("error body is not JSON: %v; body=%q (R-JE3Z-IGI4)",
+					err, rec.Body.String())
+			}
+			if got, _ := doc["error"].(string); got == "" {
+				t.Fatalf("error response missing error field; body=%q (R-JE3Z-IGI4)",
+					rec.Body.String())
+			}
+			if after := oauthClientStoreCount(); after != before {
+				t.Fatalf("invalid client_name registered a client: count before=%d after=%d (R-JE3Z-IGI4)",
+					before, after)
+			}
+		})
+	}
+}
+
+func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T) {
+	metaReq := httptest.NewRequest(http.MethodGet,
+		"/.well-known/oauth-authorization-server", nil)
+	metaReq.Host = "hal.example.test"
+	metaRec := httptest.NewRecorder()
+
+	handleOAuthAuthorizationServerMetadata(metaRec, metaReq)
+
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("metadata status = %d, want 200; body=%q (R-KCBH-CXY9)",
+			metaRec.Code, metaRec.Body.String())
+	}
+	var meta struct {
+		TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	}
+	if err := json.Unmarshal(metaRec.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("metadata body is not JSON: %v; body=%q (R-KCBH-CXY9)",
+			err, metaRec.Body.String())
+	}
+	if !reflect.DeepEqual(meta.TokenEndpointAuthMethodsSupported, []string{"none"}) {
+		t.Fatalf("token_endpoint_auth_methods_supported = %v, want [none] (R-KCBH-CXY9)",
+			meta.TokenEndpointAuthMethodsSupported)
+	}
+
+	register := func(t *testing.T, body string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/oauth/register",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		handleOAuthRegister(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register status = %d, want 201; body=%q (R-KCBH-CXY9)",
+				rec.Code, rec.Body.String())
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("register response is not JSON: %v; body=%q (R-KCBH-CXY9)",
+				err, rec.Body.String())
+		}
+		if _, ok := doc["client_secret"]; ok {
+			t.Fatalf("registration response unexpectedly included client_secret: %v (R-KCBH-CXY9)",
+				doc)
+		}
+		if got, _ := doc["token_endpoint_auth_method"].(string); got != "none" {
+			t.Fatalf("token_endpoint_auth_method = %q, want none; doc=%v (R-KCBH-CXY9)",
+				got, doc)
+		}
+		clientID, _ := doc["client_id"].(string)
+		if clientID == "" {
+			t.Fatalf("registration response missing client_id; doc=%v (R-KCBH-CXY9)",
+				doc)
+		}
+		if rec := oauthClientStore.lookup(clientID); rec == nil {
+			t.Fatalf("client %q not stored (R-KCBH-CXY9)", clientID)
+		} else if rec.authMethod != "none" {
+			t.Fatalf("stored authMethod = %q, want none (R-KCBH-CXY9)",
+				rec.authMethod)
+		}
+		return doc
+	}
+
+	omitted := register(t, `{"redirect_uris":["http://127.0.0.1/cb-kcbh"]}`)
+	explicit := register(t, `{
+		"redirect_uris":["http://127.0.0.1/cb-kcbh-explicit"],
+		"token_endpoint_auth_method":"none"
+	}`)
+
+	for _, method := range []string{
+		"client_secret_basic",
+		"client_secret_post",
+		"client_secret_jwt",
+	} {
+		t.Run("rejects "+method, func(t *testing.T) {
+			before := oauthClientStoreCount()
+			body := `{
+				"redirect_uris":["http://127.0.0.1/cb-kcbh-reject"],
+				"token_endpoint_auth_method":` + strconv.Quote(method) + `
+			}`
+			req := httptest.NewRequest(http.MethodPost, "/oauth/register",
+				strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handleOAuthRegister(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q (R-KCBH-CXY9)",
+					rec.Code, rec.Body.String())
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("error body is not JSON: %v; body=%q (R-KCBH-CXY9)",
+					err, rec.Body.String())
+			}
+			if got, _ := doc["error"].(string); got != "invalid_client_metadata" {
+				t.Fatalf("error = %q, want invalid_client_metadata; body=%q (R-KCBH-CXY9)",
+					got, rec.Body.String())
+			}
+			if after := oauthClientStoreCount(); after != before {
+				t.Fatalf("rejected auth method created a client: count before=%d after=%d (R-KCBH-CXY9)",
+					before, after)
+			}
+		})
+	}
+
+	clientID, _ := explicit["client_id"].(string)
+	redirectURI := "http://127.0.0.1/cb-kcbh-explicit"
+	codeVerifier := "verifier-kcbh-cxy9-public-pkce-token-exchange"
+	sum := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code, err := oauthAuthCodeStore.issueWithResource(clientID, redirectURI,
+		codeChallenge, "S256", "user@example.com", canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue auth code: %v (R-KCBH-CXY9)", err)
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {clientID},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+		"resource":      {canonicalResourceIdentifier()},
+	}
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(form.Encode()))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+
+	handleOAuthToken(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token status = %d, want 200 without client_secret; body=%q (R-KCBH-CXY9)",
+			tokenRec.Code, tokenRec.Body.String())
+	}
+	var tokenDoc map[string]any
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &tokenDoc); err != nil {
+		t.Fatalf("token response is not JSON: %v; body=%q (R-KCBH-CXY9)",
+			err, tokenRec.Body.String())
+	}
+	if tokenDoc["access_token"] == "" || tokenDoc["refresh_token"] == "" {
+		t.Fatalf("token response missing access/refresh token: %v (R-KCBH-CXY9)",
+			tokenDoc)
+	}
+	if _, ok := omitted["client_secret"]; ok {
+		t.Fatalf("omitted-method registration unexpectedly included client_secret: %v (R-KCBH-CXY9)",
+			omitted)
+	}
+}
+
+func oauthClientStoreCount() int {
+	oauthClientStore.mu.Lock()
+	defer oauthClientStore.mu.Unlock()
+	return len(oauthClientStore.m)
+}
+
+func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
+	originalCodes := oauthAuthCodeStore
+	originalTokens := oauthTokenStore
+	t.Cleanup(func() {
+		oauthAuthCodeStore = originalCodes
+		oauthTokenStore = originalTokens
+	})
+	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+
+	const (
+		clientID    = "client-r-kx4n-dz44"
+		redirectURI = "http://127.0.0.1/cb-r-kx4n"
+		verifier    = "verifier-r-kx4n-dz44-non-cacheable-token-response"
+	)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code, err := oauthAuthCodeStore.issueWithResource(
+		clientID, redirectURI, challenge, "S256",
+		"user@example.com", canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue authorization code: %v (R-KX4N-DZ44)", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"client_id":     {clientID},
+			"redirect_uri":  {redirectURI},
+			"code_verifier": {verifier},
+			"resource":      {canonicalResourceIdentifier()},
+		}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	handleOAuthToken(rec, req)
+
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("token status = %d, want 200; body=%q (R-KX4N-DZ44)",
+			res.StatusCode, body)
+	}
+	if got := res.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store (R-KX4N-DZ44)", got)
+	}
+	var doc map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
+		t.Fatalf("token body not JSON: %v (R-KX4N-DZ44)", err)
+	}
+	if doc["access_token"] == "" || doc["refresh_token"] == "" {
+		t.Fatalf("successful token response missing bearer plaintext: %v (R-KX4N-DZ44)", doc)
+	}
+}
+
 // TestR_1KML_5J0Q_oauth_endpoints_share_origin pins R-1KML-5J0Q's
 // posture: every OAuth 2.1 authorization endpoint the service exposes
 // lives on the same origin as the service itself. Clients are
@@ -9208,7 +10835,11 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 		},
 	}
 	authURL := base + "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb")
+		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+		"&response_type=code" +
+		"&code_challenge=R_4SH1_HQGP_PKCE" +
+		"&code_challenge_method=S256" +
+		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 	resp, err := client.Get(authURL)
 	if err != nil {
 		t.Fatalf("GET /oauth/authorize: %v (R-4SH1-HQGP)", err)
@@ -9226,6 +10857,236 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 	if !strings.HasPrefix(loc, googleAuth) {
 		t.Fatalf("Location = %q, want prefix %q (R-4SH1-HQGP)",
 			loc, googleAuth)
+	}
+}
+
+func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
+	originalClients := oauthClientStore
+	originalStates := oauthStateStore
+	t.Cleanup(func() {
+		oauthClientStore = originalClients
+		oauthStateStore = originalStates
+	})
+	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+
+	const redirectURI = "http://127.0.0.1/cb-r-baxt"
+	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
+		strings.NewReader(`{"redirect_uris":[`+strconv.Quote(redirectURI)+`]}`))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	handleOAuthRegister(regRec, regReq)
+	regRes := regRec.Result()
+	defer regRes.Body.Close()
+	if regRes.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201 (R-BAXT-SBU9)",
+			regRes.StatusCode)
+	}
+	var regDoc map[string]any
+	if err := json.NewDecoder(regRes.Body).Decode(&regDoc); err != nil {
+		t.Fatalf("register body not JSON: %v (R-BAXT-SBU9)", err)
+	}
+	clientID, _ := regDoc["client_id"].(string)
+	if clientID == "" {
+		t.Fatal("register response missing client_id (R-BAXT-SBU9)")
+	}
+
+	base := url.Values{}
+	base.Set("client_id", clientID)
+	base.Set("redirect_uri", redirectURI)
+	base.Set("response_type", "code")
+	base.Set("code_challenge", "R_BAXT_SBU9_PKCE")
+	base.Set("code_challenge_method", "S256")
+	base.Set("resource", canonicalResourceIdentifier())
+	drive := func(v url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet,
+			"/oauth/authorize?"+v.Encode(), nil)
+		rec := httptest.NewRecorder()
+		handleOAuthAuthorize(rec, req)
+		return rec
+	}
+
+	valid := drive(base)
+	if valid.Code != http.StatusSeeOther {
+		t.Fatalf("valid authorize status = %d, want 303; body=%q (R-BAXT-SBU9)",
+			valid.Code, valid.Body.String())
+	}
+	if loc := valid.Header().Get("Location"); !strings.Contains(loc, "accounts.google.com") {
+		t.Fatalf("valid authorize Location = %q, want Google redirect (R-BAXT-SBU9)",
+			loc)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(url.Values)
+	}{
+		{"missing response_type", func(v url.Values) { v.Del("response_type") }},
+		{"unsupported response_type", func(v url.Values) { v.Set("response_type", "token") }},
+		{"missing code_challenge", func(v url.Values) { v.Del("code_challenge") }},
+		{"empty code_challenge", func(v url.Values) { v.Set("code_challenge", "") }},
+		{"missing code_challenge_method", func(v url.Values) { v.Del("code_challenge_method") }},
+		{"empty code_challenge_method", func(v url.Values) { v.Set("code_challenge_method", "") }},
+		{"unsupported code_challenge_method", func(v url.Values) { v.Set("code_challenge_method", "bogus") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(oauthStateStore.m)
+			v := url.Values{}
+			for key, vals := range base {
+				v[key] = append([]string(nil), vals...)
+			}
+			tc.mutate(v)
+			rec := drive(v)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q (R-BAXT-SBU9)",
+					rec.Code, rec.Body.String())
+			}
+			if loc := rec.Header().Get("Location"); loc != "" {
+				t.Fatalf("Location = %q, want no redirect (R-BAXT-SBU9)", loc)
+			}
+			if after := len(oauthStateStore.m); after != before {
+				t.Fatalf("oauth state records changed from %d to %d on rejection (R-BAXT-SBU9)",
+					before, after)
+			}
+		})
+	}
+}
+
+func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
+	originalClients := oauthClientStore
+	originalStates := oauthStateStore
+	originalCodes := oauthAuthCodeStore
+	originalTokens := oauthTokenStore
+	t.Cleanup(func() {
+		oauthClientStore = originalClients
+		oauthStateStore = originalStates
+		oauthAuthCodeStore = originalCodes
+		oauthTokenStore = originalTokens
+	})
+	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+
+	const redirectURI = "http://127.0.0.1/cb-r-jttz"
+	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
+		strings.NewReader(`{"redirect_uris":[`+strconv.Quote(redirectURI)+`]}`))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	handleOAuthRegister(regRec, regReq)
+	regRes := regRec.Result()
+	defer regRes.Body.Close()
+	if regRes.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201 (R-JTTZ-CG5J)",
+			regRes.StatusCode)
+	}
+	var regDoc map[string]any
+	if err := json.NewDecoder(regRes.Body).Decode(&regDoc); err != nil {
+		t.Fatalf("register body not JSON: %v (R-JTTZ-CG5J)", err)
+	}
+	clientID, _ := regDoc["client_id"].(string)
+	if clientID == "" {
+		t.Fatal("register response missing client_id (R-JTTZ-CG5J)")
+	}
+
+	base := url.Values{}
+	base.Set("client_id", clientID)
+	base.Set("redirect_uri", redirectURI)
+	base.Set("response_type", "code")
+	base.Set("code_challenge", "R_JTTZ_CG5J_PKCE")
+	base.Set("code_challenge_method", "S256")
+	base.Set("resource", canonicalResourceIdentifier())
+	driveAuthorize := func(v url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet,
+			"/oauth/authorize?"+v.Encode(), nil)
+		rec := httptest.NewRecorder()
+		handleOAuthAuthorize(rec, req)
+		return rec
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(url.Values)
+	}{
+		{"plain", func(v url.Values) { v.Set("code_challenge_method", "plain") }},
+		{"omitted", func(v url.Values) { v.Del("code_challenge_method") }},
+		{"empty", func(v url.Values) { v.Set("code_challenge_method", "") }},
+		{"other", func(v url.Values) { v.Set("code_challenge_method", "S384") }},
+	} {
+		t.Run("authorize_rejects_"+tc.name, func(t *testing.T) {
+			before := len(oauthStateStore.m)
+			v := url.Values{}
+			for key, vals := range base {
+				v[key] = append([]string(nil), vals...)
+			}
+			tc.mutate(v)
+			rec := driveAuthorize(v)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%q (R-JTTZ-CG5J)",
+					rec.Code, rec.Body.String())
+			}
+			if loc := rec.Header().Get("Location"); loc != "" {
+				t.Fatalf("Location = %q, want no redirect (R-JTTZ-CG5J)", loc)
+			}
+			if after := len(oauthStateStore.m); after != before {
+				t.Fatalf("oauth state records changed from %d to %d on rejection (R-JTTZ-CG5J)",
+					before, after)
+			}
+		})
+	}
+
+	valid := driveAuthorize(base)
+	if valid.Code != http.StatusSeeOther {
+		t.Fatalf("S256 authorize status = %d, want 303; body=%q (R-JTTZ-CG5J)",
+			valid.Code, valid.Body.String())
+	}
+
+	const verifier = "s256-verifier-for-r-jttz-cg5j-long-enough"
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code, err := oauthAuthCodeStore.issueWithResource(
+		clientID, redirectURI, challenge, "S256", "user@example.com",
+		canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue S256 code: %v (R-JTTZ-CG5J)", err)
+	}
+	wrongReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"client_id":     {clientID},
+			"redirect_uri":  {redirectURI},
+			"code_verifier": {challenge},
+			"resource":      {canonicalResourceIdentifier()},
+		}.Encode()))
+	wrongReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wrongRec := httptest.NewRecorder()
+	handleOAuthToken(wrongRec, wrongReq)
+	if wrongRec.Code != http.StatusBadRequest {
+		t.Fatalf("token with challenge-as-verifier status = %d, want 400 (R-JTTZ-CG5J)",
+			wrongRec.Code)
+	}
+
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"client_id":     {clientID},
+			"redirect_uri":  {redirectURI},
+			"code_verifier": {verifier},
+			"resource":      {canonicalResourceIdentifier()},
+		}.Encode()))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	handleOAuthToken(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token with S256 verifier status = %d, want 200; body=%q (R-JTTZ-CG5J)",
+			tokenRec.Code, tokenRec.Body.String())
+	}
+
+	if _, err := oauthAuthCodeStore.issue(
+		clientID, redirectURI, verifier, "plain", "user@example.com"); !errors.Is(err, errOAuthAuthCodePKCEMethod) {
+		t.Fatalf("issue plain method returned %v, want errOAuthAuthCodePKCEMethod (R-JTTZ-CG5J)", err)
 	}
 }
 
@@ -9301,7 +11162,11 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 
 	// Exact byte-equal match → 3xx to Google.
 	okURL := base + "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape(registered)
+		"&redirect_uri=" + url.QueryEscape(registered) +
+		"&response_type=code" +
+		"&code_challenge=R_1ERW_YD9G_PKCE" +
+		"&code_challenge_method=S256" +
+		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 	okResp, err := client.Get(okURL)
 	if err != nil {
 		t.Fatalf("GET authorize (exact match): %v (R-1ERW-YD9G)", err)
@@ -9330,7 +11195,11 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 	}
 	for _, mm := range mismatches {
 		u := base + "/oauth/authorize?client_id=" + clientID +
-			"&redirect_uri=" + url.QueryEscape(mm.uri)
+			"&redirect_uri=" + url.QueryEscape(mm.uri) +
+			"&response_type=code" +
+			"&code_challenge=R_1ERW_YD9G_PKCE" +
+			"&code_challenge_method=S256" +
+			"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 		resp, err := client.Get(u)
 		if err != nil {
 			t.Fatalf("GET authorize (%s): %v (R-1ERW-YD9G)", mm.label, err)
@@ -9360,7 +11229,11 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 
 	// Unknown client_id.
 	unkURL := base + "/oauth/authorize?client_id=does-not-exist" +
-		"&redirect_uri=" + url.QueryEscape(registered)
+		"&redirect_uri=" + url.QueryEscape(registered) +
+		"&response_type=code" +
+		"&code_challenge=R_1ERW_YD9G_PKCE" +
+		"&code_challenge_method=S256" +
+		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 	unkResp, err := client.Get(unkURL)
 	if err != nil {
 		t.Fatalf("GET authorize (unknown client): %v (R-1ERW-YD9G)", err)
@@ -9418,7 +11291,11 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 	}
 
 	authURL := "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb")
+		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+		"&response_type=code" +
+		"&code_challenge=R_126C_AM1E_PKCE" +
+		"&code_challenge_method=S256" +
+		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 	req := httptest.NewRequest(http.MethodGet, authURL, nil)
 	rec := httptest.NewRecorder()
 	handleOAuthAuthorize(rec, req)
@@ -9452,11 +11329,11 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 // check. Both /oauth/authorize and /oauth/token must reject a request
 // whose `resource` parameter is present and not byte-equal to the
 // canonical resource identifier (RFC 8707 `invalid_target`), without
-// redirecting the user-agent using the offending value. A request
-// that either omits `resource` or supplies the canonical value must
-// fall through to whatever non-resource behavior the endpoint has —
-// proving the check is gated on the resource value, not pinning some
-// unrelated failure.
+// redirecting the user-agent using the offending value. A request that
+// supplies the canonical value must fall through to whatever
+// non-resource behavior the endpoint has — proving the check is gated
+// on the resource value, not pinning some unrelated failure. Omitted
+// resource indicators are covered by R-WLUL-MZCD.
 func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testing.T) {
 	canonical := canonicalResourceIdentifier()
 	mismatched := canonical + "extra"
@@ -9483,7 +11360,10 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 	}
 
 	authBase := "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb")
+		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+		"&response_type=code" +
+		"&code_challenge=R_4GRA_EGBY_PKCE" +
+		"&code_challenge_method=S256"
 
 	// Mismatched resource at /oauth/authorize → 400 invalid_target,
 	// no Location header (no redirect using the offending value).
@@ -9519,17 +11399,6 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 	if okRes.StatusCode < 300 || okRes.StatusCode >= 400 {
 		t.Errorf("authorize canonical resource status = %d, want 3xx (R-4GRA-EGBY)",
 			okRes.StatusCode)
-	}
-
-	// Omitted resource at /oauth/authorize → falls through too.
-	omitReq := httptest.NewRequest(http.MethodGet, authBase, nil)
-	omitRec := httptest.NewRecorder()
-	handleOAuthAuthorize(omitRec, omitReq)
-	omitRes := omitRec.Result()
-	defer omitRes.Body.Close()
-	if omitRes.StatusCode < 300 || omitRes.StatusCode >= 400 {
-		t.Errorf("authorize omitted resource status = %d, want 3xx (R-4GRA-EGBY)",
-			omitRes.StatusCode)
 	}
 
 	// Mismatched resource at /oauth/token → 400 invalid_target.
@@ -9569,6 +11438,168 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 	if got, _ := tokOKDoc["error"].(string); got == "invalid_target" {
 		t.Errorf("token canonical resource error = %q, must not be "+
 			"invalid_target (R-4GRA-EGBY)", got)
+	}
+}
+
+// R-WLUL-MZCD: MCP OAuth authorize and token requests that omit
+// `resource` target the configured canonical resource identifier exactly
+// as if the client had supplied it. Present non-canonical values are
+// still rejected by R-4GRA-EGBY; this test covers the omission default.
+func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) {
+	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	canonical := canonicalResourceIdentifier()
+
+	originalTokens := oauthTokenStore
+	originalCodes := oauthAuthCodeStore
+	originalStates := oauthStateStore
+	t.Cleanup(func() {
+		oauthTokenStore = originalTokens
+		oauthAuthCodeStore = originalCodes
+		oauthStateStore = originalStates
+	})
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+
+	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
+		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	handleOAuthRegister(regRec, regReq)
+	regRes := regRec.Result()
+	defer regRes.Body.Close()
+	if regRes.StatusCode != http.StatusCreated {
+		t.Fatalf("register status = %d, want 201 (R-WLUL-MZCD)",
+			regRes.StatusCode)
+	}
+	var regDoc map[string]any
+	_ = json.NewDecoder(regRes.Body).Decode(&regDoc)
+	clientID, _ := regDoc["client_id"].(string)
+	if clientID == "" {
+		t.Fatalf("register missing client_id (R-WLUL-MZCD)")
+	}
+
+	codeVerifier := "r-wlul-mzcd-code-verifier"
+	sum := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	authBase := "/oauth/authorize?client_id=" + clientID +
+		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+		"&response_type=code" +
+		"&code_challenge=" + url.QueryEscape(codeChallenge) +
+		"&code_challenge_method=S256"
+
+	authReq := httptest.NewRequest(http.MethodGet, authBase, nil)
+	authRec := httptest.NewRecorder()
+	handleOAuthAuthorize(authRec, authReq)
+	authRes := authRec.Result()
+	defer authRes.Body.Close()
+	if authRes.StatusCode < 300 || authRes.StatusCode >= 400 {
+		t.Fatalf("authorize omitted resource status = %d, want 3xx "+
+			"(R-WLUL-MZCD)", authRes.StatusCode)
+	}
+	var bindingID string
+	for _, c := range authRes.Cookies() {
+		if c.Name == oauthStateCookieName {
+			bindingID = c.Value
+		}
+	}
+	loc, err := url.Parse(authRes.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Google redirect Location: %v (R-WLUL-MZCD)", err)
+	}
+	state := loc.Query().Get("state")
+	if state == "" || bindingID == "" {
+		t.Fatalf("authorize omitted resource did not yield state/binding " +
+			"(R-WLUL-MZCD)")
+	}
+	oauthStateStore.mu.Lock()
+	stateRec := oauthStateStore.m[state]
+	oauthStateStore.mu.Unlock()
+	if stateRec == nil || stateRec.mcp == nil {
+		t.Fatalf("authorize omitted resource missing MCP state context " +
+			"(R-WLUL-MZCD)")
+	}
+	if got := stateRec.mcp.resource; got != canonical {
+		t.Fatalf("authorize omitted resource bound %q, want canonical %q "+
+			"(R-WLUL-MZCD)", got, canonical)
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake-code", nil)
+	callbackReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
+	callbackRec := httptest.NewRecorder()
+	handleGoogleCallback(callbackRec, callbackReq)
+	callbackRes := callbackRec.Result()
+	defer callbackRes.Body.Close()
+	if callbackRes.StatusCode != http.StatusSeeOther {
+		t.Fatalf("callback status = %d, want 303 (R-WLUL-MZCD); body=%q",
+			callbackRes.StatusCode, callbackRec.Body.String())
+	}
+	clientRedirect, err := url.Parse(callbackRes.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse client redirect: %v (R-WLUL-MZCD)", err)
+	}
+	halCode := clientRedirect.Query().Get("code")
+	if halCode == "" {
+		t.Fatalf("client redirect missing HAL code (R-WLUL-MZCD)")
+	}
+
+	tokenForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {halCode},
+		"client_id":     {clientID},
+		"redirect_uri":  {"http://127.0.0.1/cb"},
+		"code_verifier": {codeVerifier},
+	}
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(tokenForm.Encode()))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	handleOAuthToken(tokenRec, tokenReq)
+	tokenRes := tokenRec.Result()
+	defer tokenRes.Body.Close()
+	if tokenRes.StatusCode != http.StatusOK {
+		t.Fatalf("authorization_code omitted resource status = %d, want 200; "+
+			"body=%q (R-WLUL-MZCD)", tokenRes.StatusCode, tokenRec.Body.String())
+	}
+	var tokenDoc struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(tokenRes.Body).Decode(&tokenDoc); err != nil {
+		t.Fatalf("token response not JSON: %v (R-WLUL-MZCD)", err)
+	}
+	if rec := oauthTokenStore.lookupAccess(tokenDoc.AccessToken); rec == nil ||
+		rec.resource != canonical {
+		t.Fatalf("access token bound resource = %v, want canonical %q "+
+			"(R-WLUL-MZCD)", rec, canonical)
+	}
+	oauthTokenStore.mu.Lock()
+	refreshRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.RefreshToken)]
+	oauthTokenStore.mu.Unlock()
+	if refreshRec == nil || refreshRec.resource != canonical {
+		t.Fatalf("refresh token bound resource = %v, want canonical %q "+
+			"(R-WLUL-MZCD)", refreshRec, canonical)
+	}
+
+	refreshToken, err := oauthTokenStore.issueRefresh(
+		"r-wlul@example.com", clientID, canonical)
+	if err != nil {
+		t.Fatalf("issueRefresh: %v (R-WLUL-MZCD)", err)
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
+	}
+	refreshOK := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(form.Encode()))
+	refreshOK.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshOKRec := httptest.NewRecorder()
+	handleOAuthToken(refreshOKRec, refreshOK)
+	if refreshOKRec.Code != http.StatusOK {
+		t.Fatalf("refresh omitted resource status = %d, want 200; body=%q "+
+			"(R-WLUL-MZCD)", refreshOKRec.Code, refreshOKRec.Body.String())
 	}
 }
 
@@ -9699,6 +11730,9 @@ func TestR_VVRG_W2G2_base_url_is_sufficient_for_mcp_client_onboarding(t *testing
 	q.Set("response_type", "code")
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", clientRedirect)
+	q.Set("code_challenge", "R_VVRG_W2G2_PKCE")
+	q.Set("code_challenge_method", "S256")
+	q.Set("resource", canonicalResourceIdentifier())
 	authURL.RawQuery = q.Encode()
 
 	// Don't auto-follow the redirect to Google — TestR_70ZT_NY4F bans
@@ -10280,25 +12314,20 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 	})
 
 	t.Run("code_exchange_posts_to_token_endpoint_and_parses_id_token", func(t *testing.T) {
-		// Build an id_token JWT shape (header.payload.signature) carrying
-		// the four claims the seam contract returns. The signature is
-		// empty — the surrounding state binding + redirect-URI check
-		// authenticate the upstream redemption, and the parse path
-		// itself does not verify the signature (see commentary on
-		// parseGoogleIDTokenClaims).
 		const (
 			wantSub   = "10000000000000001"
 			wantEmail = "user@" + "example" + ".com"
 		)
-		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
-		claimsJSON, _ := json.Marshal(map[string]any{
+		signer := newTestGoogleJWTSigner(t)
+		idToken := signer.idToken(t, map[string]any{
+			"iss":            "https://" + "accounts.google.com",
+			"aud":            clientID,
+			"exp":            time.Now().Add(time.Hour).Unix(),
 			"sub":            wantSub,
 			"email":          wantEmail,
 			"hd":             workspaceDomain,
 			"email_verified": true,
 		})
-		payload := base64.RawURLEncoding.EncodeToString(claimsJSON)
-		idToken := header + "." + payload + "."
 
 		var (
 			gotMethod       string
@@ -10313,22 +12342,29 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		// — exercising the same code path (HTTPS POST) the real
 		// implementation uses against Google.
 		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotMethod = r.Method
-			gotContentType = r.Header.Get("Content-Type")
-			_ = r.ParseForm()
-			gotClientID = r.Form.Get("client_id")
-			gotClientSecret = r.Form.Get("client_secret")
-			gotCode = r.Form.Get("code")
-			gotRedirectURI = r.Form.Get("redirect_uri")
-			gotGrantType = r.Form.Get("grant_type")
-			w.Header().Set("Content-Type", "application/json")
-			body := map[string]any{
-				"access_token": "fake-access-token",
-				"token_type":   "Bearer",
-				"expires_in":   3600,
-				"id_token":     idToken,
+			switch r.URL.Path {
+			case "/token":
+				gotMethod = r.Method
+				gotContentType = r.Header.Get("Content-Type")
+				_ = r.ParseForm()
+				gotClientID = r.Form.Get("client_id")
+				gotClientSecret = r.Form.Get("client_secret")
+				gotCode = r.Form.Get("code")
+				gotRedirectURI = r.Form.Get("redirect_uri")
+				gotGrantType = r.Form.Get("grant_type")
+				w.Header().Set("Content-Type", "application/json")
+				body := map[string]any{
+					"access_token": "fake-access-token",
+					"token_type":   "Bearer",
+					"expires_in":   3600,
+					"id_token":     idToken,
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			case "/certs":
+				signer.writeJWKS(w)
+			default:
+				http.NotFound(w, r)
 			}
-			_ = json.NewEncoder(w).Encode(body)
 		}))
 		t.Cleanup(ts.Close)
 
@@ -10338,7 +12374,8 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		// that trusts the httptest CA, so the HTTPS POST completes
 		// against the in-process server rather than reaching out to
 		// Google (R-VF61-2Y6I).
-		idp.cfg.Endpoint.TokenURL = ts.URL
+		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
+		idp.jwksURL = ts.URL + "/certs"
 		testHookGoogleExchangeContext = context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
 		t.Cleanup(func() { testHookGoogleExchangeContext = nil })
@@ -10410,6 +12447,151 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 			t.Errorf("default token endpoint = %q, want scheme=https "+
 				"host=%q (R-W3K0-QD0E: Google's documented token "+
 				"endpoint, HTTPS)", idp.cfg.Endpoint.TokenURL, wantHost)
+		}
+	})
+}
+
+type testGoogleJWTSigner struct {
+	key *rsa.PrivateKey
+	kid string
+}
+
+func newTestGoogleJWTSigner(t *testing.T) testGoogleJWTSigner {
+	t.Helper()
+	key, err := rsa.GenerateKey(cryptorand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	return testGoogleJWTSigner{key: key, kid: "test-key-1"}
+}
+
+func (s testGoogleJWTSigner) idToken(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	headerJSON, _ := json.Marshal(map[string]any{
+		"alg": "RS256",
+		"typ": "JWT",
+		"kid": s.kid,
+	})
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	header := base64.RawURLEncoding.EncodeToString(headerJSON)
+	payload := base64.RawURLEncoding.EncodeToString(claimsJSON)
+	signed := header + "." + payload
+	sum := sha256.Sum256([]byte(signed))
+	sig, err := rsa.SignPKCS1v15(cryptorand.Reader, s.key, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func (s testGoogleJWTSigner) writeJWKS(w http.ResponseWriter) {
+	pub := s.key.PublicKey
+	doc := map[string]any{
+		"keys": []map[string]any{{
+			"kty": "RSA",
+			"use": "sig",
+			"alg": "RS256",
+			"kid": s.kid,
+			"n":   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString(
+				big.NewInt(int64(pub.E)).Bytes()),
+		}},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// R-ZBV4-KEJ6: the real Google provider accepts identity claims only from
+// an ID token valid for this service: Google issuer, cryptographically valid
+// signature, unexpired token, and an audience matching GOOGLE_CLIENT_ID.
+func TestR_ZBV4_KEJ6_real_google_id_token_validation(t *testing.T) {
+	const (
+		workspaceDomain = "example.com"
+		clientID        = "real-client.apps.googleusercontent.com"
+		clientSecret    = "real-client-secret"
+		redirectURI     = "http://127.0.0.1:3000/oauth/google/callback"
+	)
+	signer := newTestGoogleJWTSigner(t)
+	validClaims := func() map[string]any {
+		return map[string]any{
+			"iss":            "https://" + "accounts.google.com",
+			"aud":            clientID,
+			"exp":            time.Now().Add(time.Hour).Unix(),
+			"sub":            "10000000000000001",
+			"email":          "user@" + "example" + ".com",
+			"hd":             workspaceDomain,
+			"email_verified": true,
+		}
+	}
+	exchange := func(t *testing.T, token string) error {
+		t.Helper()
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/token":
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token": "fake-access-token",
+					"token_type":   "Bearer",
+					"expires_in":   3600,
+					"id_token":     token,
+				})
+			case "/certs":
+				signer.writeJWKS(w)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(ts.Close)
+
+		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
+		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
+		idp.jwksURL = ts.URL + "/certs"
+		testHookGoogleExchangeContext = context.WithValue(
+			context.Background(), oauth2.HTTPClient, ts.Client())
+		t.Cleanup(func() { testHookGoogleExchangeContext = nil })
+		_, err := idp.ExchangeCode("auth-code-abc", redirectURI)
+		return err
+	}
+
+	t.Run("valid_token_is_accepted", func(t *testing.T) {
+		if err := exchange(t, signer.idToken(t, validClaims())); err != nil {
+			t.Fatalf("valid token rejected (R-ZBV4-KEJ6): %v", err)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"wrong_issuer", func(c map[string]any) { c["iss"] = "https://" + "issuer.example" }},
+		{"wrong_audience", func(c map[string]any) { c["aud"] = "other-client" }},
+		{"expired", func(c map[string]any) { c["exp"] = time.Now().Add(-time.Minute).Unix() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := validClaims()
+			tc.mutate(claims)
+			if err := exchange(t, signer.idToken(t, claims)); err == nil {
+				t.Fatalf("%s token accepted; want rejection (R-ZBV4-KEJ6)", tc.name)
+			}
+		})
+	}
+
+	t.Run("invalid_signature_rejected", func(t *testing.T) {
+		token := signer.idToken(t, validClaims())
+		parts := strings.Split(token, ".")
+		if len(parts) != 3 {
+			t.Fatalf("test token malformed")
+		}
+		claims := validClaims()
+		claims["email"] = "attacker@" + "example" + ".com"
+		claimsJSON, _ := json.Marshal(claims)
+		parts[1] = base64.RawURLEncoding.EncodeToString(claimsJSON)
+		if err := exchange(t, strings.Join(parts, ".")); err == nil {
+			t.Fatal("tampered token accepted; want signature rejection (R-ZBV4-KEJ6)")
 		}
 	})
 }
@@ -10585,30 +12767,16 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		}
 	})
 
-	t.Run("pkce_verifier_matches_plain", func(t *testing.T) {
-		reset()
-		plainVerifier := "plain-mode-verifier-value"
-		code, err := oauthAuthCodeStore.issue(
-			clientID, redirectURI, plainVerifier, "plain", "user@example.com")
-		if err != nil {
-			t.Fatalf("issue: %v", err)
-		}
-		if _, err := oauthAuthCodeStore.redeem(
-			code, clientID, redirectURI, plainVerifier); err != nil {
-			t.Errorf("plain-mode redeem with matching verifier returned %v, "+
-				"want nil — plain-method binding is challenge == verifier "+
-				"(R-ZPE1-0DV8)", err)
-		}
-	})
-
 	t.Run("issue_rejects_unsupported_method", func(t *testing.T) {
 		reset()
-		_, err := oauthAuthCodeStore.issue(
-			clientID, redirectURI, challenge, "MD5", "user@example.com")
-		if !errors.Is(err, errOAuthAuthCodePKCEMethod) {
-			t.Errorf("issue with unsupported method returned %v, want "+
-				"errOAuthAuthCodePKCEMethod — only S256 and plain are "+
-				"valid PKCE methods (R-ZPE1-0DV8)", err)
+		for _, method := range []string{"plain", "MD5"} {
+			_, err := oauthAuthCodeStore.issue(
+				clientID, redirectURI, challenge, method, "user@example.com")
+			if !errors.Is(err, errOAuthAuthCodePKCEMethod) {
+				t.Errorf("issue with unsupported method %q returned %v, want "+
+					"errOAuthAuthCodePKCEMethod — only S256 is a valid "+
+					"PKCE method (R-ZPE1-0DV8)", method, err)
+			}
 		}
 	})
 
@@ -10715,6 +12883,365 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 		if _, _, err := oauthTokenStore.rotateRefresh(at); err == nil {
 			t.Errorf("rotateRefresh(access plaintext) succeeded — refresh " +
 				"rotation must require a refresh-kind record (R-89K0-GH5G)")
+		}
+	})
+}
+
+// R-FC5T-WWC2: HAL-issued OAuth token records are persisted in SQLite and
+// survive process restarts until they expire, are revoked, are consumed, or
+// the local database is reset. This drives the token store through fresh
+// instances attached to the same database file, which is the restart shape
+// `hal serve` uses before accepting requests.
+func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	db, err := openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v (R-FC5T-WWC2)", err)
+	}
+	store := &oauthTokenStorage{m: map[string]*oauthToken{}}
+	if err := store.attach(db); err != nil {
+		t.Fatalf("attach initial store: %v (R-FC5T-WWC2)", err)
+	}
+
+	const (
+		owner    = "r-fc5t@example.com"
+		clientID = "client-r-fc5t"
+	)
+	resource := canonicalResourceIdentifier()
+	access, err := store.issueAccess(owner, clientID, resource)
+	if err != nil {
+		t.Fatalf("issue access: %v (R-FC5T-WWC2)", err)
+	}
+	refresh, err := store.issueRefresh(owner, clientID, resource)
+	if err != nil {
+		t.Fatalf("issue refresh: %v (R-FC5T-WWC2)", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close initial db: %v (R-FC5T-WWC2)", err)
+	}
+
+	db, err = openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v (R-FC5T-WWC2)", err)
+	}
+	restarted := &oauthTokenStorage{m: map[string]*oauthToken{}}
+	if err := restarted.attach(db); err != nil {
+		t.Fatalf("attach restarted store: %v (R-FC5T-WWC2)", err)
+	}
+	if rec := restarted.lookupAccess(access); rec == nil ||
+		rec.ownerEmail != owner || rec.clientID != clientID || rec.resource != resource {
+		t.Fatalf("access token did not survive restart with bindings intact: %#v (R-FC5T-WWC2)",
+			rec)
+	}
+	rotatedAccess, rotatedRefresh, err := restarted.rotateRefreshForClient(refresh, clientID)
+	if err != nil {
+		t.Fatalf("refresh token issued before restart was not rotatable after restart: %v "+
+			"(R-FC5T-WWC2)", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close restarted db: %v (R-FC5T-WWC2)", err)
+	}
+
+	db, err = openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("second reopen db: %v (R-FC5T-WWC2)", err)
+	}
+	restartedAgain := &oauthTokenStorage{m: map[string]*oauthToken{}}
+	if err := restartedAgain.attach(db); err != nil {
+		t.Fatalf("attach second restarted store: %v (R-FC5T-WWC2)", err)
+	}
+	if rec := restartedAgain.lookupAccess(rotatedAccess); rec == nil {
+		t.Fatalf("rotated access token did not survive restart (R-FC5T-WWC2)")
+	}
+	if _, _, err := restartedAgain.rotateRefreshForClient(rotatedRefresh, clientID); err != nil {
+		t.Fatalf("successor refresh token did not survive restart: %v (R-FC5T-WWC2)", err)
+	}
+	if _, _, err := restartedAgain.rotateRefreshForClient(refresh, clientID); err == nil {
+		t.Fatalf("consumed refresh became spendable again after restart (R-FC5T-WWC2)")
+	}
+	if rec := restartedAgain.lookupAccess(rotatedAccess); rec != nil {
+		t.Fatalf("access token from a reused refresh chain survived revocation after restart: %#v "+
+			"(R-FC5T-WWC2)", rec)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close second restarted db: %v (R-FC5T-WWC2)", err)
+	}
+
+	db, err = openCounterDB(dbPath)
+	if err != nil {
+		t.Fatalf("third reopen db: %v (R-FC5T-WWC2)", err)
+	}
+	finalStore := &oauthTokenStorage{m: map[string]*oauthToken{}}
+	if err := finalStore.attach(db); err != nil {
+		t.Fatalf("attach final store: %v (R-FC5T-WWC2)", err)
+	}
+	if rec := finalStore.lookupAccess(rotatedAccess); rec != nil {
+		t.Fatalf("revoked access token became valid after restart: %#v (R-FC5T-WWC2)", rec)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close final db: %v (R-FC5T-WWC2)", err)
+	}
+}
+
+// R-5P7B-KY5Z: refresh-token grant requests must identify the same OAuth
+// client that originally received the refresh token. A mismatched or missing
+// client_id is rejected without consuming the refresh; the original client can
+// still spend it once afterward.
+func TestR_5P7B_KY5Z_refresh_grant_requires_original_client_id(t *testing.T) {
+	originalTokens := oauthTokenStore
+	t.Cleanup(func() { oauthTokenStore = originalTokens })
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+
+	const (
+		owner          = "r-5p7b@example.com"
+		originalClient = "client-r-5p7b-original"
+		otherClient    = "client-r-5p7b-other"
+	)
+	refreshToken, err := oauthTokenStore.issueRefresh(
+		owner, originalClient, canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issueRefresh: %v (R-5P7B-KY5Z)", err)
+	}
+
+	postRefresh := func(clientID string) *httptest.ResponseRecorder {
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {refreshToken},
+			"resource":      {canonicalResourceIdentifier()},
+		}
+		if clientID != "" {
+			form.Set("client_id", clientID)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/oauth/token",
+			strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		handleOAuthToken(rec, req)
+		return rec
+	}
+
+	missing := postRefresh("")
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing client_id status = %d, want 400 (R-5P7B-KY5Z)",
+			missing.Code)
+	}
+
+	mismatch := postRefresh(otherClient)
+	if mismatch.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched client_id status = %d, want 400; body=%q (R-5P7B-KY5Z)",
+			mismatch.Code, mismatch.Body.String())
+	}
+	var mismatchDoc map[string]string
+	if err := json.Unmarshal(mismatch.Body.Bytes(), &mismatchDoc); err != nil {
+		t.Fatalf("mismatch body is not JSON: %v; body=%q (R-5P7B-KY5Z)",
+			err, mismatch.Body.String())
+	}
+	if mismatchDoc["error"] != "invalid_grant" {
+		t.Fatalf("mismatch error = %q, want invalid_grant (R-5P7B-KY5Z)",
+			mismatchDoc["error"])
+	}
+
+	ok := postRefresh(originalClient)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("original client status = %d, want 200 after mismatch; body=%q "+
+			"(R-5P7B-KY5Z)", ok.Code, ok.Body.String())
+	}
+	var okDoc map[string]any
+	if err := json.Unmarshal(ok.Body.Bytes(), &okDoc); err != nil {
+		t.Fatalf("success body is not JSON: %v; body=%q (R-5P7B-KY5Z)",
+			err, ok.Body.String())
+	}
+	if okDoc["access_token"] == "" || okDoc["refresh_token"] == "" {
+		t.Fatalf("success response missing new token pair: %v (R-5P7B-KY5Z)",
+			okDoc)
+	}
+}
+
+// R-B78O-8X0F: the OAuth token endpoint supports the refresh-token
+// grant. A valid refresh token produces a fresh bearer access token and
+// successor refresh token for the same owner, client, chain, and resource
+// without redirecting to Google or requiring browser interaction.
+// Invalid, missing, used, revoked, or expired refresh tokens are rejected
+// with OAuth error JSON and do not mint a new token pair.
+func TestR_B78O_8X0F_refresh_token_grant_rotates_or_rejects(t *testing.T) {
+	originalTokens := oauthTokenStore
+	originalNow := oauthTokenNow
+	t.Cleanup(func() {
+		oauthTokenStore = originalTokens
+		oauthTokenNow = originalNow
+	})
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenNow = originalNow
+
+	const (
+		owner    = "r-b78o@example.com"
+		clientID = "client-r-b78o"
+	)
+	resource := canonicalResourceIdentifier()
+
+	postRefresh := func(refreshToken, clientID string) *httptest.ResponseRecorder {
+		form := url.Values{
+			"grant_type": {"refresh_token"},
+			"resource":   {resource},
+		}
+		if refreshToken != "" {
+			form.Set("refresh_token", refreshToken)
+		}
+		if clientID != "" {
+			form.Set("client_id", clientID)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/oauth/token",
+			strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		handleOAuthToken(rec, req)
+		return rec
+	}
+	tokenCount := func() int {
+		oauthTokenStore.mu.Lock()
+		defer oauthTokenStore.mu.Unlock()
+		return len(oauthTokenStore.m)
+	}
+
+	t.Run("valid_refresh_returns_fresh_pair_and_consumes_presented_token", func(t *testing.T) {
+		refreshToken, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		if err != nil {
+			t.Fatalf("issueRefresh: %v (R-B78O-8X0F)", err)
+		}
+		originalHash := oauthTokenHash(refreshToken)
+
+		w := postRefresh(refreshToken, clientID)
+		if w.Code != http.StatusOK {
+			t.Fatalf("refresh grant status = %d, want 200; body=%q (R-B78O-8X0F)",
+				w.Code, w.Body.String())
+		}
+		if got := w.Header().Get("Location"); got != "" {
+			t.Fatalf("refresh grant redirected to %q; want JSON token response "+
+				"without browser round trip (R-B78O-8X0F)", got)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("success body is not JSON: %v; body=%q (R-B78O-8X0F)",
+				err, w.Body.String())
+		}
+		access, _ := doc["access_token"].(string)
+		successorRefresh, _ := doc["refresh_token"].(string)
+		if access == "" || successorRefresh == "" || doc["token_type"] != "Bearer" {
+			t.Fatalf("success response missing bearer token pair: %v (R-B78O-8X0F)",
+				doc)
+		}
+		if successorRefresh == refreshToken {
+			t.Fatalf("successor refresh equals consumed refresh (R-B78O-8X0F)")
+		}
+
+		oauthTokenStore.mu.Lock()
+		orig := oauthTokenStore.m[originalHash]
+		accessRec := oauthTokenStore.m[oauthTokenHash(access)]
+		refreshRec := oauthTokenStore.m[oauthTokenHash(successorRefresh)]
+		oauthTokenStore.mu.Unlock()
+		if orig == nil || orig.usedAt.IsZero() {
+			t.Fatalf("presented refresh was not consumed (R-B78O-8X0F)")
+		}
+		if accessRec == nil || refreshRec == nil {
+			t.Fatalf("new token records missing: access=%v refresh=%v (R-B78O-8X0F)",
+				accessRec != nil, refreshRec != nil)
+		}
+		if accessRec.ownerEmail != owner || accessRec.clientID != clientID ||
+			accessRec.resource != resource || accessRec.chainID != orig.chainID {
+			t.Fatalf("access binding mismatch: got owner=%q client=%q resource=%q "+
+				"chain=%q, want owner=%q client=%q resource=%q chain=%q (R-B78O-8X0F)",
+				accessRec.ownerEmail, accessRec.clientID, accessRec.resource,
+				accessRec.chainID, owner, clientID, resource, orig.chainID)
+		}
+		if refreshRec.ownerEmail != owner || refreshRec.clientID != clientID ||
+			refreshRec.resource != resource || refreshRec.chainID != orig.chainID {
+			t.Fatalf("refresh binding mismatch: got owner=%q client=%q resource=%q "+
+				"chain=%q, want owner=%q client=%q resource=%q chain=%q (R-B78O-8X0F)",
+				refreshRec.ownerEmail, refreshRec.clientID, refreshRec.resource,
+				refreshRec.chainID, owner, clientID, resource, orig.chainID)
+		}
+	})
+
+	t.Run("invalid_refresh_grants_do_not_issue_new_tokens", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			refreshToken string
+			clientID     string
+			wantError    string
+		}{
+			{"missing", "", clientID, "invalid_request"},
+			{"unknown", "not-issued", clientID, "invalid_grant"},
+		}
+		for _, tc := range cases {
+			before := tokenCount()
+			w := postRefresh(tc.refreshToken, tc.clientID)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s status = %d, want 400 (R-B78O-8X0F)",
+					tc.name, w.Code)
+			}
+			var doc map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("%s body is not JSON: %v; body=%q (R-B78O-8X0F)",
+					tc.name, err, w.Body.String())
+			}
+			if doc["error"] != tc.wantError {
+				t.Fatalf("%s error = %q, want %q (R-B78O-8X0F)",
+					tc.name, doc["error"], tc.wantError)
+			}
+			if after := tokenCount(); after != before {
+				t.Fatalf("%s changed token count from %d to %d (R-B78O-8X0F)",
+					tc.name, before, after)
+			}
+		}
+	})
+
+	t.Run("used_revoked_and_expired_refresh_tokens_are_rejected", func(t *testing.T) {
+		used, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		if err != nil {
+			t.Fatalf("issue used refresh: %v (R-B78O-8X0F)", err)
+		}
+		if _, _, err := oauthTokenStore.rotateRefreshForClient(used, clientID); err != nil {
+			t.Fatalf("pre-consume refresh: %v (R-B78O-8X0F)", err)
+		}
+
+		revoked, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		if err != nil {
+			t.Fatalf("issue revoked refresh: %v (R-B78O-8X0F)", err)
+		}
+		oauthTokenStore.mu.Lock()
+		oauthTokenStore.m[oauthTokenHash(revoked)].revokedAt = time.Now()
+		oauthTokenStore.mu.Unlock()
+
+		base := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+		oauthTokenNow = func() time.Time { return base }
+		expired, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		if err != nil {
+			t.Fatalf("issue expired refresh: %v (R-B78O-8X0F)", err)
+		}
+		oauthTokenNow = func() time.Time {
+			return base.Add(authCfg().RefreshTokenTTL + time.Second)
+		}
+
+		for _, refreshToken := range []string{used, revoked, expired} {
+			before := tokenCount()
+			w := postRefresh(refreshToken, clientID)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("invalid refresh status = %d, want 400; body=%q "+
+					"(R-B78O-8X0F)", w.Code, w.Body.String())
+			}
+			var doc map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("invalid refresh body is not JSON: %v; body=%q "+
+					"(R-B78O-8X0F)", err, w.Body.String())
+			}
+			if doc["error"] != "invalid_grant" {
+				t.Fatalf("invalid refresh error = %q, want invalid_grant "+
+					"(R-B78O-8X0F)", doc["error"])
+			}
+			if after := tokenCount(); after != before {
+				t.Fatalf("invalid refresh changed token count from %d to %d "+
+					"(R-B78O-8X0F)", before, after)
+			}
 		}
 	})
 }
@@ -13837,8 +16364,8 @@ func TestR_FFOQ_Y4JG_auth_check_runs_before_zero_floor(t *testing.T) {
 // the precondition the spec calls out ("a human who is signed in to
 // the web UI and also has live MCP tokens issued for the same email is
 // in two separate states"). The only permitted cross-action — the
-// signed-in visitor's revoke from the agents block per R-0SNI-MJTT —
-// is out of scope for this test (R-0SNI-MJTT has its own ID).
+// signed-in visitor's revoke from the agents block per R-D0XD-1YT0 —
+// is out of scope for this test (R-D0XD-1YT0 has its own ID).
 func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 	t.Run("logout_does_not_revoke_mcp_token_chain", func(t *testing.T) {
 		const email = "user@example.com"
@@ -13905,10 +16432,9 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 		}
 
 		// Revoke the MCP access token directly in the store — there
-		// is no chain-revoke endpoint exposed yet (R-0SNI-MJTT is a
-		// separate, not-yet-implemented requirement), and the
-		// storage-level property R-0XJ4-5MSL pins is independent of
-		// which entry point triggered the revoke.
+		// Revoke the MCP access token directly in the store; the
+		// storage-level property R-0XJ4-5MSL pins independence from
+		// whichever entry point triggered the revoke.
 		oauthTokenStore.mu.Lock()
 		rec, ok := oauthTokenStore.m[oauthTokenHash(bearer)]
 		if !ok {
@@ -14612,11 +17138,175 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 	})
 }
 
-// TestR_0RFM_8S34_rows_ordered_by_chain_initial_issuance pins that
-// rows in the agents block render in most-recent-first order anchored
-// to each chain's original issuance, and that rotating a chain's
-// refresh does not bubble it to the top.
-func TestR_0RFM_8S34_rows_ordered_by_chain_initial_issuance(t *testing.T) {
+// TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text pins that
+// Dynamic Client Registration metadata shown in the web UI is escaped text,
+// not interpreted as markup or script-capable HTML.
+func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
+	email := "xss-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	clientID := "xssagent" + agentsBlockRandomEmailToken(t)
+	maliciousName := `<img src=x onerror="alert('owned')">&<script>bad()</script>`
+	oauthClientStore.put(clientID, &oauthClient{clientName: maliciousName})
+	refresh, err := oauthTokenStore.issueRefresh(
+		email, clientID, "http://127.0.0.1:3000/mcp")
+	if err != nil {
+		t.Fatalf("issueRefresh: %v", err)
+	}
+	oauthTokenStore.mu.Lock()
+	rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+	chainID := ""
+	if rec != nil {
+		chainID = rec.chainID
+	}
+	oauthTokenStore.mu.Unlock()
+	if chainID == "" {
+		t.Fatalf("issued refresh has empty chainID")
+	}
+
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	marker := `data-chain-id="` + chainID + `"`
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("agent row missing for chain %s (R-10ZV-8OFH): %q",
+			chainID, body)
+	}
+	start := strings.LastIndex(body[:idx], `<div class="agent-row"`)
+	if start < 0 {
+		t.Fatalf("agent row open missing (R-10ZV-8OFH)")
+	}
+	rest := body[start:]
+	end := strings.Index(rest, `</form></div>`)
+	if end < 0 {
+		t.Fatalf("agent row close missing (R-10ZV-8OFH): %q", rest)
+	}
+	row := rest[:end+len(`</form></div>`)]
+
+	for _, raw := range []string{"<img", "<script>", "</script>"} {
+		if strings.Contains(row, raw) {
+			t.Fatalf("client_name rendered as raw markup %q in row "+
+				"(R-10ZV-8OFH): %q", raw, row)
+		}
+	}
+	for _, escaped := range []string{
+		"&lt;img src=x onerror=&quot;alert(&#39;owned&#39;)&quot;&gt;",
+		"&amp;",
+		"&lt;script&gt;bad()&lt;/script&gt;",
+	} {
+		if !strings.Contains(row, escaped) {
+			t.Errorf("escaped client_name fragment %q missing "+
+				"(R-10ZV-8OFH): %q", escaped, row)
+		}
+	}
+}
+
+// TestR_TEP7_Q6UT_signed_in_email_renders_as_inert_text pins that the
+// externally sourced Google email shown in the signed-in auth row is escaped
+// text, not interpreted as markup, script, attributes, or URLs.
+func TestR_TEP7_Q6UT_signed_in_email_renders_as_inert_text(t *testing.T) {
+	email := `eve"><img src=x onerror="alert('owned')">&<script>bad()</script>@example.com`
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v (R-TEP7-Q6UT)", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	start := strings.Index(body, `<div class="banner-auth">`)
+	if start < 0 {
+		t.Fatalf("signed-in auth row missing (R-TEP7-Q6UT): %q", body)
+	}
+	rest := body[start:]
+	end := strings.Index(rest, `</div>`)
+	if end < 0 {
+		t.Fatalf("signed-in auth row close missing (R-TEP7-Q6UT): %q", rest)
+	}
+	authRow := rest[:end+len(`</div>`)]
+
+	for _, raw := range []string{`eve"><img`, `<script>bad()</script>`} {
+		if strings.Contains(authRow, raw) {
+			t.Fatalf("email rendered as raw markup %q in auth row "+
+				"(R-TEP7-Q6UT): %q", raw, authRow)
+		}
+	}
+	for _, escaped := range []string{
+		`eve&quot;&gt;&lt;img src=x onerror=&quot;alert(&#39;owned&#39;)&quot;&gt;`,
+		`&amp;`,
+		`&lt;script&gt;bad()&lt;/script&gt;@example.com`,
+	} {
+		if !strings.Contains(authRow, escaped) {
+			t.Errorf("escaped email fragment %q missing (R-TEP7-Q6UT): %q",
+				escaped, authRow)
+		}
+	}
+}
+
+// TestR_A2L2_1NA1_signed_in_sign_out_is_post_form_without_href pins that
+// the signed-in Sign out affordance works without JavaScript: it is a
+// submit button inside a POST /logout form and exposes no navigable
+// /logout href.
+func TestR_A2L2_1NA1_signed_in_sign_out_is_post_form_without_href(t *testing.T) {
+	sess, err := webSessionStore.issue("form-signout@example.com")
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v (R-A2L2-1NA1)", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	start := strings.Index(body, `<div class="banner-auth">`)
+	if start < 0 {
+		t.Fatalf("signed-in auth row missing (R-A2L2-1NA1): %q", body)
+	}
+	rest := body[start:]
+	end := strings.Index(rest, `</section>`)
+	if end < 0 {
+		t.Fatalf("banner close missing after auth row (R-A2L2-1NA1): %q", rest)
+	}
+	authArea := rest[:end]
+
+	formRe := regexp.MustCompile(
+		`<form[^>]*method="post"[^>]*action="/logout"[^>]*>` +
+			`[\s\S]*<button[^>]*class="auth-btn"[^>]*type="submit"[^>]*>` +
+			`Sign out</button>[\s\S]*</form>`)
+	if !formRe.MatchString(authArea) {
+		t.Fatalf("Sign out is not a POST form submit control "+
+			"(R-A2L2-1NA1): %q", authArea)
+	}
+	for _, forbidden := range []string{
+		`href="/logout"`,
+		`href='/logout'`,
+		`onclick=`,
+		`fetch('/logout'`,
+		`fetch("/logout"`,
+	} {
+		if strings.Contains(authArea, forbidden) {
+			t.Fatalf("Sign out exposes JS-only or navigable logout hook %q "+
+				"(R-A2L2-1NA1): %q", forbidden, authArea)
+		}
+	}
+}
+
+// TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity pins that
+// rows in the agents block render below the signed-in visitor row in
+// case-insensitive rendered-name order, with the rendered 8-char
+// client_id prefix breaking equal-name ties. Refreshing a token chain
+// must not move it because its rendered identity does not change.
+func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 	// chainIDFor reads the chainID a fresh refresh was minted under.
 	chainIDFor := func(t *testing.T, refresh string) string {
 		t.Helper()
@@ -14644,25 +17334,18 @@ func TestR_0RFM_8S34_rows_ordered_by_chain_initial_issuance(t *testing.T) {
 			}
 		}
 	}
-
-	t.Run("most_recent_chain_renders_first", func(t *testing.T) {
-		email := "order-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		oldRefresh, err := oauthTokenStore.issueRefresh(
-			email, "client-old", "http://127.0.0.1:3000/mcp")
+	issueNamedChain := func(t *testing.T, email, clientID, clientName string) (string, string) {
+		t.Helper()
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		refresh, err := oauthTokenStore.issueRefresh(
+			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
-			t.Fatalf("issueRefresh old: %v", err)
+			t.Fatalf("issueRefresh %s: %v", clientName, err)
 		}
-		newRefresh, err := oauthTokenStore.issueRefresh(
-			email, "client-new", "http://127.0.0.1:3000/mcp")
-		if err != nil {
-			t.Fatalf("issueRefresh new: %v", err)
-		}
-		oldChain := chainIDFor(t, oldRefresh)
-		newChain := chainIDFor(t, newRefresh)
-		base := oauthTokenNow()
-		setChainIssuedAt(oldChain, base.Add(-2*time.Hour))
-		setChainIssuedAt(newChain, base.Add(-1*time.Minute))
-
+		return refresh, chainIDFor(t, refresh)
+	}
+	renderIndex := func(t *testing.T, email string) string {
+		t.Helper()
 		sess, err := webSessionStore.issue(email)
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v", err)
@@ -14671,76 +17354,67 @@ func TestR_0RFM_8S34_rows_ordered_by_chain_initial_issuance(t *testing.T) {
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
 		handleIndex(w, req)
-		body := w.Body.String()
+		return w.Body.String()
+	}
+	assertBefore := func(t *testing.T, body, firstChain, secondChain string) {
+		t.Helper()
+		firstIdx := strings.Index(body, `data-chain-id="`+firstChain+`"`)
+		secondIdx := strings.Index(body, `data-chain-id="`+secondChain+`"`)
+		if firstIdx < 0 || secondIdx < 0 {
+			t.Fatalf("expected both chain rows present (R-VWEX-WYWJ): "+
+				"firstIdx=%d secondIdx=%d", firstIdx, secondIdx)
+		}
+		if !(firstIdx < secondIdx) {
+			t.Errorf("row order mismatch (R-VWEX-WYWJ): firstIdx=%d secondIdx=%d",
+				firstIdx, secondIdx)
+		}
+	}
 
-		newIdx := strings.Index(body, `data-chain-id="`+newChain+`"`)
-		oldIdx := strings.Index(body, `data-chain-id="`+oldChain+`"`)
-		if newIdx < 0 || oldIdx < 0 {
-			t.Fatalf("expected both chain rows present (R-0RFM-8S34): "+
-				"newIdx=%d oldIdx=%d", newIdx, oldIdx)
-		}
-		if !(newIdx < oldIdx) {
-			t.Errorf("most-recent chain did not render before older chain "+
-				"(R-0RFM-8S34): newIdx=%d oldIdx=%d", newIdx, oldIdx)
-		}
+	t.Run("alphabetical_name_order_beats_issue_time", func(t *testing.T) {
+		email := "order-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		zuluRefresh, zuluChain := issueNamedChain(t, email, "zzzz0000-client", "Zulu")
+		alphaRefresh, alphaChain := issueNamedChain(t, email, "aaaa0000-client", "alpha")
+		base := oauthTokenNow()
+		setChainIssuedAt(zuluChain, base.Add(-2*time.Hour))
+		setChainIssuedAt(alphaChain, base.Add(-1*time.Minute))
+		_ = zuluRefresh
+		_ = alphaRefresh
+
+		assertBefore(t, renderIndex(t, email), alphaChain, zuluChain)
 	})
 
-	t.Run("refreshed_chain_stays_in_place", func(t *testing.T) {
+	t.Run("case_insensitive_name_and_prefix_tie_break", func(t *testing.T) {
+		email := "tie-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		_, betaLower := issueNamedChain(t, email, "bbbb0000-client", "agent")
+		_, betaUpper := issueNamedChain(t, email, "aaaa0000-client", "Agent")
+		_, alpha := issueNamedChain(t, email, "cccc0000-client", "Aardvark")
+
+		body := renderIndex(t, email)
+		assertBefore(t, body, alpha, betaUpper)
+		assertBefore(t, body, betaUpper, betaLower)
+	})
+
+	t.Run("refreshed_chain_stays_in_identity_place", func(t *testing.T) {
 		email := "stable-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		oldRefresh, err := oauthTokenStore.issueRefresh(
-			email, "client-old", "http://127.0.0.1:3000/mcp")
-		if err != nil {
-			t.Fatalf("issueRefresh old: %v", err)
-		}
-		newRefresh, err := oauthTokenStore.issueRefresh(
-			email, "client-new", "http://127.0.0.1:3000/mcp")
-		if err != nil {
-			t.Fatalf("issueRefresh new: %v", err)
-		}
-		oldChain := chainIDFor(t, oldRefresh)
-		newChain := chainIDFor(t, newRefresh)
-		base := oauthTokenNow()
-		setChainIssuedAt(oldChain, base.Add(-2*time.Hour))
-		setChainIssuedAt(newChain, base.Add(-1*time.Minute))
+		bRefresh, bChain := issueNamedChain(t, email, "bbbb1111-client", "Bravo")
+		_, aChain := issueNamedChain(t, email, "aaaa1111-client", "Alpha")
 
-		// Rotate the older chain — its live refresh advances, but its
-		// chain initial issuance must remain anchored, so it stays
-		// below the newer chain in the rendered order.
-		if _, _, err := oauthTokenStore.rotateRefresh(oldRefresh); err != nil {
-			t.Fatalf("rotateRefresh old: %v", err)
+		if _, _, err := oauthTokenStore.rotateRefresh(bRefresh); err != nil {
+			t.Fatalf("rotateRefresh bravo: %v", err)
 		}
 
-		sess, err := webSessionStore.issue(email)
-		if err != nil {
-			t.Fatalf("webSessionStore.issue: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
-		w := httptest.NewRecorder()
-		handleIndex(w, req)
-		body := w.Body.String()
-
-		newIdx := strings.Index(body, `data-chain-id="`+newChain+`"`)
-		oldIdx := strings.Index(body, `data-chain-id="`+oldChain+`"`)
-		if newIdx < 0 || oldIdx < 0 {
-			t.Fatalf("expected both chain rows present after rotate "+
-				"(R-0RFM-8S34): newIdx=%d oldIdx=%d", newIdx, oldIdx)
-		}
-		if !(newIdx < oldIdx) {
-			t.Errorf("freshly-refreshed older chain bubbled above newer chain "+
-				"(R-0RFM-8S34): newIdx=%d oldIdx=%d", newIdx, oldIdx)
-		}
+		assertBefore(t, renderIndex(t, email), aChain, bChain)
 	})
 }
 
-// TestR_0SNI_MJTT_chain_revoke_action pins the user-initiated chain-
+// TestR_D0XD_1YT0_chain_revoke_action pins the user-initiated chain-
 // revoke action POST /agents/revoke: authorized exclusively by the
 // web-session cookie, rejects unauthenticated requests, never operates
 // on a chain whose owner email differs from the session's, and applies
 // the chain-wide revocation R-9HGE-87UG / R-A26O-QBG9 define. The
 // visitor's own web session is unaffected (R-0XJ4-5MSL holds in this
 // direction too).
-func TestR_0SNI_MJTT_chain_revoke_action(t *testing.T) {
+func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 	// chainIDFor reads the chainID for a refresh plaintext under the
 	// store lock. A test-local closure to keep R-727Q-1PV4's ID-named
 	// helper rule clean.
@@ -14889,7 +17563,7 @@ func TestR_0SNI_MJTT_chain_revoke_action(t *testing.T) {
 		}
 		if chainHasLiveRecords(chainID) {
 			t.Errorf("chain still has live (un-revoked) records after revoke; " +
-				"R-0SNI-MJTT requires chain-wide revocation per " +
+				"R-D0XD-1YT0 requires chain-wide revocation per " +
 				"R-9HGE-87UG / R-A26O-QBG9")
 		}
 		// R-0XJ4-5MSL holds in this direction too: the web session that
@@ -14926,7 +17600,7 @@ func TestR_0SNI_MJTT_chain_revoke_action(t *testing.T) {
 //     visitor's current live chains.
 //   - A new chain (issueRefresh, R-ZPE1-0DV8 path) is reflected within
 //     1000ms.
-//   - A manual revoke (R-0SNI-MJTT) is reflected within 1000ms.
+//   - A manual revoke (R-D0XD-1YT0) is reflected within 1000ms.
 //   - The stream is per-email-scoped server-side: a chain issued to a
 //     different email is NOT visible to this visitor — not in the
 //     snapshot, not in any subsequent event.
@@ -15079,9 +17753,9 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 
 		// Revoke one of the chains; the live set shrinks back to one
 		// within the 1000ms budget.
-		if !oauthTokenStore.revokeChainR_0SNI_MJTT(afterIssue[0].ChainID,
+		if !oauthTokenStore.revokeChainR_D0XD_1YT0(afterIssue[0].ChainID,
 			email) {
-			t.Fatalf("revokeChainR_0SNI_MJTT returned false")
+			t.Fatalf("revokeChainR_D0XD_1YT0 returned false")
 		}
 		start = time.Now()
 		afterRevoke := readEvent(t, br, 1*time.Second)
@@ -15205,6 +17879,51 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update pins the
+// browser-side half of the agents live-update path: a signed-in page that
+// initially has zero live chains renders no agents block, but it ships an
+// /agents/stream subscriber that creates that missing block and row when a
+// later SSE snapshot contains the first live MCP token chain.
+func TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update(t *testing.T) {
+	email := "zero-one-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v (R-KSI8-M0JX)", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	if strings.Contains(body, `<div class="agents-block"`) {
+		t.Fatalf("signed-in zero-chain page rendered an agents block before "+
+			"the zero-to-one update (R-KSI8-M0JX): %q", body)
+	}
+	for _, want := range []string{
+		`var es=new EventSource('/agents/stream');`,
+		`if(!block){`,
+		`block=document.createElement('div');`,
+		`block.className='agents-block';`,
+		`block.setAttribute('aria-label','Authenticated MCP agents');`,
+		`auth.appendChild(block);`,
+		`var r=document.createElement('div');`,
+		`r.className='agent-row';`,
+		`r.setAttribute('data-chain-id',chain.chain_id||'');`,
+		`name.textContent=(chain.client_name||'undefined')+' ('+String(chain.client_id||'').slice(0,8)+')';`,
+		`form.method='post';form.action='/agents/revoke';`,
+		`input.type='hidden';input.name='chain_id';`,
+		`btn.className='auth-btn';btn.type='submit';`,
+		`chains.forEach(function(chain){block.appendChild(row(chain));});`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("signed-in zero-chain page missing agents live-update "+
+				"hook %q (R-KSI8-M0JX): %q", want, body)
+		}
+	}
 }
 
 // TestR_T6VA_9U84_agents_stream_resource_budget mirrors the
@@ -15503,8 +18222,10 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 				// the auth-code mint at callback time.
 				u := "/oauth/authorize?client_id=" + mcpClientID +
 					"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+					"&response_type=code" +
 					"&code_challenge=EXAMPLE_PKCE_CHALLENGE" +
-					"&code_challenge_method=S256"
+					"&code_challenge_method=S256" +
+					"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 				req := httptest.NewRequest("GET", u, nil)
 				rec := httptest.NewRecorder()
 				handleOAuthAuthorize(rec, req)
@@ -15724,6 +18445,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 
 		u := "/oauth/authorize?client_id=" + url.QueryEscape(mcpClientID) +
 			"&redirect_uri=" + url.QueryEscape(wantRedirect) +
+			"&response_type=code" +
 			"&code_challenge=" + url.QueryEscape(wantChallenge) +
 			"&code_challenge_method=" + url.QueryEscape(wantChallengeAlg) +
 			"&state=" + url.QueryEscape(wantClientState) +
@@ -15823,6 +18545,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 
 		u := "/oauth/authorize?client_id=" + url.QueryEscape(mcpClientID) +
 			"&redirect_uri=" + url.QueryEscape(redirect) +
+			"&response_type=code" +
 			"&code_challenge=" + url.QueryEscape(challenge) +
 			"&code_challenge_method=" + url.QueryEscape(alg) +
 			"&state=" + url.QueryEscape(clientState) +
@@ -16274,6 +18997,7 @@ func TestR_KDRI_X863_mcp_oauth_full_round_trip(t *testing.T) {
 		"redirect_uri":  {clientRedirect},
 		"client_id":     {clientID},
 		"code_verifier": {codeVerifier},
+		"resource":      {canonicalResourceIdentifier()},
 	}
 	tokResp, err := http.Post(tokenEndpoint,
 		"application/x-www-form-urlencoded",
@@ -16764,6 +19488,172 @@ func TestR_7BHQ_VB64_www_authenticate_points_at_mcp_metadata(t *testing.T) {
 				"(R-7BHQ-VB64)")
 		}
 	})
+}
+
+// R-51PZ-MEQR: presented-but-invalid bearer credentials at `/mcp` are
+// rejected at the HTTP authorization boundary with 401 and a Bearer
+// challenge before any MCP tool handler runs. The response must not be a
+// successful JSON-RPC `tools/call` result carrying a tool-level error.
+func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	onListenerReady = func(a net.Addr) { ready <- a }
+	defer func() { onListenerReady = nil }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+	}()
+
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("listener never ready within 2s; stderr=%q (R-51PZ-MEQR)",
+			stderr.String())
+	}
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-51PZ-MEQR)")
+		}
+	}()
+
+	base := "http://" + addr.String()
+	mcpURL := base + "/mcp"
+	acceptHeader := "application/json, " + "text" + "/" + "event-stream"
+	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
+		`"params":{"name":"counter_increment","arguments":{}}}`
+
+	postWithAuth := func(authHeader string) (*http.Response, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, mcpURL,
+			strings.NewReader(callBody))
+		if err != nil {
+			t.Fatalf("new request: %v (R-51PZ-MEQR)", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", acceptHeader)
+		req.Header.Set("Authorization", authHeader)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v (R-51PZ-MEQR)", mcpURL, err)
+		}
+		buf, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read body: %v (R-51PZ-MEQR)", err)
+		}
+		return resp, buf
+	}
+
+	wrongResource, err := oauthTokenStore.issueAccess(
+		"r51pz@example.test", "client-r51pz-wrong-resource",
+		canonicalResourceIdentifier()+"x")
+	if err != nil {
+		t.Fatalf("issue wrong-resource token: %v (R-51PZ-MEQR)", err)
+	}
+	expired, err := oauthTokenStore.issueAccess(
+		"r51pz@example.test", "client-r51pz-expired",
+		canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue expired token: %v (R-51PZ-MEQR)", err)
+	}
+	revoked, err := oauthTokenStore.issueAccess(
+		"r51pz@example.test", "client-r51pz-revoked",
+		canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue revoked token: %v (R-51PZ-MEQR)", err)
+	}
+	oauthTokenStore.mu.Lock()
+	oauthTokenStore.m[oauthTokenHash(expired)].expiresAt = oauthTokenNow().Add(-time.Minute)
+	oauthTokenStore.m[oauthTokenHash(revoked)].revokedAt = oauthTokenNow()
+	oauthTokenStore.mu.Unlock()
+
+	cases := []struct {
+		name       string
+		authHeader string
+		wantDesc   string
+	}{
+		{
+			name:       "malformed",
+			authHeader: "Basic not-a-bearer-token",
+			wantDesc:   "bearer authorization header malformed",
+		},
+		{
+			name:       "unknown",
+			authHeader: "Bearer not-an-issued-token",
+			wantDesc:   "bearer token not recognized",
+		},
+		{
+			name:       "expired",
+			authHeader: "Bearer " + expired,
+			wantDesc:   "bearer token expired",
+		},
+		{
+			name:       "revoked",
+			authHeader: "Bearer " + revoked,
+			wantDesc:   "bearer token revoked",
+		},
+		{
+			name:       "wrong_resource",
+			authHeader: "Bearer " + wrongResource,
+			wantDesc:   "bearer token resource binding does not match",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := theCounter.read()
+			resp, buf := postWithAuth(tc.authHeader)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401; body=%q (R-51PZ-MEQR)",
+					resp.StatusCode, buf)
+			}
+			wa := resp.Header.Get("WWW-Authenticate")
+			if !strings.HasPrefix(strings.ToLower(wa), "bearer") {
+				t.Fatalf("WWW-Authenticate = %q, want Bearer scheme "+
+					"(R-51PZ-MEQR)", wa)
+			}
+			for _, want := range []string{
+				`error="invalid_token"`,
+				`error_description="` + tc.wantDesc + `"`,
+				`resource_metadata="` + base + `/.well-known/oauth-protected-resource/mcp"`,
+			} {
+				if !strings.Contains(wa, want) {
+					t.Fatalf("WWW-Authenticate = %q, want substring %q "+
+						"(R-51PZ-MEQR)", wa, want)
+				}
+			}
+			var body struct {
+				Error            string          `json:"error"`
+				ErrorDescription string          `json:"error_description"`
+				Result           json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(buf, &body); err != nil {
+				t.Fatalf("body not JSON: %v; body=%q (R-51PZ-MEQR)", err, buf)
+			}
+			if body.Error != "invalid_token" || body.ErrorDescription != tc.wantDesc {
+				t.Fatalf("body error = (%q, %q), want (invalid_token, %q) "+
+					"(R-51PZ-MEQR)", body.Error, body.ErrorDescription, tc.wantDesc)
+			}
+			if len(body.Result) != 0 {
+				t.Fatalf("body unexpectedly contains JSON-RPC result %s; "+
+					"invalid bearer must not reach tool layer (R-51PZ-MEQR)",
+					body.Result)
+			}
+			if got := theCounter.read(); got != before {
+				t.Fatalf("counter changed after rejected bearer: before=%d "+
+					"after=%d (R-51PZ-MEQR)", before, got)
+			}
+		})
+	}
 }
 
 // R-75E8-YGGN: the service has a single configured canonical resource
@@ -17342,6 +20232,292 @@ func TestR_77U1_PZY1_mcp_oauth_e2e_round_trip(t *testing.T) {
 	}
 }
 
+// R-7E4W-K6HL: user-initiated chain revocation must be enforced against
+// an already-connected MCP agent's next authenticated mutation attempt.
+// This test creates a live token chain, proves the chain's access token can
+// mutate the counter over an MCP session, revokes that same chain through the
+// web-session-authorized agents action, then reuses the same MCP session and
+// bearer. The post-revoke tool call must be rejected as a revoked bearer at
+// the HTTP authorization boundary and must leave the counter unchanged.
+func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	onListenerReady = func(a net.Addr) { ready <- a }
+	defer func() { onListenerReady = nil }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+	}()
+
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("listener never ready within 2s; stderr=%q (R-7E4W-K6HL)",
+			stderr.String())
+	}
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-7E4W-K6HL)")
+		}
+	}()
+
+	base := "http://" + addr.String()
+	mcpURL := base + "/mcp"
+	acceptHeader := "application/json, " + "text" + "/" + "event-stream"
+
+	owner := "r-7e4w-k6hl-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	clientID := "client-r7e4wk6hl-" + agentsBlockRandomEmailToken(t)
+	initialRefresh, err := oauthTokenStore.issueRefresh(owner, clientID, canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issueRefresh: %v (R-7E4W-K6HL)", err)
+	}
+	accessToken, _, err := oauthTokenStore.rotateRefreshForClient(initialRefresh, clientID)
+	if err != nil {
+		t.Fatalf("rotateRefreshForClient: %v (R-7E4W-K6HL)", err)
+	}
+	oauthTokenStore.mu.Lock()
+	accessRec := oauthTokenStore.m[oauthTokenHash(accessToken)]
+	oauthTokenStore.mu.Unlock()
+	if accessRec == nil || accessRec.chainID == "" {
+		t.Fatalf("issued access token missing chainID; rec=%+v (R-7E4W-K6HL)",
+			accessRec)
+	}
+	chainID := accessRec.chainID
+	sessionPlaintext, err := webSessionStore.issue(owner)
+	if err != nil {
+		t.Fatalf("issue web session: %v (R-7E4W-K6HL)", err)
+	}
+
+	postMCP := func(payload, sessionID, bearer string) (*http.Response, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, mcpURL, strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("build mcp request: %v (R-7E4W-K6HL)", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", acceptHeader)
+		if sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", sessionID)
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v (R-7E4W-K6HL)", mcpURL, err)
+		}
+		buf, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read mcp body: %v (R-7E4W-K6HL)", err)
+		}
+		return resp, buf
+	}
+
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize",` +
+		`"params":{"protocolVersion":"2025-11-25","capabilities":{},` +
+		`"clientInfo":{"name":"hal-r7e4wk6hl","version":"0.0.1"}}}`
+	initResp, initBodyBytes := postMCP(initBody, "", accessToken)
+	if initResp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize status = %d, want 200; body=%q (R-7E4W-K6HL)",
+			initResp.StatusCode, initBodyBytes)
+	}
+	mcpSessionID := initResp.Header.Get("Mcp-Session-Id")
+	if mcpSessionID == "" {
+		t.Fatalf("initialize did not return Mcp-Session-Id; body=%q (R-7E4W-K6HL)",
+			initBodyBytes)
+	}
+
+	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
+		`"params":{"name":"counter_increment","arguments":{}}}`
+	before := theCounter.read()
+	okResp, okBody := postMCP(callBody, mcpSessionID, accessToken)
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatalf("pre-revoke tools/call status = %d, want 200; body=%q (R-7E4W-K6HL)",
+			okResp.StatusCode, okBody)
+	}
+	if got := theCounter.read(); got != before+1 {
+		t.Fatalf("pre-revoke counter = %d, want %d (R-7E4W-K6HL)", got, before+1)
+	}
+
+	revokeForm := url.Values{"chain_id": {chainID}}
+	revokeReq, err := http.NewRequest(http.MethodPost, base+"/agents/revoke",
+		strings.NewReader(revokeForm.Encode()))
+	if err != nil {
+		t.Fatalf("build revoke request: %v (R-7E4W-K6HL)", err)
+	}
+	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+	noFollow := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	revokeResp, err := noFollow.Do(revokeReq)
+	if err != nil {
+		t.Fatalf("POST /agents/revoke: %v (R-7E4W-K6HL)", err)
+	}
+	revokeBody, _ := io.ReadAll(revokeResp.Body)
+	revokeResp.Body.Close()
+	if revokeResp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("revoke status = %d, want 303; body=%q (R-D0XD-1YT0 via R-7E4W-K6HL)",
+			revokeResp.StatusCode, revokeBody)
+	}
+
+	afterRevoke := theCounter.read()
+	rejectedResp, rejectedBody := postMCP(callBody, mcpSessionID, accessToken)
+	if rejectedResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-revoke tools/call status = %d, want 401; body=%q "+
+			"(R-7E4W-K6HL)", rejectedResp.StatusCode, rejectedBody)
+	}
+	wa := rejectedResp.Header.Get("WWW-Authenticate")
+	for _, want := range []string{
+		`error="invalid_token"`,
+		`error_description="bearer token revoked"`,
+	} {
+		if !strings.Contains(wa, want) {
+			t.Fatalf("post-revoke WWW-Authenticate = %q, want substring %q "+
+				"(R-7E4W-K6HL)", wa, want)
+		}
+	}
+	var body struct {
+		Error            string          `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+		Result           json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(rejectedBody, &body); err != nil {
+		t.Fatalf("decode post-revoke rejection: %v; body=%q (R-7E4W-K6HL)",
+			err, rejectedBody)
+	}
+	if body.Error != "invalid_token" ||
+		body.ErrorDescription != "bearer token revoked" ||
+		len(body.Result) != 0 {
+		t.Fatalf("post-revoke rejection body = %+v, want revoked invalid_token "+
+			"without JSON-RPC result (R-7E4W-K6HL)", body)
+	}
+	if got := theCounter.read(); got != afterRevoke {
+		t.Fatalf("post-revoke counter = %d, want unchanged %d (R-7E4W-K6HL)",
+			got, afterRevoke)
+	}
+}
+
+// R-2HT5-50F4: the access token and refresh token returned by one
+// authorization-code token exchange belong to the same MCP token chain. The
+// agents-block revoke action therefore revokes the initial access token even
+// before the client ever uses the paired refresh token.
+func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *testing.T) {
+	originalCodes := oauthAuthCodeStore
+	originalTokens := oauthTokenStore
+	originalSessions := webSessionStore
+	t.Cleanup(func() {
+		oauthAuthCodeStore = originalCodes
+		oauthTokenStore = originalTokens
+		webSessionStore = originalSessions
+	})
+	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+
+	const (
+		owner       = "r-2ht5-50f4@example.test"
+		clientID    = "client-r-2ht5-50f4"
+		redirectURI = "http://127.0.0.1/callback-r-2ht5"
+		verifier    = "verifier-r-2ht5-50f4-initial-chain-membership"
+	)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	code, err := oauthAuthCodeStore.issueWithResource(
+		clientID, redirectURI, challenge, "S256", owner,
+		canonicalResourceIdentifier())
+	if err != nil {
+		t.Fatalf("issue auth code: %v (R-2HT5-50F4)", err)
+	}
+
+	tokenReq := httptest.NewRequest(http.MethodPost, "/oauth/token",
+		strings.NewReader(url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"client_id":     {clientID},
+			"redirect_uri":  {redirectURI},
+			"code_verifier": {verifier},
+			"resource":      {canonicalResourceIdentifier()},
+		}.Encode()))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	handleOAuthToken(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token status = %d, want 200; body=%q (R-2HT5-50F4)",
+			tokenRec.Code, tokenRec.Body.String())
+	}
+	var tokenDoc struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &tokenDoc); err != nil {
+		t.Fatalf("token response not JSON: %v; body=%q (R-2HT5-50F4)",
+			err, tokenRec.Body.String())
+	}
+	if tokenDoc.AccessToken == "" || tokenDoc.RefreshToken == "" {
+		t.Fatalf("token response missing access/refresh token: %+v (R-2HT5-50F4)",
+			tokenDoc)
+	}
+
+	oauthTokenStore.mu.Lock()
+	accessRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.AccessToken)]
+	refreshRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.RefreshToken)]
+	oauthTokenStore.mu.Unlock()
+	if accessRec == nil || refreshRec == nil {
+		t.Fatalf("token records missing: access=%+v refresh=%+v (R-2HT5-50F4)",
+			accessRec, refreshRec)
+	}
+	if accessRec.chainID == "" || accessRec.chainID != refreshRec.chainID {
+		t.Fatalf("initial access chainID=%q refresh chainID=%q, want same non-empty chain (R-2HT5-50F4)",
+			accessRec.chainID, refreshRec.chainID)
+	}
+
+	sessionPlaintext, err := webSessionStore.issue(owner)
+	if err != nil {
+		t.Fatalf("issue web session: %v (R-2HT5-50F4)", err)
+	}
+	revokeReq := httptest.NewRequest(http.MethodPost, "/agents/revoke",
+		strings.NewReader(url.Values{"chain_id": {accessRec.chainID}}.Encode()))
+	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
+	revokeRec := httptest.NewRecorder()
+	handleAgentsRevoke(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusSeeOther {
+		t.Fatalf("revoke status = %d, want 303; body=%q (R-2HT5-50F4)",
+			revokeRec.Code, revokeRec.Body.String())
+	}
+
+	before := theCounter.read()
+	incReq := httptest.NewRequest(http.MethodPost, "/counter/increment", nil)
+	incReq.Header.Set("Authorization", "Bearer "+tokenDoc.AccessToken)
+	incRec := httptest.NewRecorder()
+	handleCounterIncrement(incRec, incReq)
+	if incRec.Code != http.StatusUnauthorized {
+		t.Fatalf("increment with revoked initial access status = %d, want 401; body=%q (R-2HT5-50F4)",
+			incRec.Code, incRec.Body.String())
+	}
+	if !strings.Contains(incRec.Body.String(), "revoked") {
+		t.Fatalf("increment rejection body = %q, want revoked cause (R-2HT5-50F4)",
+			incRec.Body.String())
+	}
+	if got := theCounter.read(); got != before {
+		t.Fatalf("counter changed after revoked initial access: got %d want %d (R-2HT5-50F4)",
+			got, before)
+	}
+}
+
 // R-WRDD-TR27: the token store pins a server-side record for every issued
 // token (access and refresh). The record must capture kind, owner, chain
 // membership, issued-at, expires-at, used-at (refresh only), and revoked-at.
@@ -17525,34 +20701,34 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	})
 }
 
-// TestR_2IRD_A7HD_agents_block_gating pins the gating and authorization-
-// scoping behaviour of the agents block (R-2IRD-A7HD): the block renders
+// TestR_VTZ5_5FF5_agents_block_gating pins the gating and authorization-
+// scoping behaviour of the agents block (R-VTZ5-5FF5): the block renders
 // only for a signed-in visitor who owns at least one live MCP token chain,
 // it is absent for signed-out requests and for signed-in visitors with zero
 // live chains, and the email scope is an authorization property — chains
 // owned by a different email never surface regardless of storage order.
-func TestR_2IRD_A7HD_agents_block_gating(t *testing.T) {
+func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 	const blockOpen = `<div class="agents-block"`
 	const bannerOpen = `<section class="banner">`
 	const bannerAuthOpen = `<div class="banner-auth">`
 
 	t.Run("signed_out_sees_no_block_and_no_disclosure", func(t *testing.T) {
-		// R-2IRD-A7HD: signed-out visitor sees nothing and is not told
+		// R-VTZ5-5FF5: signed-out visitor sees nothing and is not told
 		// whose agents would be listed.
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
 		handleIndex(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d (R-2IRD-A7HD)", rec.Code)
+			t.Fatalf("status = %d (R-VTZ5-5FF5)", rec.Code)
 		}
 		body := rec.Body.String()
 		if strings.Contains(body, blockOpen) {
-			t.Errorf("signed-out response contains agents block (R-2IRD-A7HD): %q", body)
+			t.Errorf("signed-out response contains agents block (R-VTZ5-5FF5): %q", body)
 		}
 	})
 
 	t.Run("signed_in_zero_live_chains_no_block", func(t *testing.T) {
-		// R-2IRD-A7HD: when the signed-in visitor has zero live chains the
+		// R-VTZ5-5FF5: when the signed-in visitor has zero live chains the
 		// block does not render — the banner collapses to its auth row.
 		email := "gating-zero-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		sess, err := webSessionStore.issue(email)
@@ -17566,12 +20742,12 @@ func TestR_2IRD_A7HD_agents_block_gating(t *testing.T) {
 		body := rec.Body.String()
 		if strings.Contains(body, blockOpen) {
 			t.Errorf("signed-in/zero-chains response contains agents block "+
-				"(R-2IRD-A7HD): %q", body)
+				"(R-VTZ5-5FF5): %q", body)
 		}
 	})
 
 	t.Run("signed_in_with_live_chain_block_renders_in_banner", func(t *testing.T) {
-		// R-2IRD-A7HD: when the signed-in visitor has at least one live chain
+		// R-VTZ5-5FF5: when the signed-in visitor has at least one live chain
 		// the agents block renders inside the banner card, immediately below
 		// the auth row.
 		email := "gating-live-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
@@ -17591,31 +20767,31 @@ func TestR_2IRD_A7HD_agents_block_gating(t *testing.T) {
 
 		if !strings.Contains(body, blockOpen) {
 			t.Fatalf("agents block missing from signed-in/live-chain response "+
-				"(R-2IRD-A7HD): %q", body)
+				"(R-VTZ5-5FF5): %q", body)
 		}
 		// Block must be inside the banner card.
 		bannerIdx := strings.Index(body, bannerOpen)
 		blockIdx := strings.Index(body, blockOpen)
 		if bannerIdx < 0 {
-			t.Fatalf("banner section missing (R-2IRD-A7HD)")
+			t.Fatalf("banner section missing (R-VTZ5-5FF5)")
 		}
 		if blockIdx < bannerIdx {
-			t.Errorf("agents block precedes banner section open (R-2IRD-A7HD): "+
+			t.Errorf("agents block precedes banner section open (R-VTZ5-5FF5): "+
 				"bannerIdx=%d blockIdx=%d", bannerIdx, blockIdx)
 		}
 		// Block must appear after the banner-auth row.
 		authIdx := strings.Index(body, bannerAuthOpen)
 		if authIdx < 0 {
-			t.Fatalf("banner-auth missing from signed-in response (R-2IRD-A7HD)")
+			t.Fatalf("banner-auth missing from signed-in response (R-VTZ5-5FF5)")
 		}
 		if blockIdx < authIdx {
-			t.Errorf("agents block precedes banner-auth row (R-2IRD-A7HD): "+
+			t.Errorf("agents block precedes banner-auth row (R-VTZ5-5FF5): "+
 				"authIdx=%d blockIdx=%d", authIdx, blockIdx)
 		}
 	})
 
 	t.Run("email_scoping_is_authorization_not_ui_convention", func(t *testing.T) {
-		// R-2IRD-A7HD: a chain owned by a different email never appears in the
+		// R-VTZ5-5FF5: a chain owned by a different email never appears in the
 		// requesting visitor's view — this is an authorization property, not a
 		// UI filtering convention.
 		mine := "gating-mine-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
@@ -17639,36 +20815,36 @@ func TestR_2IRD_A7HD_agents_block_gating(t *testing.T) {
 		// not be visible anywhere in the response.
 		if strings.Contains(body, blockOpen) {
 			t.Errorf("agents block surfaced another visitor's chain "+
-				"(R-2IRD-A7HD authorization property): %q", body)
+				"(R-VTZ5-5FF5 authorization property): %q", body)
 		}
 		if strings.Contains(body, "client-other") {
 			t.Errorf("another visitor's client ID leaked into response "+
-				"(R-2IRD-A7HD): %q", body)
+				"(R-VTZ5-5FF5): %q", body)
 		}
 	})
 }
 
-// TestR_2JZ9_NZ82_agent_row_visual_signature pins the visual signature of each
+// TestR_VV71_J75U_agent_row_visual_signature pins the visual signature of each
 // agent row: an inert identity label (client_name followed by 8-char client_id
 // prefix in parentheses, no ellipsis) paired with a Revoke pill that carries
 // class="auth-btn" matching the Sign-out pill chrome.
-func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
+func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 	// rowFor extracts the HTML of the agent-row div for a given chainID.
 	rowFor := func(t *testing.T, body, chainID string) string {
 		t.Helper()
 		marker := `data-chain-id="` + chainID + `"`
 		idx := strings.Index(body, marker)
 		if idx < 0 {
-			t.Fatalf("row for chain %s not found (R-2JZ9-NZ82)", chainID)
+			t.Fatalf("row for chain %s not found (R-VV71-J75U)", chainID)
 		}
 		start := strings.LastIndex(body[:idx], `<div class="agent-row"`)
 		if start < 0 {
-			t.Fatalf("agent-row open before chain %s missing (R-2JZ9-NZ82)", chainID)
+			t.Fatalf("agent-row open before chain %s missing (R-VV71-J75U)", chainID)
 		}
 		rest := body[start:]
 		end := strings.Index(rest, `</form></div>`)
 		if end < 0 {
-			t.Fatalf("agent-row close missing for chain %s (R-2JZ9-NZ82)", chainID)
+			t.Fatalf("agent-row close missing for chain %s (R-VV71-J75U)", chainID)
 		}
 		return rest[:end+len(`</form></div>`)]
 	}
@@ -17694,7 +20870,7 @@ func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
 	}
 
 	t.Run("identity_label_is_span_not_link_or_button", func(t *testing.T) {
-		// R-2JZ9-NZ82: the identity label must be inert — not <a>, not <button>.
+		// R-VV71-J75U: the identity label must be inert — not <a>, not <button>.
 		email := "sig-inert-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "inert0001" + agentsBlockRandomEmailToken(t)
 		chainID := issueChain(t, email, clientID, "Inert Agent")
@@ -17710,12 +20886,16 @@ func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, `<span class="agent-name">`) {
-			t.Errorf("identity label is not a <span> (R-2JZ9-NZ82): %q", row)
+			t.Errorf("identity label is not a <span> (R-VV71-J75U): %q", row)
+		}
+		if strings.Contains(row, `class="agent-id"`) {
+			t.Errorf("identity label split client_id into a separate visible element "+
+				"(R-VV71-J75U): %q", row)
 		}
 	})
 
 	t.Run("id8_enclosed_in_parentheses_no_ellipsis", func(t *testing.T) {
-		// R-2JZ9-NZ82: 8-char client_id prefix is wrapped in parentheses; no ellipsis.
+		// R-VV71-J75U: 8-char client_id prefix is wrapped in parentheses; no ellipsis.
 		email := "sig-parens-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "parens99abcdef12-tail"
 		chainID := issueChain(t, email, clientID, "Parens Agent")
@@ -17731,18 +20911,18 @@ func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, "(parens99)") {
-			t.Errorf("8-char prefix not in parentheses (R-2JZ9-NZ82): %q", row)
+			t.Errorf("8-char prefix not in parentheses (R-VV71-J75U): %q", row)
 		}
 		if strings.Contains(row, "parens99a") {
-			t.Errorf("client_id shown beyond 8 chars (R-2JZ9-NZ82): %q", row)
+			t.Errorf("client_id shown beyond 8 chars (R-VV71-J75U): %q", row)
 		}
 		if strings.Contains(row, "…") || strings.Contains(row, "...") {
-			t.Errorf("ellipsis present in row (R-2JZ9-NZ82): %q", row)
+			t.Errorf("ellipsis present in row (R-VV71-J75U): %q", row)
 		}
 	})
 
 	t.Run("undefined_label_parenthesised_id8", func(t *testing.T) {
-		// R-2JZ9-NZ82: when client_name is unset, row reads `undefined (id8)`.
+		// R-VV71-J75U: when client_name is unset, row reads `undefined (id8)`.
 		email := "sig-undef-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "undef0001abcdef99-tail"
 		oauthClientStore.put(clientID, &oauthClient{clientName: ""})
@@ -17772,15 +20952,15 @@ func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, "undefined") {
-			t.Errorf("unset name did not render literal `undefined` (R-2JZ9-NZ82): %q", row)
+			t.Errorf("unset name did not render literal `undefined` (R-VV71-J75U): %q", row)
 		}
 		if !strings.Contains(row, "(undef000)") {
-			t.Errorf("8-char prefix not parenthesised for undefined case (R-2JZ9-NZ82): %q", row)
+			t.Errorf("8-char prefix not parenthesised for undefined case (R-VV71-J75U): %q", row)
 		}
 	})
 
 	t.Run("revoke_button_has_auth_btn_class", func(t *testing.T) {
-		// R-2JZ9-NZ82: Revoke pill carries class="auth-btn" for matching pill chrome.
+		// R-VV71-J75U: Revoke pill carries class="auth-btn" for matching pill chrome.
 		email := "sig-pill-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "pill0001" + agentsBlockRandomEmailToken(t)
 		chainID := issueChain(t, email, clientID, "Pill Agent")
@@ -17796,11 +20976,548 @@ func TestR_2JZ9_NZ82_agent_row_visual_signature(t *testing.T) {
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, `class="auth-btn"`) {
-			t.Errorf("Revoke button missing class=\"auth-btn\" (R-2JZ9-NZ82): %q", row)
+			t.Errorf("Revoke button missing class=\"auth-btn\" (R-VV71-J75U): %q", row)
 		}
 		btnIdx := strings.Index(row, `<button class="auth-btn"`)
 		if btnIdx < 0 {
-			t.Errorf("no <button class=\"auth-btn\"> found in row (R-2JZ9-NZ82): %q", row)
+			t.Errorf("no <button class=\"auth-btn\"> found in row (R-VV71-J75U): %q", row)
 		}
 	})
+}
+
+// TestR_6KK2_AAY0_agent_stack_bottom_right_geometry pins the observable
+// bottom-right geometry of the signed-in auth row plus at least two live
+// agent rows. The server-rendered rows share one banner-auth grid, and the
+// stylesheet places that grid in the banner's lower-right corner with a
+// shared label column and action column.
+func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
+	issueChain := func(t *testing.T, email, clientID, clientName string) string {
+		t.Helper()
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
+		if err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+		oauthTokenStore.mu.Lock()
+		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		chainID := ""
+		if rec != nil {
+			chainID = rec.chainID
+		}
+		oauthTokenStore.mu.Unlock()
+		if chainID == "" {
+			t.Fatalf("issued refresh has empty chainID")
+		}
+		return chainID
+	}
+
+	email := "geometry-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	chainA := issueChain(t, email, "geomaaaa"+agentsBlockRandomEmailToken(t), "Alpha Agent")
+	chainB := issueChain(t, email, "geombbbb"+agentsBlockRandomEmailToken(t), "Beta Agent")
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
+	m := bannerRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("banner missing (R-6KK2-AAY0): %q", body)
+	}
+	banner := m[1]
+	authStart := strings.Index(banner, `<div class="banner-auth">`)
+	authEnd := strings.LastIndex(banner, `</div>`)
+	if authStart < 0 || authEnd < authStart {
+		t.Fatalf("banner-auth missing from banner (R-6KK2-AAY0): %q", banner)
+	}
+	authInner := banner[authStart:authEnd]
+	if !strings.Contains(authInner, `class="agents-block"`) {
+		t.Fatalf("agents block is not inside banner-auth grid (R-6KK2-AAY0): %q", authInner)
+	}
+	if strings.Count(authInner, `<div class="agent-row"`) != 2 {
+		t.Fatalf("agent row count in auth grid = %d, want 2 (R-6KK2-AAY0): %q",
+			strings.Count(authInner, `<div class="agent-row"`), authInner)
+	}
+	for _, chainID := range []string{chainA, chainB} {
+		if !strings.Contains(authInner, `data-chain-id="`+chainID+`"`) {
+			t.Fatalf("chain %s missing from auth grid (R-6KK2-AAY0): %q", chainID, authInner)
+		}
+	}
+	if strings.Index(authInner, email) > strings.Index(authInner, `<div class="agent-row"`) {
+		t.Errorf("web-session row does not render above agent rows (R-6KK2-AAY0): %q", authInner)
+	}
+	subtitleEnd := strings.Index(banner, `</div>`)
+	firstAgent := strings.Index(banner, `<div class="agent-row"`)
+	if firstAgent >= 0 && firstAgent < subtitleEnd {
+		t.Errorf("agent row appears inside title/subtitle group (R-6KK2-AAY0): %q", banner)
+	}
+
+	cssBytes, err := os.ReadFile("design.css")
+	if err != nil {
+		t.Fatalf("read design.css: %v", err)
+	}
+	canonicalCSS := string(cssBytes)
+	for _, needle := range []string{
+		`.banner-auth {`,
+		`position: absolute;`,
+		`right: 24px;`,
+		`bottom: 18px;`,
+	} {
+		if !strings.Contains(canonicalCSS, needle) {
+			t.Errorf("design.css missing %q for R-6KK2-AAY0", needle)
+		}
+	}
+	requiredInlineCSS := []string{
+		`.banner:has(.agents-block) .banner-auth{display:grid;`,
+		`grid-template-columns:max-content max-content;`,
+		`.banner:has(.agents-block) .banner-auth>.auth-email,`,
+		`.banner:has(.agents-block) .banner-auth .agent-name{`,
+		`grid-column:1;`,
+		`.banner:has(.agents-block) .banner-auth>.auth-form,`,
+		`.banner:has(.agents-block) .banner-auth .agent-row form{`,
+		`grid-column:2;`,
+		`.agents-block,.agent-row{`,
+		`display:contents`,
+	}
+	for _, needle := range requiredInlineCSS {
+		if !strings.Contains(body, needle) {
+			t.Errorf("inline CSS missing %q for R-6KK2-AAY0", needle)
+		}
+	}
+}
+
+// TestR_2ZZH_LJYA_banner_grows_for_identity_stack pins that the
+// bottom-right signed-in auth/agent stack stays in normal banner flow. That
+// makes additional agent rows increase the banner's height downward instead
+// of letting an absolutely-positioned stack climb into the title/subtitle
+// area.
+func TestR_2ZZH_LJYA_banner_grows_for_identity_stack(t *testing.T) {
+	issueChain := func(t *testing.T, email, clientID, clientName string) {
+		t.Helper()
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+			"http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+	}
+
+	email := "grow-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	for i, name := range []string{"Alpha Agent", "Beta Agent", "Gamma Agent"} {
+		issueChain(t, email,
+			fmt.Sprintf("grow%04d%s", i, agentsBlockRandomEmailToken(t)), name)
+	}
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
+	m := bannerRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("banner missing (R-2ZZH-LJYA): %q", body)
+	}
+	banner := m[1]
+	subtitleEnd := strings.Index(banner, `</div>`)
+	authStart := strings.Index(banner, `<div class="banner-auth">`)
+	if subtitleEnd < 0 || authStart < 0 || !(subtitleEnd < authStart) {
+		t.Fatalf("auth stack does not start after subtitle row (R-2ZZH-LJYA): %q", banner)
+	}
+	if strings.Count(banner, `<div class="agent-row"`) != 3 {
+		t.Fatalf("agent row count = %d, want 3 (R-2ZZH-LJYA): %q",
+			strings.Count(banner, `<div class="agent-row"`), banner)
+	}
+
+	requiredInlineCSS := []string{
+		`.banner:has(.agents-block){display:flex;flex-direction:column;align-items:center;padding-bottom:18px}`,
+		`position:static;align-self:flex-end;margin-top:28px`,
+		`.agents-block,.agent-row{display:contents}`,
+	}
+	for _, needle := range requiredInlineCSS {
+		if !strings.Contains(body, needle) {
+			t.Errorf("inline CSS missing %q for R-2ZZH-LJYA", needle)
+		}
+	}
+}
+
+// TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset pins the bottom
+// edge of the signed-in banner when live agent rows are present. The stack
+// stays in normal flow, but its lowest action pill keeps the canonical
+// no-agent 18px bottom breathing room instead of gaining an extra spacer.
+func TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset(t *testing.T) {
+	email := "compact-bottom-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	for i, clientName := range []string{"Bottom Alpha", "Bottom Beta"} {
+		clientID := fmt.Sprintf("bottom%04d%s", i, agentsBlockRandomEmailToken(t))
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+			"http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+	}
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
+	m := bannerRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("banner missing (R-6QIE-4D71): %q", body)
+	}
+	banner := m[1]
+	if strings.Count(banner, `<div class="agent-row"`) != 2 {
+		t.Fatalf("agent row count = %d, want 2 (R-6QIE-4D71): %q",
+			strings.Count(banner, `<div class="agent-row"`), banner)
+	}
+
+	cssStart := strings.Index(body,
+		`.banner:has(.agents-block){display:flex;flex-direction:column;align-items:center;`)
+	if cssStart < 0 {
+		t.Fatalf("with-agent banner layout selector missing (R-6QIE-4D71)")
+	}
+	cssEnd := strings.Index(body[cssStart:], `</style>`)
+	if cssEnd < 0 {
+		t.Fatalf("with-agent banner layout CSS style not closed (R-6QIE-4D71)")
+	}
+	layoutCSS := body[cssStart : cssStart+cssEnd]
+	for _, required := range []string{
+		`padding-bottom:18px`,
+		`position:static;align-self:flex-end;margin-top:28px`,
+		`.agents-block,.agent-row{display:contents}`,
+	} {
+		if !strings.Contains(layoutCSS, required) {
+			t.Fatalf("layout CSS missing %q (R-6QIE-4D71): %q", required, layoutCSS)
+		}
+	}
+	for _, forbidden := range []string{
+		`padding-bottom:32px`,
+		`padding-bottom:64px`,
+		`min-height`,
+		`grid-template-rows`,
+	} {
+		if strings.Contains(layoutCSS, forbidden) {
+			t.Fatalf("layout CSS leaves an extra lower spacer via %q (R-6QIE-4D71): %q",
+				forbidden, layoutCSS)
+		}
+	}
+}
+
+// TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding verifies the
+// broader 8px-tolerance contract for the with-agent banner bottom padding. The
+// inline extension keeps the final Revoke row on the canonical compact bottom
+// offset instead of adding an extra spacer below the identity/action stack.
+func TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding(t *testing.T) {
+	email := "within8-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	for i, clientName := range []string{"Within Eight Alpha", "Within Eight Beta"} {
+		clientID := fmt.Sprintf("within8%04d%s", i, agentsBlockRandomEmailToken(t))
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+			"http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+	}
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	if !strings.Contains(body, `class="agents-block"`) {
+		t.Fatalf("agents block missing (R-CNWX-9VB2): %q", body)
+	}
+	if got := strings.Count(body, `<button class="auth-btn" type="submit">Revoke</button>`); got != 2 {
+		t.Fatalf("revoke pill count = %d, want 2 (R-CNWX-9VB2): %q", got, body)
+	}
+
+	cssStart := strings.Index(body,
+		`.banner:has(.agents-block){display:flex;flex-direction:column;align-items:center;`)
+	if cssStart < 0 {
+		t.Fatalf("with-agent banner layout selector missing (R-CNWX-9VB2)")
+	}
+	cssEnd := strings.Index(body[cssStart:], `</style>`)
+	if cssEnd < 0 {
+		t.Fatalf("with-agent banner layout CSS style not closed (R-CNWX-9VB2)")
+	}
+	layoutCSS := body[cssStart : cssStart+cssEnd]
+	if !strings.Contains(layoutCSS, `padding-bottom:18px`) {
+		t.Fatalf("with-agent bottom padding does not match compact no-agent offset (R-CNWX-9VB2): %q",
+			layoutCSS)
+	}
+	for _, forbidden := range []string{
+		`padding-bottom:26px`,
+		`padding-bottom:32px`,
+		`padding-bottom:64px`,
+		`margin-bottom`,
+		`padding-top:`,
+	} {
+		if strings.Contains(layoutCSS, forbidden) {
+			t.Fatalf("with-agent layout adds lower spacer via %q (R-CNWX-9VB2): %q", forbidden, layoutCSS)
+		}
+	}
+}
+
+// TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows pins the
+// zero-agent half of the banner growth contract: signed-out and signed-in
+// zero-chain renderings contain no agents block, no placeholder row, and no
+// inline sizing rule that reserves space for rows that are not present.
+func TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows(t *testing.T) {
+	bannerInner := func(t *testing.T, body string) string {
+		t.Helper()
+		bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
+		m := bannerRe.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("banner missing (R-TS71-XRW4): %q", body)
+		}
+		return m[1]
+	}
+	render := func(t *testing.T, email string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		if email != "" {
+			sess, err := webSessionStore.issue(email)
+			if err != nil {
+				t.Fatalf("webSessionStore.issue: %v", err)
+			}
+			req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+		}
+		w := httptest.NewRecorder()
+		handleIndex(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET / status = %d, want 200 (R-TS71-XRW4)", w.Code)
+		}
+		return w.Body.String()
+	}
+	assertCompactNoAgents := func(t *testing.T, body, wantAction string) {
+		t.Helper()
+		banner := bannerInner(t, body)
+		if strings.Contains(banner, `class="agents-block"`) ||
+			strings.Contains(banner, `class="agent-row"`) ||
+			strings.Contains(banner, `class="agent-name"`) {
+			t.Fatalf("zero-agent banner rendered agent markup (R-TS71-XRW4): %q", banner)
+		}
+		if strings.Contains(banner, `data-agent-placeholder`) ||
+			strings.Contains(banner, `agent-placeholder`) {
+			t.Fatalf("zero-agent banner rendered placeholder markup (R-TS71-XRW4): %q", banner)
+		}
+		authRe := regexp.MustCompile(`<div class="banner-auth">([\s\S]*?)</div>\s*$`)
+		m := authRe.FindStringSubmatch(strings.TrimSpace(banner))
+		if m == nil {
+			t.Fatalf("banner-auth is not the compact final banner child (R-TS71-XRW4): %q", banner)
+		}
+		authInner := m[1]
+		if !strings.Contains(authInner, wantAction) {
+			t.Fatalf("banner-auth missing %q (R-TS71-XRW4): %q", wantAction, authInner)
+		}
+	}
+
+	signedOut := render(t, "")
+	assertCompactNoAgents(t, signedOut, `Sign in`)
+
+	email := "compact-zero-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	signedInZero := render(t, email)
+	assertCompactNoAgents(t, signedInZero, `Sign out`)
+	if !strings.Contains(signedInZero, email) {
+		t.Fatalf("signed-in zero-agent banner missing email %q (R-TS71-XRW4)", email)
+	}
+
+	cssStart := strings.Index(signedInZero,
+		`.banner:has(.agents-block){display:flex;flex-direction:column;align-items:center;padding-bottom:18px}`)
+	if cssStart < 0 {
+		t.Fatalf("inline banner layout CSS missing (R-TS71-XRW4)")
+	}
+	cssEnd := strings.Index(signedInZero[cssStart:], `</style>`)
+	if cssEnd < 0 {
+		t.Fatalf("inline banner layout CSS style not closed (R-TS71-XRW4)")
+	}
+	layoutCSS := signedInZero[cssStart : cssStart+cssEnd]
+	for _, forbidden := range []string{
+		`min-height`,
+		`grid-template-rows`,
+		`agent-placeholder`,
+	} {
+		if strings.Contains(layoutCSS, forbidden) {
+			t.Fatalf("inline banner layout reserves absent agent space via %q (R-TS71-XRW4): %q",
+				forbidden, layoutCSS)
+		}
+	}
+
+	clientID := "compactone" + agentsBlockRandomEmailToken(t)
+	oauthClientStore.put(clientID, &oauthClient{clientName: "Compact Agent"})
+	if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		"http://127.0.0.1:3000/mcp"); err != nil {
+		t.Fatalf("issueRefresh: %v", err)
+	}
+	withAgent := render(t, email)
+	if !strings.Contains(withAgent, `class="agents-block"`) ||
+		!strings.Contains(withAgent, `class="agent-row"`) {
+		t.Fatalf("signed-in one-agent banner did not grow by rendering a real row (R-TS71-XRW4): %q",
+			bannerInner(t, withAgent))
+	}
+}
+
+// TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth pins that the
+// in-flow identity/action stack CSS is conditional on real agent rows. With
+// no agents, the page keeps reqs/design.css's compact bottom-right auth
+// placement instead of globally turning .banner into a flex/grid column.
+func TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth(t *testing.T) {
+	render := func(t *testing.T, email string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		if email != "" {
+			sess, err := webSessionStore.issue(email)
+			if err != nil {
+				t.Fatalf("webSessionStore.issue: %v", err)
+			}
+			req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+		}
+		w := httptest.NewRecorder()
+		handleIndex(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET / status = %d, want 200 (R-O87H-RSH4)", w.Code)
+		}
+		return w.Body.String()
+	}
+	assertNoAgentCompact := func(t *testing.T, body, action string) {
+		t.Helper()
+		if strings.Contains(body, `class="agents-block"`) ||
+			strings.Contains(body, `class="agent-row"`) {
+			t.Fatalf("no-agent page rendered agent markup (R-O87H-RSH4): %q", body)
+		}
+		for _, forbidden := range []string{
+			`.banner{display:flex;`,
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("no-agent page globally overrides compact banner auth via %q "+
+					"(R-O87H-RSH4)", forbidden)
+			}
+		}
+		globalAuthRule := regexp.MustCompile(`(^|})\.banner-auth\{`)
+		if globalAuthRule.MatchString(body) {
+			t.Fatalf("no-agent page globally overrides .banner-auth (R-O87H-RSH4)")
+		}
+		for _, required := range []string{
+			`.banner:has(.agents-block){display:flex;`,
+			`.banner:has(.agents-block) .banner-auth{display:grid;`,
+			`<div class="banner-auth">`,
+			action,
+		} {
+			if !strings.Contains(body, required) {
+				t.Fatalf("no-agent page missing %q (R-O87H-RSH4)", required)
+			}
+		}
+	}
+
+	assertNoAgentCompact(t, render(t, ""), `Sign in`)
+	email := "o87h-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	body := render(t, email)
+	assertNoAgentCompact(t, body, `Sign out`)
+	if !strings.Contains(body, email) {
+		t.Fatalf("signed-in zero-agent page missing email %q (R-O87H-RSH4)", email)
+	}
+
+	clientID := "o87hagent" + agentsBlockRandomEmailToken(t)
+	oauthClientStore.put(clientID, &oauthClient{clientName: "O87H Agent"})
+	if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		"http://127.0.0.1:3000/mcp"); err != nil {
+		t.Fatalf("issueRefresh: %v", err)
+	}
+	withAgent := render(t, email)
+	if !strings.Contains(withAgent, `class="agents-block"`) ||
+		!strings.Contains(withAgent, `.banner:has(.agents-block) .banner-auth{display:grid;`) {
+		t.Fatalf("with-agent page missing conditional stack layout (R-O87H-RSH4)")
+	}
+}
+
+// TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack pins the DOM
+// structure of the signed-in banner identity/action stack: the web-session
+// email + Sign out pair and all live MCP agent rows are descendants of the
+// same .banner-auth container, with no separate agents sibling under .banner.
+func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
+	email := "shared-stack-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	for i, clientName := range []string{"Shared Alpha", "Shared Beta"} {
+		clientID := fmt.Sprintf("shared%04d%s", i, agentsBlockRandomEmailToken(t))
+		oauthClientStore.put(clientID, &oauthClient{clientName: clientName})
+		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+			"http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+	}
+	sess, err := webSessionStore.issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleIndex(w, req)
+	body := w.Body.String()
+
+	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
+	m := bannerRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("banner missing (R-3RL1-IUP6): %q", body)
+	}
+	banner := m[1]
+
+	authOpen := `<div class="banner-auth">`
+	authStart := strings.Index(banner, authOpen)
+	if authStart < 0 {
+		t.Fatalf("banner-auth missing (R-3RL1-IUP6): %q", banner)
+	}
+	authClose := strings.LastIndex(banner, `</div>`)
+	if authClose < authStart {
+		t.Fatalf("banner-auth close missing (R-3RL1-IUP6): %q", banner)
+	}
+	authStack := banner[authStart : authClose+len(`</div>`)]
+	afterAuth := banner[authClose+len(`</div>`):]
+
+	if strings.Contains(afterAuth, `class="agents-block"`) ||
+		strings.Contains(afterAuth, `class="agent-row"`) {
+		t.Fatalf("agent markup rendered as a banner sibling after banner-auth "+
+			"(R-3RL1-IUP6): %q", banner)
+	}
+	if got := strings.Count(authStack, `<div class="agents-block"`); got != 1 {
+		t.Fatalf("agents-block count inside banner-auth = %d, want 1 "+
+			"(R-3RL1-IUP6): %q", got, authStack)
+	}
+	if got := strings.Count(authStack, `<div class="agent-row"`); got != 2 {
+		t.Fatalf("agent-row count inside banner-auth = %d, want 2 "+
+			"(R-3RL1-IUP6): %q", got, authStack)
+	}
+
+	emailIdx := strings.Index(authStack, email)
+	signOutIdx := strings.Index(authStack, `>Sign out<`)
+	blockIdx := strings.Index(authStack, `<div class="agents-block"`)
+	firstAgentIdx := strings.Index(authStack, `<div class="agent-row"`)
+	if emailIdx < 0 || signOutIdx < 0 || blockIdx < 0 || firstAgentIdx < 0 {
+		t.Fatalf("shared stack missing web row or agent block "+
+			"(R-3RL1-IUP6): %q", authStack)
+	}
+	if !(emailIdx < signOutIdx && signOutIdx < blockIdx && blockIdx < firstAgentIdx) {
+		t.Fatalf("shared stack order is not web-session pair then agent rows "+
+			"(R-3RL1-IUP6): email=%d signOut=%d block=%d firstAgent=%d stack=%q",
+			emailIdx, signOutIdx, blockIdx, firstAgentIdx, authStack)
+	}
 }

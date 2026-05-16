@@ -32,9 +32,82 @@ provider; clients never see Google directly.
   open DCR endpoint is what lets MCP clients self-onboard against
   the published metadata document with no out-of-band credentials,
   per R-VVRG-W2G2.
+- R-KCBH-CXY9: Dynamic Client Registration and authorization-server
+  metadata present one coherent token-endpoint client-authentication
+  posture. In the current service, MCP clients are public PKCE
+  clients: metadata advertises `none` as the supported token endpoint
+  authentication method, a registration request that omits
+  `token_endpoint_auth_method` or sets it to `none` succeeds without
+  issuing a `client_secret`, and a registration request asking for any
+  client-secret-based token endpoint authentication method is rejected
+  with a registration error. A successfully registered public client
+  can complete the authorization-code + PKCE token exchange by
+  presenting its `client_id`, authorization code, registered
+  `redirect_uri`, and valid PKCE verifier; it is not required to
+  present a client secret. The intent is that clients never receive
+  metadata or registration echoes for a client-authentication mode the
+  token endpoint will not enforce.
+- R-YRMT-B7LZ: a Dynamic Client Registration record remains valid
+  across process restarts until the local database is reset. A
+  client that successfully registered and received a `client_id`
+  can later use that same `client_id` in an authorization request
+  after `hal serve` has stopped and started again against the same
+  database. The stored registration preserves the redirect URIs
+  and client metadata that authorization-time checks depend on, so
+  restart does not turn a previously registered client into an
+  unknown client. Running `hal reset` is the local operation that
+  clears registrations.
+- R-9OWM-O8XJ: Dynamic Client Registration accepts only redirect
+  URIs that are absolute `http` or `https` URLs with a non-empty
+  host and no fragment component. A registration request containing
+  a relative URI, an unsupported scheme, an empty host, a fragment,
+  or a syntactically invalid URI is rejected and no client is
+  registered. Loopback HTTP redirect URIs are allowed for local MCP
+  clients; non-loopback HTTP redirect URIs are out of scope unless
+  a later requirement allows them.
+- R-8OBG-7FST: a Dynamic Client Registration request succeeds only
+  when it supplies at least one redirect URI that satisfies
+  R-9OWM-O8XJ. A request with no `redirect_uris` field, an empty
+  `redirect_uris` list, or no valid redirect URI after validation
+  is rejected and no `client_id` is issued. Every redirect URI
+  persisted on a successful registration is one the service would
+  later be willing to exact-match at authorize time under
+  R-1ERW-YD9G.
+- R-19BA-4XX4: Dynamic Client Registration never overwrites an
+  existing client registration. The `client_id` returned from a
+  successful registration is unique among all currently persisted
+  registrations. If ID generation produces a value that is already
+  registered, the service does not replace the existing record; it
+  either retries and returns a different unused `client_id`, or
+  fails the registration without creating or modifying any client
+  record.
+- R-JE3Z-IGI4: Dynamic Client Registration accepts `client_name`
+  only as optional display text with a bounded length. If supplied,
+  `client_name` must be a string whose trimmed value is no more
+  than 80 Unicode code points and contains no ASCII control
+  characters. A missing `client_name`, an empty string, or an
+  all-whitespace string is treated as unset for display purposes.
+  A registration request with a non-string `client_name`, an
+  overlong value, or a value containing control characters is
+  rejected and no client is registered.
 - R-42V5-GJW4: the service supports the Authorization Code flow with
   PKCE (RFC 7636). It does not support the implicit flow or any
   password grant.
+- R-BAXT-SBU9: the authorize endpoint accepts only Authorization
+  Code requests that include a valid PKCE challenge. A request to
+  `/oauth/authorize` is rejected before redirecting to Google
+  unless `response_type=code`, `code_challenge` is present and
+  non-empty, and `code_challenge_method` names a supported verifier
+  transform. The service does not issue a HAL authorization code
+  for any request that omitted PKCE, requested an unsupported
+  response type, or supplied an unsupported challenge method.
+- R-JTTZ-CG5J: the only supported PKCE `code_challenge_method` is
+  `S256`. An authorize request with `code_challenge_method=plain`,
+  an omitted method, an empty method, or any method other than
+  `S256` is rejected before redirecting to Google and no HAL
+  authorization code is issued. The token endpoint verifies the
+  presented `code_verifier` by applying the S256 transform and
+  comparing it to the challenge bound to the authorization code.
 - R-1ERW-YD9G: the authorize endpoint rejects any request whose
   `redirect_uri` is not a byte-for-byte exact match against one of
   the redirect URIs the requesting client registered (via DCR per
@@ -61,6 +134,16 @@ provider; clients never see Google directly.
   is decorative and a leaked code is exchangeable by an attacker.
 
 ## Authorization ordering
+
+- R-OBU9-0WFI: every public operation that can change the shared
+  counter requires a valid authentication credential accepted for
+  that transport before the counter is read for mutation, validated
+  for mutation, or modified. This applies uniformly to increment and
+  decrement across the HTTP API, browser-initiated actions, and MCP
+  tools. An unauthenticated or invalidly authenticated mutation
+  request receives only the transport's authentication failure
+  response; it must not reveal whether the requested mutation would
+  otherwise have succeeded or failed.
 
 - R-FFOQ-Y4JG: every endpoint and MCP tool whose specification
   requires authentication evaluates the authentication check
@@ -150,6 +233,24 @@ provider; clients never see Google directly.
   single Workspace domain whose users are allowed. A user whose
   Google identity is outside that domain is rejected with a clear
   error message and no token is issued.
+- R-EMW1-D8A0: the service accepts a Google-federated identity only
+  when Google asserts that the email address is verified. If the
+  Google identity payload has `email_verified` false or omits the
+  claim, the callback is rejected with no web session, no HAL
+  authorization code, and no HAL token chain issued. This check
+  applies to both web-origin and MCP-origin federation callbacks,
+  alongside the configured Workspace-domain check (R-5LQM-O89D),
+  because the service uses the Google email address as the owner
+  identity for sessions, tokens, logs, and agent-chain ownership.
+- R-ZBV4-KEJ6: the service accepts identity claims from Google only
+  from an ID token that is valid for this service: the token is
+  issued by Google, is cryptographically valid, is not expired, and
+  has an audience that matches the configured Google client ID. If
+  any of those checks fail, the Google callback is rejected with no
+  web session, no HAL authorization code, and no HAL token chain
+  issued. This applies to both web-origin and MCP-origin federation
+  callbacks, because both use the resulting Google identity as the
+  owner identity for HAL-issued credentials.
 - R-ANRQ-04PK: the allowed Workspace domain (R-5LQM-O89D) is
   supplied via the environment variable `GOOGLE_WORKSPACE_DOMAIN`,
   matching the bare-`GOOGLE_*` convention R-68WP-XVCK and the
@@ -460,13 +561,23 @@ provider; clients never see Google directly.
   OAuth token plaintext. Validation of an inbound session cookie is a
   single lookup against this store: hash the presented value, find
   the record, accept iff the record is un-expired and un-revoked.
-  Logout (R-AE1P-Z1WC) is the act of writing revoked-at on the
+  Logout (R-FZ10-BE37) is the act of writing revoked-at on the
   matching record; once revoked, the same cookie value cannot be
   redeemed again. The web-session store and the OAuth-token store
   are independent — they do not share records and have no referential
   relationship; lifecycle operations on one (issue, revoke, rotate,
   expire) do not read or write records in the other, reinforcing
   R-0XJ4-5MSL at the storage level.
+- R-8CBQ-IKKA: web session records are persisted in the service's
+  SQLite database and survive process restarts until they expire,
+  are revoked, or the local database is reset. A browser holding a
+  valid `hal_session` cookie before `hal serve` stops remains
+  signed in after `hal serve` starts again against the same
+  database, subject to the same idle, absolute-expiry, and
+  revocation checks that applied before restart. Restart does not
+  by itself revoke web sessions or make unexpired session cookies
+  unknown. Running `hal reset` is the local operation that clears
+  persisted web session records.
 - R-KJ15-9P17: a web session is bounded by two ceilings beyond
   explicit revocation. (1) **Idle:** a session that has gone 1 hour
   without a successful authenticated request from its bearer is
@@ -497,7 +608,7 @@ provider; clients never see Google directly.
   must complete Google's authentication UI, regardless of any
   active Google cookie in their browser. This applies uniformly to
   every web sign-in: the first sign-in, the sign-in after a HAL
-  logout (R-AE1P-Z1WC), the sign-in after a HAL session has
+  logout (R-FZ10-BE37), the sign-in after a HAL session has
   expired by the idle or absolute ceiling (R-KJ15-9P17), and the
   sign-in after any HAL-side revocation. A web sign-in flow that
   completes without the user having entered credentials at Google is
@@ -516,7 +627,7 @@ provider; clients never see Google directly.
   MCP token chain does not end the web session. There is exactly one
   user-initiated cross-action permitted by this spec: a signed-in
   visitor may revoke an MCP token chain owned by their own email
-  through the action R-0SNI-MJTT defines on the index page's agents
+  through the action R-D0XD-1YT0 defines on the index page's agents
   block. This direction is one-way only — revoking a chain through
   that action does not affect the web session that issued the revoke,
   and the inverse (an MCP-token-chain action ending a web session) is
@@ -596,7 +707,7 @@ provider; clients never see Google directly.
   is the mechanism for **every** revocation path the spec names —
   reuse-detection-triggered chain revocation (R-9HGE-87UG /
   R-A26O-QBG9), user-initiated chain revocation through the agents
-  block (R-0SNI-MJTT), the revocation that R-ZPE1-0DV8 performs on
+  block (R-D0XD-1YT0), the revocation that R-ZPE1-0DV8 performs on
   the access and refresh tokens of a code-reuse chain, and any
   future revocation path the spec introduces. A token-validation
   code path that consults `expires-at` but not `revoked-at`, or
@@ -608,6 +719,28 @@ provider; clients never see Google directly.
   this requirement fences is the one where a revoked chain's
   outstanding access token continues to satisfy validation because
   the validation lookup never reads `revoked-at`.
+- R-2HT5-50F4: the access token and refresh token returned by a
+  successful authorization-code token exchange belong to the same
+  MCP token chain. The agents block row for that chain represents
+  both tokens from the initial exchange, not only the refresh token.
+  If the user revokes that row before the MCP client has ever used
+  the refresh token, the initial access token from the same token
+  response is revoked too; presenting that initial access token at
+  the MCP transport or HTTP API mutation endpoints is rejected as a
+  revoked token and does not modify the counter. A chain whose first
+  refresh token is visible and revocable while the access token
+  issued beside it remains outside the chain does not satisfy this
+  requirement.
+- R-FC5T-WWC2: HAL-issued OAuth token records are persisted in the
+  service's SQLite database and survive process restarts until they
+  expire, are revoked, are consumed, or the local database is reset.
+  A refresh token issued before `hal serve` stops can still be used
+  after `hal serve` starts again against the same database, subject
+  to the same validation rules that applied before restart. Restart
+  does not by itself revoke token chains, consume refresh tokens,
+  erase access-token revocation state, or make unexpired access
+  tokens unknown. Running `hal reset` is the local operation that
+  clears persisted OAuth token records.
 - R-CUUP-REQT: the token record stores a cryptographic hash of the
   token string, not the plaintext. The plaintext is returned to the
   client exactly once, at issue time, and is never persisted by the
@@ -615,9 +748,15 @@ provider; clients never see Google directly.
   presented string with the same algorithm and looking up the record
   by that hash. A database leak therefore does not give an attacker
   any usable token.
-- R-6UUW-TQP2: an issued access token grants the holder permission to
-  call the increment tool. There are no finer-grained scopes in the
-  current spec.
+- R-285U-FWW3: a valid HAL-issued access token authorizes every
+  bearer-token-protected counter mutation surface in the current
+  service: MCP `counter_increment`, MCP `counter_decrement`,
+  `POST /counter/increment`, and `POST /counter/decrement`,
+  subject to each operation's own business rules such as the
+  decrement zero floor. The service does not issue separate scopes
+  or token kinds for increment versus decrement in the current spec;
+  a token that validates for this service's canonical resource is
+  accepted uniformly at all bearer-token mutation gates.
 - R-7GT3-PM1K: access tokens have a finite lifetime. The service
   issues refresh tokens so well-behaved clients can stay logged in
   without re-prompting on every expiry.
@@ -625,6 +764,27 @@ provider; clients never see Google directly.
 - R-89K0-GH5G: each successful refresh-token use issues a new
   refresh token alongside the new access token. A refresh token is
   single-use: it is invalidated the moment its successor is issued.
+- R-B78O-8X0F: the OAuth token endpoint supports the refresh-token
+  grant. A `POST /oauth/token` request with
+  `grant_type=refresh_token` and a valid refresh token issued by
+  this service returns a fresh bearer access token and a fresh
+  refresh token for the same owner, client, token chain, and
+  resource binding, without redirecting the user-agent to Google or
+  requiring any browser interaction. The presented refresh token is
+  consumed as part of the successful exchange and cannot be used
+  again. A request with an unknown, expired, revoked, already-used,
+  malformed, or missing refresh token is rejected with the standard
+  OAuth error response and issues no new tokens.
+- R-5P7B-KY5Z: a refresh-token grant request must identify the same
+  OAuth client that originally received the refresh token.
+  `POST /oauth/token` with `grant_type=refresh_token` is accepted
+  only when the presented `client_id` matches the client bound to
+  the refresh token's token chain; a missing, unknown, or
+  mismatched `client_id` is rejected with the standard OAuth error
+  response and issues no new tokens. A rejected client mismatch
+  does not consume the refresh token, but a second presentation of
+  an already-consumed refresh token still triggers the
+  reuse-detection posture R-9HGE-87UG defines.
 - R-8UAA-YKR9: a refresh token expires thirty days after its own
   issue time. An active client that keeps refreshing stays logged in
   indefinitely; a client that goes thirty days without refreshing
@@ -682,6 +842,20 @@ provider; clients never see Google directly.
   mismatch, with no obvious signal of what went wrong. Closing
   the loop at issuance turns that silent failure into a loud,
   diagnosable one.
+- R-WLUL-MZCD: when an MCP OAuth authorization-code request or token
+  request omits the `resource` parameter, the service treats the
+  request as targeting its configured canonical resource identifier
+  R-75E8-YGGN. The resulting authorization code, access token, and
+  refresh token are bound to that canonical resource exactly as if
+  the client had supplied it explicitly. A request that supplies a
+  `resource` parameter still must match the canonical identifier
+  byte-for-byte per R-4GRA-EGBY / R-76M5-C87C; non-empty wrong
+  resources are rejected and never defaulted. The service never
+  issues an access token or refresh token with an empty or absent
+  resource binding. This compatibility default lets MCP clients that
+  omit the resource indicator obtain tokens for the only resource
+  this service exposes, while preserving strict rejection for tokens
+  minted for any different resource.
 - R-76M5-C87C: "matches" in R-75E8-YGGN means byte-for-byte
   equality against the one configured resource-identifier string
   the service was started with — the value R-791Y-3ROQ reads from
@@ -795,6 +969,14 @@ provider; clients never see Google directly.
   emission. Together with R-CUUP-REQT (no plaintext in the database),
   this preserves the property that no static artifact the service
   produces or retains contains a usable token.
+- R-KX4N-DZ44: every OAuth token endpoint response that contains an
+  access token, refresh token, or any other bearer-token plaintext
+  is explicitly non-cacheable. The response carries cache-control
+  headers that instruct clients and intermediaries not to store the
+  response, so a usable token is not retained in browser cache,
+  proxy cache, or other HTTP caching layers. Error responses from
+  the token endpoint do not contain token plaintext, but successful
+  token-issuing responses always carry this no-store posture.
 
 ## Cross-origin posture
 
@@ -817,6 +999,18 @@ provider; clients never see Google directly.
   of how that page might have obtained an access token, while
   spec-conformant browser-based discovery and token exchange
   continue to work.
+- R-R4RG-O4Y9: a browser request authenticated only by a web session
+  cookie cannot perform any state-changing action unless it
+  originates from the service's own origin. Cross-site form
+  submissions, cross-site fetches, or requests with a mismatched
+  `Origin` or `Referer` are rejected before any protected state is
+  read for mutation or modified, even if the browser includes a
+  valid `hal_session` cookie. This applies to counter mutations,
+  MCP token-chain revocation from the agents block, logout/session
+  revocation, and any future cookie-authenticated state-changing
+  browser endpoint. Bearer-token clients are governed by their
+  bearer-token validation rules and do not depend on browser-origin
+  headers for authorization.
 
 ## Transport security headers
 

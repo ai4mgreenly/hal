@@ -87,3 +87,20 @@ can read and increment the counter as MCP tools.
   unauthenticated rejection, fails to find a `resource_metadata`
   pointer in the response, and reports an MCP-server-misconfigured
   error instead of starting the OAuth flow.
+- R-51PZ-MEQR: the MCP transport endpoint rejects presented-but-invalid
+  bearer credentials at the HTTP authorization boundary, before any
+  MCP tool handler runs. When a request to `/mcp` presents an
+  Authorization header whose bearer token is malformed, unknown,
+  expired, revoked, or not bound to this service's canonical resource
+  identifier (R-75E8-YGGN / R-76M5-C87C), the HTTP response is `401
+  Unauthorized` and carries the `WWW-Authenticate: Bearer ...`
+  challenge R-7BHQ-VB64 defines, including an `error="invalid_token"`
+  signal and a distinct `error_description` for the failure cause per
+  R-EV2D-QTR1. The request is not reported to the MCP client as a
+  successful JSON-RPC response, and it is not surfaced as a
+  tool-level error with HTTP 200. In particular, a failed
+  `counter_increment` or `counter_decrement` call with an invalid
+  bearer token must not produce a `tools/call` result whose content is
+  only text such as "bearer token resource binding does not match";
+  the counter is not read for mutation, validated for mutation, or
+  modified after bearer rejection.

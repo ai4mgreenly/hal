@@ -219,6 +219,46 @@ feature requirements.
   of fast termination, on the understanding that dropped clients
   reconnect on their next attempt.
 
+- R-VKZD-UKVS: every endpoint that reads a client-supplied request
+  body enforces a fixed maximum body size before parsing. Requests
+  whose bodies exceed the endpoint's limit are rejected with an
+  error response and no state change. The limit is high enough for
+  normal OAuth, Dynamic Client Registration, token, counter, and
+  web-session form payloads, and low enough that one request cannot
+  force the service to buffer unbounded input. This applies at
+  minimum to Dynamic Client Registration, the OAuth token endpoint,
+  web-session-authenticated revoke actions, and any future endpoint
+  that parses JSON or form data.
+
+- R-8IPO-FZ7T: every documented HTTP endpoint accepts only the HTTP
+  method or methods named for that endpoint. A request to a
+  documented path with any other method is rejected with HTTP 405
+  Method Not Allowed, does not perform the endpoint's action, and
+  does not fall through to the index page, OAuth flow, MCP
+  transport, or any other handler. The rejection includes an
+  `Allow` header naming the accepted method or methods for that
+  path. This applies to the counter API, OAuth endpoints, metadata
+  endpoints, web-session actions, live-update streams, static
+  stylesheet, and MCP transport path.
+
+- R-7MLK-O6I5: browser-facing actions that change authenticated
+  state use POST, never GET. This applies to logout/session
+  revocation, MCP token-chain revocation from the agents block,
+  counter mutations, and any future browser action that creates,
+  revokes, mutates, or deletes server-side state. A GET request to
+  one of these action paths does not perform the action; it is
+  rejected according to the documented method-rejection behavior.
+  Navigational GETs may still render pages or start OAuth redirects,
+  but they do not terminate sessions, revoke token chains, or mutate
+  the counter.
+
+- R-X0O1-BJ2H: an HTTP request whose path does not match a
+  documented endpoint returns HTTP 404 Not Found and does not
+  perform any action. Unknown paths do not fall through to the
+  index page, OAuth endpoints, MCP transport, static stylesheet,
+  live-update streams, or counter API behavior. The root path `/`
+  remains the only path that renders the browser index page.
+
 - R-K9TD-DC0K: every R-XXXX-XXXX requirement in the spec is
   satisfied by at least one automated test that fails when the
   requirement is violated, identified per R-727Q-1PV4. A

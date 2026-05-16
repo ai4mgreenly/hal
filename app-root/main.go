@@ -4,7 +4,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	cryptorand "crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
@@ -15,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -84,9 +87,9 @@ func newMCPServer() *mcp.Server {
 	// counter is greater than zero, subtract one and return the
 	// post-decrement value. When the counter is exactly zero, return
 	// the standard MCP tool-error signal naming the cause; the counter
-	// is not modified. The bearer-token gate from R-ZQS0-HWZ8 is not
-	// yet wired (blocked on R-27SO-F63X / R-ZPE1-0DV8); registration
-	// here is intentionally unauthenticated for now.
+	// is not modified. R-285U-FWW3: the same valid HAL-issued access
+	// token accepted for counter_increment also authorizes this
+	// bearer-token-protected mutation surface.
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "counter_decrement",
 		Description: "Subtract one from the shared counter and return the new value. Takes no " +
@@ -139,8 +142,21 @@ type counterDecrementOutput struct {
 }
 
 func counterDecrementTool(
-	_ context.Context, _ *mcp.CallToolRequest, _ struct{},
+	_ context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterDecrementOutput, error) {
+	// R-285U-FWW3: MCP counter_decrement uses the same bearer-token
+	// validation as counter_increment; access tokens are service-wide
+	// for counter mutations, not scoped per operation.
+	var hdr http.Header
+	if req != nil && req.Extra != nil {
+		hdr = req.Extra.Header
+	}
+	if ok, errDesc := checkMCPBearer(hdr); !ok {
+		return &mcp.CallToolResult{
+			IsError: true,
+			Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
+		}, counterDecrementOutput{}, nil
+	}
 	v, ok := theCounter.decrement()
 	if !ok {
 		return &mcp.CallToolResult{
@@ -459,6 +475,47 @@ func openCounterDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	if _, err := db.Exec(
+		`CREATE TABLE IF NOT EXISTS oauth_clients (` +
+			`client_id TEXT PRIMARY KEY, ` +
+			`redirect_uris TEXT NOT NULL, ` +
+			`client_name TEXT NOT NULL, ` +
+			`grant_types TEXT NOT NULL, ` +
+			`response_types TEXT NOT NULL, ` +
+			`auth_method TEXT NOT NULL, ` +
+			`issued_at INTEGER NOT NULL` +
+			`)`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(
+		`CREATE TABLE IF NOT EXISTS web_sessions (` +
+			`session_hash TEXT PRIMARY KEY, ` +
+			`owner_email TEXT NOT NULL, ` +
+			`issued_at INTEGER NOT NULL, ` +
+			`expires_at INTEGER NOT NULL, ` +
+			`last_seen_at INTEGER NOT NULL, ` +
+			`revoked_at INTEGER` +
+			`)`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(
+		`CREATE TABLE IF NOT EXISTS oauth_tokens (` +
+			`token_hash TEXT PRIMARY KEY, ` +
+			`kind TEXT NOT NULL, ` +
+			`owner_email TEXT NOT NULL, ` +
+			`client_id TEXT NOT NULL, ` +
+			`resource TEXT NOT NULL, ` +
+			`issued_at INTEGER NOT NULL, ` +
+			`expires_at INTEGER NOT NULL, ` +
+			`used_at INTEGER NOT NULL, ` +
+			`revoked_at INTEGER NOT NULL, ` +
+			`chain_id TEXT NOT NULL` +
+			`)`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(
 		`INSERT OR IGNORE INTO counter (id, value) VALUES (1, 0)`); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -575,6 +632,7 @@ func (googleFakeIDP) ExchangeCode(code, redirectURI string) (googleIdentity, err
 type googleRealIDP struct {
 	cfg       oauth2.Config
 	workspace string
+	jwksURL   string
 }
 
 func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleRealIDP {
@@ -586,6 +644,7 @@ func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleRea
 			Endpoint:     google.Endpoint,
 		},
 		workspace: workspaceDomain,
+		jwksURL:   "https://www." + "googleapis.com/oauth2/v3/certs",
 	}
 }
 
@@ -630,22 +689,30 @@ func (g *googleRealIDP) ExchangeCode(code, redirectURI string) (googleIdentity, 
 	if rawID == "" {
 		return googleIdentity{}, errors.New("google: token response missing id_token")
 	}
-	return parseGoogleIDTokenClaims(rawID)
+	return validateGoogleIDToken(ctx, rawID, g.cfg.ClientID, g.jwksURL)
 }
 
-// parseGoogleIDTokenClaims extracts the four claims the seam contract
-// (R-T0B2-A4E5) requires from a Google ID token. The Google federation
-// chain has already authenticated the token: it arrived over TLS from
-// Google's token endpoint in direct response to an authorization code
-// minted by Google, and the surrounding flow's state binding
-// (R-ETP6-60VA) plus the redirect-URI registration (R-1ERW-YD9G) gate
-// the upstream redemption. So the body decode here reads claims; full
-// signature verification is not required to honor the claims Google
-// just returned.
-func parseGoogleIDTokenClaims(idToken string) (googleIdentity, error) {
+// R-ZBV4-KEJ6: Google identity claims are accepted only from an ID token
+// valid for this service: Google's issuer, a matching audience, an unexpired
+// token, and an RS256 signature that verifies against Google's published JWKs.
+func validateGoogleIDToken(
+	ctx context.Context, idToken, audience, jwksURL string,
+) (googleIdentity, error) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
 		return googleIdentity{}, errors.New("google: id_token malformed")
+	}
+	header, err := decodeJWTObject(parts[0])
+	if err != nil {
+		return googleIdentity{}, fmt.Errorf("google: id_token header decode: %w", err)
+	}
+	alg, _ := header["alg"].(string)
+	if alg != "RS256" {
+		return googleIdentity{}, fmt.Errorf("google: id_token alg %q is not RS256", alg)
+	}
+	kid, _ := header["kid"].(string)
+	if kid == "" {
+		return googleIdentity{}, errors.New("google: id_token missing kid")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -656,9 +723,34 @@ func parseGoogleIDTokenClaims(idToken string) (googleIdentity, error) {
 		Email         string `json:"email"`
 		HD            string `json:"hd"`
 		EmailVerified bool   `json:"email_verified"`
+		Issuer        string `json:"iss"`
+		Audience      any    `json:"aud"`
+		ExpiresAt     int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return googleIdentity{}, fmt.Errorf("google: id_token payload parse: %w", err)
+	}
+	if c.Issuer != "https://accounts.google.com" && c.Issuer != "accounts.google.com" {
+		return googleIdentity{}, fmt.Errorf("google: id_token issuer %q is not Google", c.Issuer)
+	}
+	if !jwtAudienceMatches(c.Audience, audience) {
+		return googleIdentity{}, errors.New("google: id_token audience mismatch")
+	}
+	if c.ExpiresAt <= time.Now().Unix() {
+		return googleIdentity{}, errors.New("google: id_token expired")
+	}
+	key, err := fetchGoogleJWK(ctx, jwksURL, kid)
+	if err != nil {
+		return googleIdentity{}, err
+	}
+	signed := parts[0] + "." + parts[1]
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return googleIdentity{}, fmt.Errorf("google: id_token signature decode: %w", err)
+	}
+	sum := sha256.Sum256([]byte(signed))
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig); err != nil {
+		return googleIdentity{}, fmt.Errorf("google: id_token signature invalid: %w", err)
 	}
 	return googleIdentity{
 		Sub:           c.Sub,
@@ -666,6 +758,86 @@ func parseGoogleIDTokenClaims(idToken string) (googleIdentity, error) {
 		HostedDomain:  c.HD,
 		EmailVerified: c.EmailVerified,
 	}, nil
+}
+
+func decodeJWTObject(part string) (map[string]any, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(part)
+	if err != nil {
+		return nil, err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+func jwtAudienceMatches(aud any, want string) bool {
+	switch v := aud.(type) {
+	case string:
+		return v == want
+	case []any:
+		for _, elem := range v {
+			if s, ok := elem.(string); ok && s == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func fetchGoogleJWK(ctx context.Context, jwksURL, kid string) (*rsa.PublicKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("google: jwks request: %w", err)
+	}
+	client := http.DefaultClient
+	if ctxClient, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && ctxClient != nil {
+		client = ctxClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("google: jwks fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("google: jwks fetch status %d", resp.StatusCode)
+	}
+	var doc struct {
+		Keys []struct {
+			Kty string `json:"kty"`
+			Use string `json:"use"`
+			Alg string `json:"alg"`
+			Kid string `json:"kid"`
+			N   string `json:"n"`
+			E   string `json:"e"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("google: jwks parse: %w", err)
+	}
+	for _, k := range doc.Keys {
+		if k.Kid != kid || k.Kty != "RSA" || k.N == "" || k.E == "" {
+			continue
+		}
+		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+		if err != nil {
+			return nil, fmt.Errorf("google: jwk n decode: %w", err)
+		}
+		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
+		if err != nil {
+			return nil, fmt.Errorf("google: jwk e decode: %w", err)
+		}
+		e := new(big.Int).SetBytes(eBytes)
+		if !e.IsInt64() || e.Int64() <= 1 {
+			return nil, errors.New("google: jwk exponent invalid")
+		}
+		return &rsa.PublicKey{
+			N: new(big.Int).SetBytes(nBytes),
+			E: int(e.Int64()),
+		}, nil
+	}
+	return nil, errors.New("google: signing key not found")
 }
 
 // R-LWCN-ZBXO: authConfig is the single named configuration surface for
@@ -819,15 +991,35 @@ func requireEnv(name string) (string, error) {
 	return v, nil
 }
 
+// R-VKZD-UKVS: every handler that reads a client-supplied request body
+// wraps it with a fixed cap before parsing. One MiB is comfortably above
+// the normal JSON and form payloads this service accepts while preventing
+// an endpoint from buffering an unbounded body.
+const maxRequestBodyBytesR_VKZD_UKVS int64 = 1 << 20
+
+func limitRequestBodyR_VKZD_UKVS(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytesR_VKZD_UKVS)
+}
+
+func requestBodyTooLargeR_VKZD_UKVS(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func writeBodyTooLargeR_VKZD_UKVS(w http.ResponseWriter) {
+	http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+}
+
 // R-3UT3-IKZG / R-75E8-YGGN: the service has a single configured
 // canonical resource identifier — the external URL the MCP transport
 // endpoint is reached at, including its path component (R-7A9U-HJFF
 // pins the path as `/mcp`). This is the byte-for-byte string the
 // service publishes in its OAuth 2.0 Protected Resource Metadata
 // document, records on every issued token as the bound `resource`
-// value, and compares against on bearer-side validation. The same
-// string is used at issue time and at presentation time — neither
-// endpoint derives its own per-endpoint identifier (R-DH2I-28CK). The
+// value, uses to default omitted OAuth resource indicators
+// (R-WLUL-MZCD), and compares against on bearer-side validation. The
+// same string is used at issue time and at presentation time — neither
+// endpoint derives its own per-endpoint identifier. The
 // value is sourced from the central R-LWCN-ZBXO surface; the env var
 // `HAL_RESOURCE_IDENTIFIER` is the sole operator-facing knob
 // (R-791Y-3ROQ). The in-memory default mirrors the dev posture an
@@ -930,6 +1122,48 @@ func forwardedProtoHTTPS(r *http.Request) bool {
 		first = first[:i]
 	}
 	return strings.ToLower(strings.TrimSpace(first)) == "https"
+}
+
+type documentedMux struct {
+	routes map[string]map[string]http.Handler
+}
+
+func newDocumentedMux() *documentedMux {
+	return &documentedMux{routes: map[string]map[string]http.Handler{}}
+}
+
+func (m *documentedMux) Handle(method, path string, h http.Handler) {
+	if m.routes[path] == nil {
+		m.routes[path] = map[string]http.Handler{}
+	}
+	m.routes[path][method] = h
+}
+
+func (m *documentedMux) HandleFunc(method, path string, h func(http.ResponseWriter, *http.Request)) {
+	m.Handle(method, path, http.HandlerFunc(h))
+}
+
+func (m *documentedMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	methods, ok := m.routes[r.URL.Path]
+	if !ok {
+		// R-X0O1-BJ2H: only exact documented paths dispatch; every
+		// unknown path returns 404 here instead of falling through to the
+		// index page, API, OAuth, stream, stylesheet, or MCP handlers.
+		http.NotFound(w, r)
+		return
+	}
+	h, ok := methods[r.Method]
+	if !ok {
+		allow := make([]string, 0, len(methods))
+		for method := range methods {
+			allow = append(allow, method)
+		}
+		sort.Strings(allow)
+		w.Header().Set("Allow", strings.Join(allow, ", "))
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.ServeHTTP(w, r)
 }
 
 // R-ID5L-BSJM: every response carries `X-Content-Type-Options: nosniff`
@@ -1309,11 +1543,11 @@ func newOAuthStateValue() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// R-3JCR-C810: a registered OAuth client record. The store keeps these
-// in-memory; the single-process topology (R-MOIF-IUXZ) does not need
-// cross-instance sharing. R-25DN-9PUR makes registration open, so the
-// store may grow without bound under abuse — the bound is operator
-// concern, not a posture this service negotiates.
+// R-3JCR-C810: a registered OAuth client record. R-YRMT-B7LZ keeps the
+// records in SQLite so a registered client_id remains usable after a
+// process restart against the same database. R-25DN-9PUR makes registration
+// open, so the store may grow without bound under abuse — the bound is
+// operator concern, not a posture this service negotiates.
 type oauthClient struct {
 	redirectURIs  []string
 	clientName    string
@@ -1326,6 +1560,7 @@ type oauthClient struct {
 type oauthClientStorage struct {
 	mu sync.Mutex
 	m  map[string]*oauthClient
+	db *sql.DB
 }
 
 var oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
@@ -1333,7 +1568,26 @@ var oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
 func (s *oauthClientStorage) put(clientID string, c *oauthClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.db != nil {
+		_ = s.insertOrReplaceLocked(clientID, c)
+	}
 	s.m[clientID] = c
+}
+
+func (s *oauthClientStorage) putIfAbsent(clientID string, c *oauthClient) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.m[clientID]; exists {
+		return false
+	}
+	if s.db != nil {
+		ok, err := s.insertIfAbsentLocked(clientID, c)
+		if err != nil || !ok {
+			return false
+		}
+	}
+	s.m[clientID] = c
+	return true
 }
 
 func (s *oauthClientStorage) lookup(clientID string) *oauthClient {
@@ -1342,10 +1596,98 @@ func (s *oauthClientStorage) lookup(clientID string) *oauthClient {
 	return s.m[clientID]
 }
 
-// newOAuthClientID returns a 32-character hex string from crypto/rand —
+func (s *oauthClientStorage) attach(db *sql.DB) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := db.Query(
+		`SELECT client_id, redirect_uris, client_name, grant_types, ` +
+			`response_types, auth_method, issued_at FROM oauth_clients`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	loaded := map[string]*oauthClient{}
+	for rows.Next() {
+		var clientID, redirectJSON, grantJSON, responseJSON string
+		rec := &oauthClient{}
+		if err := rows.Scan(&clientID, &redirectJSON, &rec.clientName,
+			&grantJSON, &responseJSON, &rec.authMethod, &rec.issuedAt); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(redirectJSON), &rec.redirectURIs); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(grantJSON), &rec.grantTypes); err != nil {
+			return err
+		}
+		if err := json.Unmarshal([]byte(responseJSON), &rec.responseTypes); err != nil {
+			return err
+		}
+		loaded[clientID] = rec
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.m = loaded
+	s.db = db
+	return nil
+}
+
+func (s *oauthClientStorage) insertOrReplaceLocked(clientID string, c *oauthClient) error {
+	redirects, grants, responses, err := marshalOAuthClientLists(c)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO oauth_clients (`+
+			`client_id, redirect_uris, client_name, grant_types, `+
+			`response_types, auth_method, issued_at`+
+			`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		clientID, redirects, c.clientName, grants, responses, c.authMethod, c.issuedAt)
+	return err
+}
+
+func (s *oauthClientStorage) insertIfAbsentLocked(clientID string, c *oauthClient) (bool, error) {
+	redirects, grants, responses, err := marshalOAuthClientLists(c)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.db.Exec(
+		`INSERT OR IGNORE INTO oauth_clients (`+
+			`client_id, redirect_uris, client_name, grant_types, `+
+			`response_types, auth_method, issued_at`+
+			`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		clientID, redirects, c.clientName, grants, responses, c.authMethod, c.issuedAt)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func marshalOAuthClientLists(c *oauthClient) (string, string, string, error) {
+	redirects, err := json.Marshal(c.redirectURIs)
+	if err != nil {
+		return "", "", "", err
+	}
+	grants, err := json.Marshal(c.grantTypes)
+	if err != nil {
+		return "", "", "", err
+	}
+	responses, err := json.Marshal(c.responseTypes)
+	if err != nil {
+		return "", "", "", err
+	}
+	return string(redirects), string(grants), string(responses), nil
+}
+
+var newOAuthClientID = randomOAuthClientID
+
+// randomOAuthClientID returns a 32-character hex string from crypto/rand —
 // 128 bits of entropy, large enough that collisions are not a concern
 // and unguessable enough that the value alone is not a credential.
-func newOAuthClientID() (string, error) {
+func randomOAuthClientID() (string, error) {
 	var buf [16]byte
 	if _, err := cryptorand.Read(buf[:]); err != nil {
 		return "", err
@@ -1371,13 +1713,11 @@ type oauthAuthCode struct {
 	codeChallenge       string
 	codeChallengeMethod string
 	ownerEmail          string
-	// resource carries the canonical resource identifier (R-3UT3-IKZG)
-	// the originating MCP `/oauth/authorize` request bound. R-MUZJ-RD0L
-	// records this when the request carried a `resource` parameter (which
-	// has already passed R-4GRA-EGBY at authorize time); empty otherwise.
-	// The token-exchange path (R-42V5-GJW4) propagates this onto the
-	// access-token record so bearer-side validation can enforce the
-	// resource binding (R-DH2I-28CK).
+	// resource carries the canonical resource identifier the originating
+	// MCP `/oauth/authorize` request bound, either explicitly or through
+	// the R-WLUL-MZCD omission default. R-4GRA-EGBY has already checked
+	// any present value byte-for-byte by the time an authorization code is
+	// minted.
 	resource  string
 	expiresAt time.Time
 	consumed  bool
@@ -1423,12 +1763,13 @@ func (s *oauthAuthCodeStorage) issue(
 // issueWithResource is the R-MUZJ-RD0L variant: it additionally binds
 // the recorded MCP-authorize `resource` value onto the code so the
 // token-exchange path can propagate it onto the access-token record.
-// Empty `resource` is permitted (the originating request omitted the
-// parameter); the binding is byte-for-byte either way.
 func (s *oauthAuthCodeStorage) issueWithResource(
 	clientID, redirectURI, codeChallenge, codeChallengeMethod, ownerEmail, resource string,
 ) (string, error) {
-	if codeChallengeMethod != "S256" && codeChallengeMethod != "plain" {
+	// R-JTTZ-CG5J: HAL supports only the S256 PKCE transform. Keeping
+	// the issuance gate here ensures even direct code-minting paths cannot
+	// create a redeemable authorization code bound to `plain`.
+	if codeChallengeMethod != "S256" {
 		return "", errOAuthAuthCodePKCEMethod
 	}
 	var buf [32]byte
@@ -1451,13 +1792,10 @@ func (s *oauthAuthCodeStorage) issueWithResource(
 }
 
 // pkceVerifierMatches reports whether the presented verifier satisfies
-// the bound challenge under the bound method, per RFC 7636 §4.6:
-//   - plain:  challenge == verifier
-//   - S256:   challenge == base64url(SHA-256(verifier)) without padding
+// the bound challenge under the only supported method (R-JTTZ-CG5J):
+// S256 is base64url(SHA-256(verifier)) without padding.
 func pkceVerifierMatches(method, challenge, verifier string) bool {
 	switch method {
-	case "plain":
-		return challenge == verifier
 	case "S256":
 		sum := sha256.Sum256([]byte(verifier))
 		return challenge == base64.RawURLEncoding.EncodeToString(sum[:])
@@ -1547,9 +1885,12 @@ type oauthToken struct {
 type oauthTokenStorage struct {
 	mu sync.Mutex
 	m  map[string]*oauthToken
+	db *sql.DB
 }
 
 var oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+
+const oauthRefreshTokenFormField = "refresh_token"
 
 // oauthTokenNow is the clock the token store reads for issued-at /
 // expires-at stamps. Test-only seam — production code leaves it
@@ -1559,6 +1900,82 @@ var oauthTokenNow = time.Now
 func oauthTokenHash(plaintext string) string {
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
+}
+
+func oauthTokenUnixNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
+func oauthTokenTimeFromUnixNano(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, v)
+}
+
+// attach loads HAL-issued OAuth token records from SQLite and makes all
+// subsequent token lifecycle writes durable. R-FC5T-WWC2: token records
+// survive process restarts because the hash-keyed record map is rebuilt
+// from the database before the service accepts requests.
+func (s *oauthTokenStorage) attach(db *sql.DB) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := db.Query(
+		`SELECT token_hash, kind, owner_email, client_id, resource, ` +
+			`issued_at, expires_at, used_at, revoked_at, chain_id FROM oauth_tokens`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	loaded := map[string]*oauthToken{}
+	for rows.Next() {
+		var hash string
+		var issuedAt, expiresAt, usedAt, revokedAt int64
+		rec := &oauthToken{}
+		if err := rows.Scan(&hash, &rec.kind, &rec.ownerEmail, &rec.clientID,
+			&rec.resource, &issuedAt, &expiresAt, &usedAt, &revokedAt,
+			&rec.chainID); err != nil {
+			return err
+		}
+		rec.issuedAt = oauthTokenTimeFromUnixNano(issuedAt)
+		rec.expiresAt = oauthTokenTimeFromUnixNano(expiresAt)
+		rec.usedAt = oauthTokenTimeFromUnixNano(usedAt)
+		rec.revokedAt = oauthTokenTimeFromUnixNano(revokedAt)
+		loaded[hash] = rec
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.m = loaded
+	s.db = db
+	return nil
+}
+
+func (s *oauthTokenStorage) persistTokenLocked(hash string, rec *oauthToken) error {
+	if s.db == nil {
+		return nil
+	}
+	return persistOAuthTokenLocked(s.db, hash, rec)
+}
+
+type oauthTokenPersister interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func persistOAuthTokenLocked(p oauthTokenPersister, hash string, rec *oauthToken) error {
+	_, err := p.Exec(
+		`INSERT OR REPLACE INTO oauth_tokens (`+
+			`token_hash, kind, owner_email, client_id, resource, `+
+			`issued_at, expires_at, used_at, revoked_at, chain_id`+
+			`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hash, rec.kind, rec.ownerEmail, rec.clientID, rec.resource,
+		oauthTokenUnixNano(rec.issuedAt), oauthTokenUnixNano(rec.expiresAt),
+		oauthTokenUnixNano(rec.usedAt), oauthTokenUnixNano(rec.revokedAt),
+		rec.chainID)
+	return err
 }
 
 // issueAccess mints an opaque access token for the given owner, client,
@@ -1577,9 +1994,8 @@ func (s *oauthTokenStorage) issueAccess(ownerEmail, clientID, resource string) (
 	}
 	plaintext := hex.EncodeToString(buf[:])
 	now := oauthTokenNow()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[oauthTokenHash(plaintext)] = &oauthToken{
+	hash := oauthTokenHash(plaintext)
+	rec := &oauthToken{
 		kind:       "access",
 		ownerEmail: ownerEmail,
 		clientID:   clientID,
@@ -1587,7 +2003,100 @@ func (s *oauthTokenStorage) issueAccess(ownerEmail, clientID, resource string) (
 		issuedAt:   now,
 		expiresAt:  now.Add(authCfg().AccessTokenTTL),
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.persistTokenLocked(hash, rec); err != nil {
+		return "", err
+	}
+	s.m[hash] = rec
 	return plaintext, nil
+}
+
+func randomOAuthTokenSecret() (string, error) {
+	var buf [32]byte
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+func randomOAuthChainID() (string, error) {
+	var buf [16]byte
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+// issueInitialTokenPairR_2HT5_50F4 mints the access and refresh token
+// returned by one authorization-code exchange into the same MCP token
+// chain. Revoking the agents-block row for that chain therefore revokes
+// the initial access token even before the refresh token has ever rotated.
+func (s *oauthTokenStorage) issueInitialTokenPairR_2HT5_50F4(
+	ownerEmail, clientID, resource string,
+) (string, string, error) {
+	accessPlain, err := randomOAuthTokenSecret()
+	if err != nil {
+		return "", "", err
+	}
+	refreshPlain, err := randomOAuthTokenSecret()
+	if err != nil {
+		return "", "", err
+	}
+	chainID, err := randomOAuthChainID()
+	if err != nil {
+		return "", "", err
+	}
+	now := oauthTokenNow()
+	accessHash := oauthTokenHash(accessPlain)
+	refreshHash := oauthTokenHash(refreshPlain)
+	accessRec := &oauthToken{
+		kind:       "access",
+		ownerEmail: ownerEmail,
+		clientID:   clientID,
+		resource:   resource,
+		issuedAt:   now,
+		expiresAt:  now.Add(authCfg().AccessTokenTTL),
+		chainID:    chainID,
+	}
+	refreshRec := &oauthToken{
+		kind:       "refresh",
+		ownerEmail: ownerEmail,
+		clientID:   clientID,
+		resource:   resource,
+		issuedAt:   now,
+		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
+		chainID:    chainID,
+	}
+
+	s.mu.Lock()
+	if s.db != nil {
+		tx, err := s.db.Begin()
+		if err != nil {
+			s.mu.Unlock()
+			return "", "", err
+		}
+		if err := persistOAuthTokenLocked(tx, accessHash, accessRec); err != nil {
+			_ = tx.Rollback()
+			s.mu.Unlock()
+			return "", "", err
+		}
+		if err := persistOAuthTokenLocked(tx, refreshHash, refreshRec); err != nil {
+			_ = tx.Rollback()
+			s.mu.Unlock()
+			return "", "", err
+		}
+		if err := tx.Commit(); err != nil {
+			s.mu.Unlock()
+			return "", "", err
+		}
+	}
+	s.m[accessHash] = accessRec
+	s.m[refreshHash] = refreshRec
+	s.mu.Unlock()
+	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
+	agentsBcast.notify(ownerEmail)
+	return accessPlain, refreshPlain, nil
 }
 
 // R-89K0-GH5G: each successful refresh-token use issues a new refresh
@@ -1604,19 +2113,17 @@ func (s *oauthTokenStorage) issueAccess(ownerEmail, clientID, resource string) (
 // chainID; rotateRefresh propagates it onto successors so the chain
 // is walkable on reuse detection.
 func (s *oauthTokenStorage) issueRefresh(ownerEmail, clientID, resource string) (string, error) {
-	var buf [32]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
+	plaintext, err := randomOAuthTokenSecret()
+	if err != nil {
 		return "", err
 	}
-	plaintext := hex.EncodeToString(buf[:])
-	var chainBuf [16]byte
-	if _, err := cryptorand.Read(chainBuf[:]); err != nil {
+	chainID, err := randomOAuthChainID()
+	if err != nil {
 		return "", err
 	}
-	chainID := hex.EncodeToString(chainBuf[:])
 	now := oauthTokenNow()
-	s.mu.Lock()
-	s.m[oauthTokenHash(plaintext)] = &oauthToken{
+	hash := oauthTokenHash(plaintext)
+	rec := &oauthToken{
 		kind:       "refresh",
 		ownerEmail: ownerEmail,
 		clientID:   clientID,
@@ -1625,6 +2132,12 @@ func (s *oauthTokenStorage) issueRefresh(ownerEmail, clientID, resource string) 
 		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
 		chainID:    chainID,
 	}
+	s.mu.Lock()
+	if err := s.persistTokenLocked(hash, rec); err != nil {
+		s.mu.Unlock()
+		return "", err
+	}
+	s.m[hash] = rec
 	s.mu.Unlock()
 	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
 	agentsBcast.notify(ownerEmail)
@@ -1640,6 +2153,10 @@ func (s *oauthTokenStorage) issueRefresh(ownerEmail, clientID, resource string) 
 // without the predecessor being marked used. Returns the new access
 // plaintext and the new refresh plaintext on success.
 func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, error) {
+	return s.rotateRefreshForClient(plaintext, "")
+}
+
+func (s *oauthTokenStorage) rotateRefreshForClient(plaintext, clientID string) (string, string, error) {
 	if plaintext == "" {
 		return "", "", errors.New("refresh token: empty")
 	}
@@ -1655,7 +2172,8 @@ func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, err
 	now := oauthTokenNow()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rec, ok := s.m[oauthTokenHash(plaintext)]
+	presentedHash := oauthTokenHash(plaintext)
+	rec, ok := s.m[presentedHash]
 	if !ok || rec.kind != "refresh" {
 		return "", "", errors.New("refresh token: unknown")
 	}
@@ -1669,9 +2187,10 @@ func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, err
 		// chain member are bounced (R-A26O-QBG9).
 		revokedOwner := ""
 		if rec.chainID != "" {
-			for _, other := range s.m {
+			for otherHash, other := range s.m {
 				if other.chainID == rec.chainID && other.revokedAt.IsZero() {
 					other.revokedAt = now
+					_ = s.persistTokenLocked(otherHash, other)
 				}
 			}
 			revokedOwner = rec.ownerEmail
@@ -1693,8 +2212,19 @@ func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, err
 	if !now.Before(rec.expiresAt) {
 		return "", "", errors.New("refresh token: expired")
 	}
+	// R-5P7B-KY5Z: the wire refresh-token grant must identify the same
+	// OAuth client that originally received this refresh token. The
+	// store-level primitive takes an optional client binding so existing
+	// direct rotation tests can exercise token lifecycle independently,
+	// while /oauth/token passes the presented client_id and rejects a
+	// mismatch before consuming the refresh.
+	if clientID != "" && rec.clientID != clientID {
+		return "", "", errors.New("refresh token: client_id mismatch")
+	}
+	newAccessHash := oauthTokenHash(newAccess)
+	newRefreshHash := oauthTokenHash(newRefresh)
 	rec.usedAt = now
-	s.m[oauthTokenHash(newAccess)] = &oauthToken{
+	newAccessRec := &oauthToken{
 		kind:       "access",
 		ownerEmail: rec.ownerEmail,
 		clientID:   rec.clientID,
@@ -1703,7 +2233,7 @@ func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, err
 		expiresAt:  now.Add(authCfg().AccessTokenTTL),
 		chainID:    rec.chainID,
 	}
-	s.m[oauthTokenHash(newRefresh)] = &oauthToken{
+	newRefreshRec := &oauthToken{
 		kind:       "refresh",
 		ownerEmail: rec.ownerEmail,
 		clientID:   rec.clientID,
@@ -1712,16 +2242,30 @@ func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, err
 		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
 		chainID:    rec.chainID,
 	}
+	if err := s.persistTokenLocked(presentedHash, rec); err != nil {
+		rec.usedAt = time.Time{}
+		return "", "", err
+	}
+	if err := s.persistTokenLocked(newAccessHash, newAccessRec); err != nil {
+		rec.usedAt = time.Time{}
+		return "", "", err
+	}
+	if err := s.persistTokenLocked(newRefreshHash, newRefreshRec); err != nil {
+		rec.usedAt = time.Time{}
+		return "", "", err
+	}
+	s.m[newAccessHash] = newAccessRec
+	s.m[newRefreshHash] = newRefreshRec
 	return newAccess, newRefresh, nil
 }
 
-// revokeChainR_0SNI_MJTT atomically marks every record sharing chainID
+// revokeChainR_D0XD_1YT0 atomically marks every record sharing chainID
 // as revoked, scoped to ownerEmail. Returns true when the chain existed
 // and belonged to ownerEmail; returns false when no record matches the
 // chainID, or when at least one record with that chainID is owned by a
 // different email — the caller surfaces both cases identically so the
 // service does not disclose whether such a chain exists.
-func (s *oauthTokenStorage) revokeChainR_0SNI_MJTT(chainID, ownerEmail string) bool {
+func (s *oauthTokenStorage) revokeChainR_D0XD_1YT0(chainID, ownerEmail string) bool {
 	if chainID == "" || ownerEmail == "" {
 		return false
 	}
@@ -1742,9 +2286,10 @@ func (s *oauthTokenStorage) revokeChainR_0SNI_MJTT(chainID, ownerEmail string) b
 		s.mu.Unlock()
 		return false
 	}
-	for _, rec := range s.m {
+	for hash, rec := range s.m {
 		if rec.chainID == chainID && rec.revokedAt.IsZero() {
 			rec.revokedAt = now
+			_ = s.persistTokenLocked(hash, rec)
 		}
 	}
 	s.mu.Unlock()
@@ -1758,8 +2303,8 @@ func (s *oauthTokenStorage) revokeChainR_0SNI_MJTT(chainID, ownerEmail string) b
 // applied at collection time (at least one un-revoked, un-expired
 // refresh record under the chainID); rows here are the per-chain
 // roll-up used for rendering. Chain initial issuance is the earliest
-// refresh record's issuedAt — chain ordering (R-0RFM-8S34) anchors on
-// it, and rotateRefresh does not advance it.
+// refresh record's issuedAt; refresh rotation does not change the rendered
+// row identity used for ordering.
 type agentChainR_0NRX_3GV1 struct {
 	chainID    string
 	clientID   string
@@ -1771,8 +2316,8 @@ type agentChainR_0NRX_3GV1 struct {
 // groups un-revoked un-expired refresh records owned by `email` by
 // chainID, and returns one entry per chain. Client name is resolved
 // from oauthClientStore after the token-store lock is released to
-// keep the two stores' critical sections independent. Order is not
-// pinned here; R-0RFM-8S34 sorts at the render seam.
+// keep the two stores' critical sections independent. Order is not pinned
+// here; the render and stream seams sort by rendered row identity.
 func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(email string) []agentChainR_0NRX_3GV1 {
 	if email == "" {
 		return nil
@@ -1829,6 +2374,41 @@ func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(email string) []agentChai
 		out = append(out, row)
 	}
 	return out
+}
+
+func agentChainRenderedNameR_VWEX_WYWJ(ch agentChainR_0NRX_3GV1) string {
+	if ch.clientName == "" {
+		return "undefined"
+	}
+	return ch.clientName
+}
+
+func agentChainRenderedIDPrefixR_VWEX_WYWJ(ch agentChainR_0NRX_3GV1) string {
+	prefix := ch.clientID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	return prefix
+}
+
+func sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains []agentChainR_0NRX_3GV1) {
+	// R-VWEX-WYWJ: agent rows below the signed-in web-session row sort for
+	// scanning by rendered identity, case-insensitive, with the rendered
+	// first-8 client_id prefix as the tie-breaker. Refresh rotations leave
+	// both values unchanged, so they cannot move a row.
+	sort.SliceStable(chains, func(i, j int) bool {
+		leftName := strings.ToLower(agentChainRenderedNameR_VWEX_WYWJ(chains[i]))
+		rightName := strings.ToLower(agentChainRenderedNameR_VWEX_WYWJ(chains[j]))
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		leftPrefix := agentChainRenderedIDPrefixR_VWEX_WYWJ(chains[i])
+		rightPrefix := agentChainRenderedIDPrefixR_VWEX_WYWJ(chains[j])
+		if leftPrefix != rightPrefix {
+			return leftPrefix < rightPrefix
+		}
+		return chains[i].chainID < chains[j].chainID
+	})
 }
 
 // lookupAccess returns the access-token record for the presented
@@ -1895,6 +2475,7 @@ type webSession struct {
 type webSessionStorage struct {
 	mu sync.Mutex
 	m  map[string]*webSession
+	db *sql.DB
 }
 
 var webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
@@ -1927,15 +2508,25 @@ func (s *webSessionStorage) issue(ownerEmail string) (string, error) {
 		return "", err
 	}
 	plaintext := hex.EncodeToString(buf[:])
+	hash := webSessionHash(plaintext)
 	now := webSessionNow()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[webSessionHash(plaintext)] = &webSession{
+	rec := &webSession{
 		ownerEmail: ownerEmail,
 		issuedAt:   now,
 		expiresAt:  now.Add(authCfg().WebSessionAbsoluteTTL),
 		lastSeenAt: now,
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		if err := s.upsertLocked(hash, rec); err != nil {
+			return "", err
+		}
+	}
+	if s.m == nil {
+		s.m = map[string]*webSession{}
+	}
+	s.m[hash] = rec
 	return plaintext, nil
 }
 
@@ -1965,13 +2556,18 @@ func (s *webSessionStorage) lookup(plaintext string) *webSession {
 		return nil
 	}
 	rec.lastSeenAt = now
+	if s.db != nil {
+		_, _ = s.db.Exec(
+			`UPDATE web_sessions SET last_seen_at = ? WHERE session_hash = ?`,
+			rec.lastSeenAt.UnixNano(), webSessionHash(plaintext))
+	}
 	return rec
 }
 
 // revoke marks the session matching plaintext as revoked. A missing or
 // already-revoked entry is a no-op — logout is idempotent and tolerates
-// a presented cookie that no longer maps to a live record (R-AE1P-Z1WC).
-// R-93PJ-FRPY: this writes only to the web-session store; it never reads
+// a presented cookie that no longer maps to a live record (R-FZ10-BE37).
+// R-0XJ4-5MSL: this writes only to the web-session store; it never reads
 // or writes any MCP token chain store.
 func (s *webSessionStorage) revoke(plaintext string) {
 	if plaintext == "" {
@@ -1985,7 +2581,70 @@ func (s *webSessionStorage) revoke(plaintext string) {
 	}
 	if rec.revokedAt.IsZero() {
 		rec.revokedAt = webSessionNow()
+		if s.db != nil {
+			_, _ = s.db.Exec(
+				`UPDATE web_sessions SET revoked_at = ? WHERE session_hash = ?`,
+				rec.revokedAt.UnixNano(), webSessionHash(plaintext))
+		}
 	}
+}
+
+// R-8CBQ-IKKA: web-session records are loaded from and written through to
+// SQLite so a valid hal_session cookie remains known across process
+// restarts against the same database. The plaintext cookie value is never
+// stored; the table is keyed by the same SHA-256 hash lookup uses.
+func (s *webSessionStorage) attach(db *sql.DB) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := db.Query(
+		`SELECT session_hash, owner_email, issued_at, expires_at, ` +
+			`last_seen_at, revoked_at FROM web_sessions`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	loaded := map[string]*webSession{}
+	for rows.Next() {
+		var hash, owner string
+		var issued, expires, lastSeen int64
+		var revoked sql.NullInt64
+		if err := rows.Scan(&hash, &owner, &issued, &expires,
+			&lastSeen, &revoked); err != nil {
+			return err
+		}
+		rec := &webSession{
+			ownerEmail: owner,
+			issuedAt:   time.Unix(0, issued),
+			expiresAt:  time.Unix(0, expires),
+			lastSeenAt: time.Unix(0, lastSeen),
+		}
+		if revoked.Valid {
+			rec.revokedAt = time.Unix(0, revoked.Int64)
+		}
+		loaded[hash] = rec
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.m = loaded
+	s.db = db
+	return nil
+}
+
+func (s *webSessionStorage) upsertLocked(hash string, rec *webSession) error {
+	var revoked any
+	if !rec.revokedAt.IsZero() {
+		revoked = rec.revokedAt.UnixNano()
+	}
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO web_sessions (`+
+			`session_hash, owner_email, issued_at, expires_at, `+
+			`last_seen_at, revoked_at`+
+			`) VALUES (?, ?, ?, ?, ?, ?)`,
+		hash, rec.ownerEmail, rec.issuedAt.UnixNano(),
+		rec.expiresAt.UnixNano(), rec.lastSeenAt.UnixNano(), revoked)
+	return err
 }
 
 // configuredGoogleIDPSingleton holds the Google identity provider bound
@@ -1993,6 +2652,10 @@ func (s *webSessionStorage) revoke(plaintext string) {
 // configuredGoogleIDP short-circuits to the fake under testing.Testing()
 // per R-VF61-2Y6I.
 var configuredGoogleIDPSingleton googleIDP
+
+// testHookGoogleIDP, when non-nil under testing, overrides the fake
+// provider so callback tests can drive identity-claim rejection branches.
+var testHookGoogleIDP googleIDP
 
 // configuredGoogleIDP returns the Google identity provider wired for the
 // current process. R-VF61-2Y6I pins the test-environment choice to the
@@ -2003,6 +2666,9 @@ var configuredGoogleIDPSingleton googleIDP
 // (R-LWCN-ZBXO / R-68WP-XVCK).
 func configuredGoogleIDP() googleIDP {
 	if testing.Testing() {
+		if testHookGoogleIDP != nil {
+			return testHookGoogleIDP
+		}
 		return googleFakeIDP{}
 	}
 	return configuredGoogleIDPSingleton
@@ -2090,6 +2756,21 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 			return 1
 		}
+		if err := oauthClientStore.attach(db); err != nil {
+			_ = db.Close()
+			fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
+			return 1
+		}
+		if err := webSessionStore.attach(db); err != nil {
+			_ = db.Close()
+			fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
+			return 1
+		}
+		if err := oauthTokenStore.attach(db); err != nil {
+			_ = db.Close()
+			fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
+			return 1
+		}
 		// R-W3K0-QD0E / R-LWCN-ZBXO: bind the real Google identity
 		// provider once at startup, sourcing client credentials from
 		// the environment via requireEnv. Missing or empty values
@@ -2162,35 +2843,41 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		onListenerReady(ln.Addr())
 	}
 	fmt.Fprintf(stdout, "hal serve listening on %s\n", ln.Addr())
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", handleIndex)
-	mux.HandleFunc("GET /design.css", handleDesignCSS)
-	mux.HandleFunc("GET /login", handleLogin)
-	mux.HandleFunc("GET /logout", handleLogout)
-	mux.HandleFunc("POST /logout", handleLogout)
-	mux.HandleFunc("POST /agents/revoke", handleAgentsRevoke)
-	mux.HandleFunc("GET /agents/stream", handleAgentsStream)
-	mux.HandleFunc("GET /oauth/google/callback", handleGoogleCallback)
+	// R-8IPO-FZ7T: every documented endpoint is registered with the
+	// exact HTTP method or methods it accepts. A path hit with any other
+	// method returns 405 plus Allow here, before any endpoint handler can
+	// fall through to another surface or perform its action.
+	mux := newDocumentedMux()
+	mux.HandleFunc(http.MethodGet, "/", handleIndex)
+	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
+	mux.HandleFunc(http.MethodGet, "/login", handleLogin)
+	// R-7MLK-O6I5: logout changes authenticated browser state, so it is
+	// exposed only as POST. A GET /logout is rejected by ServeMux's
+	// method-aware routing and never reaches handleLogout.
+	mux.HandleFunc(http.MethodPost, "/logout", handleLogout)
+	mux.HandleFunc(http.MethodPost, "/agents/revoke", handleAgentsRevoke)
+	mux.HandleFunc(http.MethodGet, "/agents/stream", handleAgentsStream)
+	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", handleGoogleCallback)
 	// R-1KML-5J0Q: every OAuth 2.1 authorization endpoint the service
 	// exposes is mounted on the same http.ServeMux that serves the
 	// rest of the application, so every endpoint shares a single
 	// listener address — the one origin clients are configured with.
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server",
+	mux.HandleFunc(http.MethodGet, "/.well-known/oauth-authorization-server",
 		handleOAuthAuthorizationServerMetadata)
 	// R-7BHQ-VB64: the protected-resource metadata document for the MCP
 	// transport lives at `/.well-known/oauth-protected-resource/mcp` —
 	// the path component mirrors the transport path so the URL that
 	// `WWW-Authenticate: ... resource_metadata=...` points at is the
 	// one MCP clients discover per RFC 9728 §5.1.
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp",
+	mux.HandleFunc(http.MethodGet, "/.well-known/oauth-protected-resource/mcp",
 		handleOAuthProtectedResourceMetadata)
-	mux.HandleFunc("POST /oauth/register", handleOAuthRegister)
-	mux.HandleFunc("GET /oauth/authorize", handleOAuthAuthorize)
-	mux.HandleFunc("POST /oauth/token", handleOAuthToken)
-	mux.HandleFunc("GET /counter", handleCounterRead)
-	mux.HandleFunc("GET /counter/stream", handleCounterStream)
-	mux.HandleFunc("POST /counter/increment", handleCounterIncrement)
-	mux.HandleFunc("POST /counter/decrement", handleCounterDecrement)
+	mux.HandleFunc(http.MethodPost, "/oauth/register", handleOAuthRegister)
+	mux.HandleFunc(http.MethodGet, "/oauth/authorize", handleOAuthAuthorize)
+	mux.HandleFunc(http.MethodPost, "/oauth/token", handleOAuthToken)
+	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
+	mux.HandleFunc(http.MethodGet, "/counter/stream", handleCounterStream)
+	mux.HandleFunc(http.MethodPost, "/counter/increment", handleCounterIncrement)
+	mux.HandleFunc(http.MethodPost, "/counter/decrement", handleCounterDecrement)
 	// R-UK7D-Z0IZ: the MCP server speaks the Streamable HTTP transport
 	// defined in the current Model Context Protocol specification. The
 	// SDK-provided handler owns JSON-RPC framing, session management,
@@ -2210,10 +2897,13 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	// runtime, and the operator cannot configure a different path
 	// through environment or flags — there is no env var, no flag, and
 	// no code path that mounts the MCP transport at any other location.
-	mux.Handle("/mcp", mcpPromptSignal(mcp.NewStreamableHTTPHandler(
+	mcpHandler := mcpPromptSignal(mcp.NewStreamableHTTPHandler(
 		func(r *http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{JSONResponse: true},
-	)))
+	))
+	mux.Handle(http.MethodGet, "/mcp", mcpHandler)
+	mux.Handle(http.MethodPost, "/mcp", mcpHandler)
+	mux.Handle(http.MethodDelete, "/mcp", mcpHandler)
 	srv := &http.Server{Handler: accessLog(stdout, securityHeaders(mux))}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ln) }()
@@ -2277,7 +2967,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	var bannerAuth, counterDisabled string
 	if session != nil {
 		bannerAuth = `<div class="banner-auth">` +
+			// R-TEP7-Q6UT: the Google email is externally sourced
+			// identity text, so it is escaped before interpolation.
 			`<span class="auth-email">` + htmlEscape(session.ownerEmail) + `</span>` +
+			// R-A2L2-1NA1: Sign out is a real form POST, not a JS-only
+			// click handler or href, so it works when scripts are absent.
 			`<form method="post" action="/logout" class="auth-form">` +
 			`<button class="auth-btn" type="submit">Sign out</button>` +
 			`</form>` +
@@ -2288,52 +2982,42 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			`</div>`
 		counterDisabled = " disabled"
 	}
-	// R-0NRX-3GV1: when the signed-in visitor owns one or more live MCP
+	// R-VTZ5-5FF5: when the signed-in visitor owns one or more live MCP
 	// token chains, the index page renders an agents block inside the
 	// banner card, immediately below the auth row. A "live" chain is
 	// one with at least one un-revoked, un-expired refresh token; the
 	// store-side helper filters by owner email so a chain owned by any
 	// other email cannot surface here regardless of how the underlying
-	// records are stored. The block is omitted entirely for signed-out
-	// visitors and for signed-in visitors whose live-chain count is
-	// zero — the banner card then collapses to its auth row as its
-	// bottom edge, with no foreign content below it.
+	// records are stored. R-TS71-XRW4: the block is omitted entirely for
+	// signed-out visitors and for signed-in visitors whose live-chain
+	// count is zero, so the banner card collapses to its compact auth
+	// row instead of reserving vertical space for absent agent rows.
 	var agentsBlock string
 	if session != nil {
 		chains := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(session.ownerEmail)
-		// R-0RFM-8S34: order rows by chain initial issuance, most recent
-		// first. The helper preserves the chain's earliest refresh issuance
-		// as its issuedAt; refresh rotations within a chain do not bubble
-		// it up, so freshly-refreshed chains stay anchored in place.
-		sort.Slice(chains, func(i, j int) bool {
-			return chains[i].issuedAt.After(chains[j].issuedAt)
-		})
+		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		if len(chains) > 0 {
 			var b strings.Builder
 			b.WriteString(`<div class="agents-block" aria-label="Authenticated MCP agents">`)
 			for _, ch := range chains {
-				// R-0OZT-H8LQ: per-row content is exactly three visible
-				// elements left to right — client_name (literal `undefined`
-				// when the DCR client supplied none), client_id truncated
-				// to its first 8 chars as a bare prefix (no ellipsis), and
-				// a Revoke button. The button form-submits to
-				// R-0SNI-MJTT's chain-revoke endpoint scoped to this row.
-				name := ch.clientName
-				if name == "" {
-					name = "undefined"
-				}
-				idPrefix := ch.clientID
-				if len(idPrefix) > 8 {
-					idPrefix = idPrefix[:8]
-				}
+				// R-VV71-J75U: per-row content is exactly two visible
+				// elements left to right — one inert identity label
+				// combining client_name (literal `undefined` when the DCR
+				// client supplied none) with the parenthesised client_id
+				// 8-char prefix, and a Revoke pill. The button form-submits
+				// to R-D0XD-1YT0's chain-revoke endpoint scoped to this row.
+				name := agentChainRenderedNameR_VWEX_WYWJ(ch)
+				idPrefix := agentChainRenderedIDPrefixR_VWEX_WYWJ(ch)
 				b.WriteString(`<div class="agent-row" data-chain-id="`)
 				b.WriteString(htmlEscape(ch.chainID))
-				// R-2JZ9-NZ82: identity label is inert text with client_name
+				// R-VV71-J75U: identity label is inert text with client_name
 				// followed by parenthesised 8-char client_id prefix; Revoke
 				// button carries class="auth-btn" for matching pill chrome.
 				b.WriteString(`"><span class="agent-name">`)
+				// R-10ZV-8OFH: DCR client metadata is untrusted; render
+				// client_name as escaped inert text inside the agent row.
 				b.WriteString(htmlEscape(name))
-				b.WriteString(`</span><span class="agent-id">(`)
+				b.WriteString(` (`)
 				b.WriteString(htmlEscape(idPrefix))
 				b.WriteString(`)</span><form method="post" action="/agents/revoke">`)
 				b.WriteString(`<input type="hidden" name="chain_id" value="`)
@@ -2343,6 +3027,15 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			b.WriteString(`</div>`)
 			agentsBlock = b.String()
 		}
+	}
+	// R-6KK2-AAY0 / R-3RL1-IUP6: when live agent rows exist, they live
+	// inside the same bottom-right auth grid as the visitor row, not in a
+	// separate banner sibling. This lets the email label and every agent
+	// label share one right-aligned label column, while Sign out and all
+	// Revoke buttons share one action column.
+	if session != nil && agentsBlock != "" {
+		bannerAuth = strings.TrimSuffix(bannerAuth, `</div>`) + agentsBlock + `</div>`
+		agentsBlock = ""
 	}
 	// R-BZQY-DN3B: the index page displays MCP client configuration
 	// for two clients (Claude Code and Claude Desktop), each with its
@@ -2515,6 +3208,33 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			// the class for that rule to actually apply in the rendered
 			// output. Without it the tokens are declared but the centered
 			// container is not realized.
+			// R-6KK2-AAY0 / R-2ZZH-LJYA / R-O87H-RSH4 / R-CNWX-9VB2 /
+			// R-6QIE-4D71:
+			// the agents block is an application-specific extension to
+			// the canonical banner. Keep reqs/design.css byte-identical,
+			// and layer these small layout rules inline so the signed-in
+			// email row plus every agent row share one lower-right
+			// label/action stack that remains in the banner's normal
+			// flow. The flow placement and compact lower padding are
+			// conditional on an actual .agents-block descendant, so
+			// signed-out and zero-agent pages keep design.css's compact
+			// absolutely-positioned .banner-auth treatment.
+			`<style>`+
+			`.banner:has(.agents-block){display:flex;flex-direction:column;align-items:center;padding-bottom:18px}`+
+			`.banner:has(.agents-block) .banner-auth{display:grid;`+
+			`grid-template-columns:max-content max-content;`+
+			`align-items:center;justify-items:end;gap:8px 14px;text-align:right;`+
+			`position:static;align-self:flex-end;margin-top:28px}`+
+			`.banner:has(.agents-block) .banner-auth>.auth-email,`+
+			`.banner:has(.agents-block) .banner-auth .agent-name{grid-column:1;`+
+			`color:var(--ink-mute);font-size:13px}`+
+			`.banner:has(.agents-block) .banner-auth>.auth-form,`+
+			`.banner:has(.agents-block) .banner-auth .agent-row form{grid-column:2;`+
+			`margin:0;justify-self:start}`+
+			`.banner:has(.agents-block) .banner-auth>.auth-btn{`+
+			`grid-column:2;justify-self:start;text-decoration:none}`+
+			`.agents-block,.agent-row{display:contents}`+
+			`</style>`+
 			`</head><body><main class="page">`+
 			// R-UAQQ-NU7B: `.title` and `.subtitle` are reserved
 			// page-scope class names. They appear ONLY on the
@@ -2647,6 +3367,57 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			`}`+
 			`});`+
 			`});`+
+			`})();`+
+			// R-KSI8-M0JX: a signed-in page that initially rendered with
+			// zero live MCP chains has no `.agents-block` in the HTML, so
+			// the agents SSE client must be able to create the block on the
+			// first non-empty snapshot. Subsequent snapshots replace the
+			// rows atomically and remove the block again when the live set
+			// becomes empty.
+			`(function(){`+
+			`var auth=document.querySelector('.banner-auth');`+
+			`if(!auth||!auth.querySelector('.auth-email'))return;`+
+			`function row(chain){`+
+			`var r=document.createElement('div');`+
+			`r.className='agent-row';`+
+			`r.setAttribute('data-chain-id',chain.chain_id||'');`+
+			`var name=document.createElement('span');`+
+			`name.className='agent-name';`+
+			`name.textContent=(chain.client_name||'undefined')+' ('+String(chain.client_id||'').slice(0,8)+')';`+
+			`var form=document.createElement('form');`+
+			`form.method='post';form.action='/agents/revoke';`+
+			`var input=document.createElement('input');`+
+			`input.type='hidden';input.name='chain_id';`+
+			`input.value=chain.chain_id||'';`+
+			`var btn=document.createElement('button');`+
+			`btn.className='auth-btn';btn.type='submit';`+
+			`btn.textContent='Revoke';`+
+			`form.appendChild(input);form.appendChild(btn);`+
+			`r.appendChild(name);r.appendChild(form);`+
+			`return r;`+
+			`}`+
+			`function render(chains){`+
+			`var block=document.querySelector('.agents-block');`+
+			`if(!chains||chains.length===0){`+
+			`if(block&&block.parentNode)block.parentNode.removeChild(block);`+
+			`return;`+
+			`}`+
+			`if(!block){`+
+			`block=document.createElement('div');`+
+			`block.className='agents-block';`+
+			`block.setAttribute('aria-label','Authenticated MCP agents');`+
+			`auth.appendChild(block);`+
+			`}`+
+			`block.textContent='';`+
+			`chains.forEach(function(chain){block.appendChild(row(chain));});`+
+			`}`+
+			`try{`+
+			`var es=new EventSource('/agents/stream');`+
+			`es.onmessage=function(e){`+
+			`try{var chains=JSON.parse(e.data);`+
+			`if(Array.isArray(chains))render(chains);}catch(_){}`+
+			`};`+
+			`}catch(_){}`+
 			`})();`+
 			// R-FY4A-3B1M: wire the signed-in visitor's +/- clicks to the
 			// real mutation endpoints, and subscribe every browser (signed
@@ -2845,6 +3616,23 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "google code exchange failed", http.StatusBadGateway)
 		return
 	}
+	if !identity.EmailVerified {
+		// R-EMW1-D8A0: Google-federated identities are accepted only
+		// when Google asserts a verified email address. This gate runs
+		// before origin dispatch, so neither web-origin nor mcp-origin
+		// callbacks mint a web session, HAL authorization code, or token
+		// chain from an unverified email claim.
+		if stateRec.origin == "mcp" && stateRec.mcp != nil {
+			writeOAuthErrorRedirect(w, r, stateRec.mcp.redirectURI,
+				"access_denied",
+				"Google email address is not verified",
+				stateRec.mcp.clientState)
+			return
+		}
+		http.Error(w, "Google email address is not verified",
+			http.StatusForbidden)
+		return
+	}
 	if identity.HostedDomain != googleWorkspaceDomain() {
 		// R-MUZJ-RD0L: workspace-domain rejection surface depends on the
 		// origin discriminator. Web-origin gets an in-browser error page;
@@ -2948,16 +3736,21 @@ func writeOAuthErrorRedirect(
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
-// R-AE1P-Z1WC: /logout ends the current web session and returns the
+// R-FZ10-BE37: /logout ends the current web session and returns the
 // user-agent to / via redirect. From a user-agent with no active web
 // session it is a no-op redirect to /, not an error. When a hal_session
 // cookie is presented, the matching record is revoked in the web-session
-// store and the cookie is cleared on the response. R-93PJ-FRPY /
-// R-0XJ4-5MSL: this touches only the web-session store; no MCP token
-// chain is read or written here, so revoking a web session has no
-// effect on any MCP token chain owned by the same email.
+// store and the cookie is cleared on the response. R-0XJ4-5MSL: this
+// touches only the web-session store; no MCP token chain is read or
+// written here, so revoking a web session has no effect on any MCP token
+// chain owned by the same email.
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
+		if sess := webSessionStore.lookup(c.Value); sess != nil &&
+			!sameOriginBrowserMutationR_R4RG_O4Y9(r) {
+			writeSameOriginForbiddenR_R4RG_O4Y9(w)
+			return
+		}
 		webSessionStore.revoke(c.Value)
 		http.SetCookie(w, &http.Cookie{
 			Name:     webSessionCookieName,
@@ -2972,7 +3765,7 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// R-0SNI-MJTT: POST /agents/revoke applies the chain-wide revocation
+// R-D0XD-1YT0: POST /agents/revoke applies the chain-wide revocation
 // R-9HGE-87UG / R-A26O-QBG9 define, scoped to the chain named by the
 // `chain_id` form field. The action is authorized exclusively by the
 // visitor's web-session cookie; an unauthenticated request is rejected
@@ -2992,12 +3785,21 @@ func handleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
 			"web session required")
 		return
 	}
+	if !sameOriginBrowserMutationR_R4RG_O4Y9(r) {
+		writeSameOriginForbiddenR_R4RG_O4Y9(w)
+		return
+	}
+	limitRequestBodyR_VKZD_UKVS(w, r)
 	if err := r.ParseForm(); err != nil {
+		if requestBodyTooLargeR_VKZD_UKVS(err) {
+			writeBodyTooLargeR_VKZD_UKVS(w)
+			return
+		}
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	chainID := r.PostForm.Get("chain_id")
-	if !oauthTokenStore.revokeChainR_0SNI_MJTT(chainID, session.ownerEmail) {
+	if !oauthTokenStore.revokeChainR_D0XD_1YT0(chainID, session.ownerEmail) {
 		http.Error(w, "chain not found", http.StatusNotFound)
 		return
 	}
@@ -3107,7 +3909,7 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 // reconnected — browser displays the authoritative list without
 // waiting for the next change), and every subsequent change to the
 // owner's live set (issueRefresh, rotateRefresh reuse-detection,
-// manual revoke per R-0SNI-MJTT) is reflected on the wire as another
+// manual revoke per R-D0XD-1YT0) is reflected on the wire as another
 // `data:` event within the 1000ms budget the requirement names.
 //
 // The channel is auth-gated by the web-session cookie per
@@ -3170,11 +3972,7 @@ func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
 	}
 	writeSnapshot := func() error {
 		chains := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(email)
-		// R-0RFM-8S34: most-recent chain initial issuance first, mirroring
-		// the index render seam.
-		sort.SliceStable(chains, func(i, j int) bool {
-			return chains[i].issuedAt.After(chains[j].issuedAt)
-		})
+		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		type item struct {
 			ChainID    string `json:"chain_id"`
 			ClientID   string `json:"client_id"`
@@ -3306,7 +4104,7 @@ func handleOAuthAuthorizationServerMetadata(w http.ResponseWriter,
 		ResponseTypesSupported:            []string{"code"},
 		GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
 		CodeChallengeMethodsSupported:     []string{"S256"},
-		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_basic", "client_secret_post"},
+		TokenEndpointAuthMethodsSupported: []string{"none"},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(doc)
@@ -3347,6 +4145,7 @@ func handleOAuthProtectedResourceMetadata(w http.ResponseWriter,
 // what the authorize endpoint (R-4SH1-HQGP) will exact-match against
 // per R-1ERW-YD9G.
 func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	limitRequestBodyR_VKZD_UKVS(w, r)
 	var req struct {
 		RedirectURIs            []string `json:"redirect_uris"`
 		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
@@ -3357,39 +4156,85 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
+		if requestBodyTooLargeR_VKZD_UKVS(err) {
+			writeBodyTooLargeR_VKZD_UKVS(w)
+			return
+		}
 		writeOAuthError(w, http.StatusBadRequest,
 			"invalid_client_metadata", "request body is not valid JSON")
 		return
 	}
 	if len(req.RedirectURIs) == 0 {
+		// R-8OBG-7FST: DCR requires at least one redirect URI that passes
+		// the R-9OWM-O8XJ validation below; absent or empty lists cannot
+		// produce a usable authorization-time exact match.
 		writeOAuthError(w, http.StatusBadRequest,
 			"invalid_redirect_uri",
 			"redirect_uris is required and must be a non-empty array")
 		return
 	}
 	for _, u := range req.RedirectURIs {
-		parsed, err := url.Parse(u)
-		if err != nil || !parsed.IsAbs() {
+		if !validOAuthRedirectURI(u) {
 			writeOAuthError(w, http.StatusBadRequest,
 				"invalid_redirect_uri",
-				"each redirect_uris entry must be an absolute URI")
+				"each redirect_uris entry must be an absolute http or https URI with a host and no fragment")
 			return
 		}
 	}
-	clientID, err := newOAuthClientID()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	authMethod := req.TokenEndpointAuthMethod
+	if authMethod == "" {
+		authMethod = "none"
+	}
+	if authMethod != "none" {
+		// R-KCBH-CXY9: MCP clients are public PKCE clients. Dynamic
+		// Client Registration therefore accepts omitted/none auth and
+		// rejects any client-secret-based or otherwise unsupported token
+		// endpoint authentication method before a client_id is issued.
+		writeOAuthError(w, http.StatusBadRequest,
+			"invalid_client_metadata",
+			"token_endpoint_auth_method must be none")
+		return
+	}
+	clientName, ok := normalizeOAuthClientName(req.ClientName)
+	if !ok {
+		// R-JE3Z-IGI4: DCR client_name is optional display text only.
+		// Reject overlong or ASCII-control-containing names before a
+		// client_id is issued; empty/whitespace-only input is normalized
+		// to unset below.
+		writeOAuthError(w, http.StatusBadRequest,
+			"invalid_client_metadata",
+			"client_name must be at most 80 characters and contain no control characters")
 		return
 	}
 	rec := &oauthClient{
 		redirectURIs:  append([]string(nil), req.RedirectURIs...),
-		clientName:    req.ClientName,
+		clientName:    clientName,
 		grantTypes:    append([]string(nil), req.GrantTypes...),
 		responseTypes: append([]string(nil), req.ResponseTypes...),
-		authMethod:    req.TokenEndpointAuthMethod,
+		authMethod:    authMethod,
 		issuedAt:      time.Now().Unix(),
 	}
-	oauthClientStore.put(clientID, rec)
+	// R-19BA-4XX4: generated client_id values are unique among persisted
+	// registrations. A collision never overwrites the existing record; the
+	// handler retries a bounded number of times and only stores when the ID
+	// was absent at the same lock boundary used for the write.
+	var clientID string
+	for range 8 {
+		var err error
+		clientID, err = newOAuthClientID()
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if oauthClientStore.putIfAbsent(clientID, rec) {
+			break
+		}
+		clientID = ""
+	}
+	if clientID == "" {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	resp := struct {
 		ClientID                string   `json:"client_id"`
 		ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
@@ -3412,6 +4257,46 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func normalizeOAuthClientName(raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", true
+	}
+	count := 0
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", false
+		}
+		count++
+		if count > 80 {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+func validOAuthRedirectURI(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	// R-9OWM-O8XJ: DCR accepts only absolute http/https redirect URIs
+	// with a non-empty host and no fragment. Loopback HTTP clients are
+	// covered by the same http allowance; malformed, relative,
+	// fragment-bearing, hostless, or non-http(s) values are rejected.
+	if !parsed.IsAbs() || parsed.Host == "" || parsed.Fragment != "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}
+
+func supportedAuthorizeCodeChallengeMethod(method string) bool {
+	// R-JTTZ-CG5J: the authorize endpoint accepts only explicit S256.
+	// Omitted, empty, plain, or any other method is rejected before Google
+	// redirect or HAL state creation.
+	return method == "S256"
+}
+
 // R-4SH1-HQGP: GET /oauth/authorize hands the user-agent off to Google
 // so Google performs the actual login — the service itself never
 // collects credentials.
@@ -3431,9 +4316,8 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 // asymmetric counterpart and passes forceLogin=true to the same seam
 // operation.
 //
-// Adjacent constraints land in their own iterations: PKCE / client_id /
-// redirect_uri binding on the issued code (R-ZPE1-0DV8) and the
-// `resource` indicator check (R-4GRA-EGBY).
+// Adjacent constraints land in their own iterations: client_id /
+// redirect_uri binding on the issued code (R-ZPE1-0DV8).
 func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	idp := configuredGoogleIDP()
 	if idp == nil {
@@ -3469,14 +4353,30 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 			http.StatusBadRequest)
 		return
 	}
-	// R-4GRA-EGBY: if the request carries a `resource` parameter it
-	// must be byte-equal to the canonical resource identifier this
-	// service is configured with; otherwise refuse with RFC 8707
-	// `invalid_target` before issuing any code. The user-agent is NOT
-	// redirected anywhere using the offending value — that would
-	// launder the mismatch into a token-binding failure at
-	// presentation time instead of surfacing it here.
-	if res := q.Get("resource"); res != "" && res != canonicalResourceIdentifier() {
+	// R-BAXT-SBU9: /oauth/authorize accepts only Authorization Code
+	// requests carrying a non-empty PKCE challenge and a supported
+	// challenge method. Bad flow shape is refused here, before any
+	// redirect to Google or state record creation.
+	if q.Get("response_type") != "code" {
+		http.Error(w, "response_type must be code", http.StatusBadRequest)
+		return
+	}
+	if q.Get("code_challenge") == "" {
+		http.Error(w, "code_challenge is required", http.StatusBadRequest)
+		return
+	}
+	if !supportedAuthorizeCodeChallengeMethod(q.Get("code_challenge_method")) {
+		http.Error(w, "unsupported code_challenge_method", http.StatusBadRequest)
+		return
+	}
+	// R-WLUL-MZCD: omitted resource indicators target the one canonical
+	// service resource. R-4GRA-EGBY: a present value still has to match
+	// that identifier byte-for-byte before any Google redirect or HAL
+	// authorization code can be issued.
+	requestedResource := q.Get("resource")
+	if requestedResource == "" {
+		requestedResource = canonicalResourceIdentifier()
+	} else if requestedResource != canonicalResourceIdentifier() {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_target",
 			"resource parameter does not match this service's canonical identifier")
 		return
@@ -3505,16 +4405,17 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	// byte-for-byte authorize-request context the callback
 	// (R-MUZJ-RD0L) needs to mint the HAL authorization code and
 	// build the redirect to the MCP client's registered callback URL.
-	// `requested` is already R-1ERW-YD9G-verified; the `resource`
-	// value has already passed R-4GRA-EGBY. PKCE values are recorded
-	// byte-for-byte from the request.
+	// `requested` is already R-1ERW-YD9G-verified; the resource value is
+	// canonical, either explicitly per R-4GRA-EGBY or by the
+	// R-WLUL-MZCD omission default. PKCE values are recorded byte-for-byte
+	// from the request.
 	oauthStateStore.putMCP(state, bindingID, oauthStateMCPContext{
 		clientID:            clientID,
 		redirectURI:         requested,
 		codeChallenge:       q.Get("code_challenge"),
 		codeChallengeMethod: q.Get("code_challenge_method"),
 		clientState:         q.Get("state"),
-		resource:            q.Get("resource"),
+		resource:            requestedResource,
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthStateCookieName,
@@ -3543,16 +4444,21 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 // `resource` parameter is rejected with RFC 8707 `invalid_target`
 // before any token would be minted.
 func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
+	limitRequestBodyR_VKZD_UKVS(w, r)
 	if err := r.ParseForm(); err != nil {
+		if requestBodyTooLargeR_VKZD_UKVS(err) {
+			writeBodyTooLargeR_VKZD_UKVS(w)
+			return
+		}
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
 			"could not parse request body")
 		return
 	}
-	// R-4GRA-EGBY: token-endpoint mirror of the authorize-side
-	// resource check. Rejection happens before any token would be
-	// issued so a client that sends a non-canonical `resource` value
-	// gets a loud signal here rather than a silent bearer-side
-	// resource-binding rejection later.
+	// R-WLUL-MZCD: authorization-code and refresh-token grants may omit
+	// `resource`; omission targets the canonical resource already bound
+	// onto the authorization code or token chain. R-4GRA-EGBY still rejects
+	// any present non-canonical resource before a token can be issued or
+	// rotated.
 	if res := r.PostForm.Get("resource"); res != "" && res != canonicalResourceIdentifier() {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_target",
 			"resource parameter does not match this service's canonical identifier")
@@ -3561,9 +4467,11 @@ func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
 		handleOAuthTokenAuthCode(w, r)
+	case "refresh_token":
+		handleOAuthTokenRefresh(w, r)
 	default:
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
-			"only authorization_code is supported")
+			"only authorization_code and refresh_token are supported")
 	}
 }
 
@@ -3583,14 +4491,43 @@ func handleOAuthTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
-	access, err := oauthTokenStore.issueAccess(rec.ownerEmail, rec.clientID, rec.resource)
+	access, refresh, err := oauthTokenStore.issueInitialTokenPairR_2HT5_50F4(
+		rec.ownerEmail, rec.clientID, rec.resource)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	refresh, err := oauthTokenStore.issueRefresh(rec.ownerEmail, rec.clientID, rec.resource)
+	w.Header().Set("Content-Type", "application/json")
+	// R-KX4N-DZ44: successful token responses contain bearer-token
+	// plaintext and must not be stored by clients or intermediaries.
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+		RefreshToken string `json:"refresh_token"`
+	}{
+		AccessToken:  access,
+		TokenType:    "Bearer",
+		ExpiresIn:    int(authCfg().AccessTokenTTL / time.Second),
+		RefreshToken: refresh,
+	})
+}
+
+func handleOAuthTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshToken := r.PostForm.Get(oauthRefreshTokenFormField)
+	clientID := r.PostForm.Get("client_id")
+	if refreshToken == "" || clientID == "" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
+			"refresh_token grant requires refresh_token and client_id")
+		return
+	}
+	// R-B78O-8X0F: the refresh-token grant rotates a valid refresh
+	// token into a fresh bearer access token plus successor refresh
+	// token without any browser or Google round trip.
+	access, refresh, err := oauthTokenStore.rotateRefreshForClient(refreshToken, clientID)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -3618,7 +4555,10 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 }
 
 // checkMutationAuth reports whether r presents valid authentication for
-// the counter-mutation endpoints, and on rejection returns the OAuth
+// the counter-mutation endpoints. R-OBU9-0WFI: this gate runs before
+// either mutation handler reads, validates, or modifies the counter, so
+// an unauthenticated decrement at zero receives only the auth failure.
+// On rejection it returns the OAuth
 // `error` code and `error_description` string the 401 body must carry
 // per R-EV2D-QTR1. The accepted modes are pinned by R-OCH3-8FQ8: a
 // valid bearer access token issued by this service (R-4ED6-CGQG) or a
@@ -3634,46 +4574,78 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 // realized by routing bearer failures through lookupAccessReason
 // (unknown / expired / revoked) and adding the malformed-header and
 // resource-mismatch causes here.
-func checkMutationAuth(r *http.Request) (bool, string, string) {
+func checkMutationAuth(r *http.Request) (bool, int, string, string) {
 	cookiePresented := false
+	cookieRejectedByOrigin := false
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
 		cookiePresented = true
 		if sess := webSessionStore.lookup(c.Value); sess != nil {
-			setAuthedUserR_D56D_EBP3(r, sess.ownerEmail)
-			return true, "", ""
+			if sameOriginBrowserMutationR_R4RG_O4Y9(r) {
+				setAuthedUserR_D56D_EBP3(r, sess.ownerEmail)
+				return true, 0, "", ""
+			}
+			cookieRejectedByOrigin = true
 		}
 	}
 	authHeader := r.Header.Get("Authorization")
 	plaintext, bearerOK := bearerTokenFromRequest(r)
 	if !bearerOK {
+		if cookieRejectedByOrigin {
+			return false, http.StatusForbidden, "invalid_request",
+				"same-origin browser request required"
+		}
 		if authHeader == "" {
 			if cookiePresented {
-				return false, "invalid_token",
+				return false, http.StatusUnauthorized, "invalid_token",
 					"session cookie not recognized"
 			}
-			return false, "invalid_request",
+			return false, http.StatusUnauthorized, "invalid_request",
 				"no credentials presented"
 		}
-		return false, "invalid_token",
+		return false, http.StatusUnauthorized, "invalid_token",
 			"bearer authorization header malformed"
 	}
 	rec, reason := oauthTokenStore.lookupAccessReason(plaintext)
 	if rec != nil {
 		if rec.resource != canonicalResourceIdentifier() {
-			return false, "invalid_token",
+			return false, http.StatusUnauthorized, "invalid_token",
 				"bearer token resource binding does not match"
 		}
 		setAuthedUserR_D56D_EBP3(r, rec.ownerEmail)
-		return true, "", ""
+		return true, 0, "", ""
+	}
+	if cookieRejectedByOrigin {
+		return false, http.StatusForbidden, "invalid_request",
+			"same-origin browser request required"
 	}
 	switch reason {
 	case "expired":
-		return false, "invalid_token", "bearer token expired"
+		return false, http.StatusUnauthorized, "invalid_token", "bearer token expired"
 	case "revoked":
-		return false, "invalid_token", "bearer token revoked"
+		return false, http.StatusUnauthorized, "invalid_token", "bearer token revoked"
 	default:
-		return false, "invalid_token", "bearer token not recognized"
+		return false, http.StatusUnauthorized, "invalid_token", "bearer token not recognized"
 	}
+}
+
+// R-R4RG-O4Y9: browser requests that rely on a web session cookie for a
+// state-changing action must come from this service's own origin. When a
+// browser supplies Origin, it is authoritative; otherwise a supplied Referer
+// must match. Non-browser clients often send neither header, so absence alone
+// is not treated as cross-site.
+func sameOriginBrowserMutationR_R4RG_O4Y9(r *http.Request) bool {
+	want := requestBaseURL(r)
+	if got := r.Header.Get("Origin"); got != "" {
+		return got == want
+	}
+	if got := r.Header.Get("Referer"); got != "" {
+		u, err := url.Parse(got)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return false
+		}
+		return u.Scheme+"://"+u.Host == want
+	}
+	return true
 }
 
 // bearerTokenFromRequest extracts the opaque token from an
@@ -3728,6 +4700,8 @@ func checkMCPBearer(h http.Header) (bool, string) {
 	case "expired":
 		return false, "bearer token expired"
 	case "revoked":
+		// R-7E4W-K6HL: a user-revoked token chain must stop an
+		// already-connected MCP agent's next authenticated mutation.
 		return false, "bearer token revoked"
 	default:
 		return false, "bearer token not recognized"
@@ -3735,25 +4709,34 @@ func checkMCPBearer(h http.Header) (bool, string) {
 }
 
 // R-0YOE-9NO8: HTTP-level prompt-signal for the /mcp transport. When an
-// MCP request invokes a tool that requires bearer credentials (today only
-// counter_increment) and presents no Authorization header, this middleware
-// responds with HTTP 401 plus a WWW-Authenticate: Bearer header carrying
-// the standard `resource_metadata` parameter pointing at this service's
-// protected-resource metadata document. That header is the signal a
-// conformant MCP client uses to discover the auth server and begin the
-// OAuth flow. Requests that present any Authorization header — even a
-// malformed, expired, or resource-mismatched one — fall through to the
-// SDK handler so the in-tool R-ZQS0-HWZ8 gate produces a tool-error
-// JSON-RPC result for the bad-bearer cases. Non-gated tools (counter_read,
-// counter_decrement today) and non-tools/call methods also pass through.
+// MCP request invokes a tool that requires bearer credentials and presents
+// no Authorization header, this middleware responds with HTTP 401 plus a
+// WWW-Authenticate: Bearer header carrying the standard `resource_metadata`
+// parameter pointing at this service's protected-resource metadata document.
+// R-51PZ-MEQR: when a request presents malformed, unknown, expired, revoked,
+// or wrong-resource bearer credentials, the HTTP authorization boundary
+// rejects it before the SDK handler or any MCP tool handler runs.
 func mcpPromptSignal(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "" {
+		if r.Header.Get("Authorization") != "" {
+			if ok, errDesc := checkMCPBearer(r.Header); !ok {
+				writeMCPBearerChallenge(w, r, "invalid_token", errDesc)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.Method != http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limitRequestBodyR_VKZD_UKVS(w, r)
 		buf, err := io.ReadAll(r.Body)
 		if err != nil {
+			if requestBodyTooLargeR_VKZD_UKVS(err) {
+				writeBodyTooLargeR_VKZD_UKVS(w)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -3762,29 +4745,32 @@ func mcpPromptSignal(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// R-7BHQ-VB64: resource_metadata names the path
-		// `/.well-known/oauth-protected-resource/mcp` so the URL is
-		// scoped to the MCP transport per RFC 9728 §5.1.
-		meta := requestBaseURL(r) + "/.well-known/oauth-protected-resource/mcp"
-		w.Header().Set("WWW-Authenticate",
-			`Bearer realm="hal", error="invalid_request", `+
-				`error_description="no credentials presented", `+
-				`resource_metadata="`+meta+`"`)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(struct {
-			Error            string `json:"error"`
-			ErrorDescription string `json:"error_description,omitempty"`
-		}{Error: "invalid_request", ErrorDescription: "no credentials presented"})
+		writeMCPBearerChallenge(w, r, "invalid_request", "no credentials presented")
 	})
 }
 
+func writeMCPBearerChallenge(w http.ResponseWriter, r *http.Request, code, desc string) {
+	// R-7BHQ-VB64: resource_metadata names the path
+	// `/.well-known/oauth-protected-resource/mcp` so the URL is
+	// scoped to the MCP transport per RFC 9728 §5.1.
+	meta := requestBaseURL(r) + "/.well-known/oauth-protected-resource/mcp"
+	w.Header().Set("WWW-Authenticate",
+		`Bearer realm="hal", error="`+code+`", `+
+			`error_description="`+desc+`", `+
+			`resource_metadata="`+meta+`"`)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description,omitempty"`
+	}{Error: code, ErrorDescription: desc})
+}
+
 // jsonRPCInvokesGatedTool reports whether the JSON-RPC request body
-// invokes a tool that requires bearer credentials. counter_increment is
-// the only gated tool today; counter_read is explicitly unauthenticated
-// (R-0CQ7-DSBQ) and counter_decrement is not yet bearer-gated. Batch
-// requests and unparseable bodies fall through (returns false) so the
-// SDK handler handles them on its own terms.
+// invokes a tool that requires bearer credentials. counter_read is
+// explicitly unauthenticated (R-0CQ7-DSBQ). Batch requests and
+// unparseable bodies fall through (returns false) so the SDK handler
+// handles them on its own terms.
 func jsonRPCInvokesGatedTool(buf []byte) bool {
 	var msg struct {
 		Method string `json:"method"`
@@ -3795,7 +4781,9 @@ func jsonRPCInvokesGatedTool(buf []byte) bool {
 	if err := json.Unmarshal(buf, &msg); err != nil {
 		return false
 	}
-	return msg.Method == "tools/call" && msg.Params.Name == "counter_increment"
+	return msg.Method == "tools/call" &&
+		(msg.Params.Name == "counter_increment" ||
+			msg.Params.Name == "counter_decrement")
 }
 
 // writeMutationUnauthorized emits the standard 401 response shared by
@@ -3806,12 +4794,21 @@ func jsonRPCInvokesGatedTool(buf []byte) bool {
 // and an `error_description` string that discriminates the failure
 // cause; checkMutationAuth picks both.
 func writeMutationUnauthorized(w http.ResponseWriter, errCode, errDesc string) {
+	writeMutationAuthFailure(w, http.StatusUnauthorized, errCode, errDesc)
+}
+
+func writeMutationAuthFailure(w http.ResponseWriter, status int, errCode, errDesc string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(struct {
 		Error            string `json:"error"`
 		ErrorDescription string `json:"error_description,omitempty"`
 	}{Error: errCode, ErrorDescription: errDesc})
+}
+
+func writeSameOriginForbiddenR_R4RG_O4Y9(w http.ResponseWriter) {
+	writeMutationAuthFailure(w, http.StatusForbidden, "invalid_request",
+		"same-origin browser request required")
 }
 
 // R-340Z-T6K2: POST /counter/increment adds one to the counter and
@@ -3820,8 +4817,8 @@ func writeMutationUnauthorized(w http.ResponseWriter, errCode, errDesc string) {
 // invalid-auth request is rejected with HTTP 401 before the counter
 // is touched, so the stored value does not change.
 func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
-	if ok, errCode, errDesc := checkMutationAuth(r); !ok {
-		writeMutationUnauthorized(w, errCode, errDesc)
+	if ok, status, errCode, errDesc := checkMutationAuth(r); !ok {
+		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
 	v := theCounter.increment()
@@ -3839,8 +4836,8 @@ func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
 // request is rejected with HTTP 401 before the counter is touched, so
 // the stored value does not change.
 func handleCounterDecrement(w http.ResponseWriter, r *http.Request) {
-	if ok, errCode, errDesc := checkMutationAuth(r); !ok {
-		writeMutationUnauthorized(w, errCode, errDesc)
+	if ok, status, errCode, errDesc := checkMutationAuth(r); !ok {
+		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

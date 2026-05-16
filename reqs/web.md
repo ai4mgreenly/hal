@@ -303,12 +303,12 @@ deliberately differs from the reference.
   card, gap, card, gap, card` — that arrangement has the gap
   in the wrong place between the heading and the tabs.
 
-  The footer (R-K3PV-GHB3) and the agents block (R-2IRD-A7HD)
+  The footer (R-K3PV-GHB3) and the agents block (R-VTZ5-5FF5)
   are out of scope for this requirement. The footer has its
   own chrome (top border, muted ink) per R-K3PV-GHB3 and is
   visually separated by that border rather than by the
   inter-section gap. The agents block lives inside the banner
-  card per R-2IRD-A7HD and shifts the banner card's bottom
+  card per R-VTZ5-5FF5 and shifts the banner card's bottom
   edge downward when present; the inter-section gap is still
   measured from the (new, lower) bottom edge of the banner
   card to the top of the counter card, so the equal-spacing
@@ -410,7 +410,7 @@ deliberately differs from the reference.
     Sign in / Sign out affordance, rendered as the bottom row of
     the banner card in the absence of an agents block, or as the
     row immediately above the agents block when one is present
-    (R-2IRD-A7HD). Its structure, state-dependent content, and
+    (R-VTZ5-5FF5). Its structure, state-dependent content, and
     load-bearing placement properties are pinned by R-0WB7-RV1W.
 
     The auth area is visually separated from the subtitle row
@@ -1056,16 +1056,26 @@ deliberately differs from the reference.
   screen. A request to `/login` from a user-agent that already carries
   an active web session redirects to `/` instead of starting a fresh
   federation round-trip.
-- R-AE1P-Z1WC: `/logout` ends the current web session and returns the
-  user-agent to `/` via redirect; the resulting `/` response shows the
-  visitor as not signed in. `/logout` from a user-agent that has no
-  active web session is a no-op redirect to `/`, not an error.
-  `/logout` does not touch any MCP token chain (R-0XJ4-5MSL).
+- R-FZ10-BE37: `POST /logout` from a user-agent with an active web
+  session revokes that session and returns the user-agent to `/` via
+  redirect; the resulting `/` response shows the visitor as not
+  signed in. `POST /logout` from a user-agent with no active web
+  session is a no-op redirect to `/`, not an error. `GET /logout`
+  does not revoke a session and is rejected under R-7MLK-O6I5 /
+  R-8IPO-FZ7T. Logout does not touch any MCP token chain
+  (R-0XJ4-5MSL).
+- R-A2L2-1NA1: the signed-in page's Sign out affordance is an
+  actual form-submitting control that performs `POST /logout`
+  without requiring custom JavaScript. If JavaScript is disabled or
+  fails to load, activating Sign out still submits a POST request to
+  the logout endpoint. The control remains visually identical to
+  the auth pill required by R-0WB7-RV1W, and it does not expose a
+  navigable `href` to `/logout`.
 - R-0WB7-RV1W: the index page reflects web-session state. When the
   visitor has an active web session, the page identifies them by the
   Google email recorded for the session — the email appears verbatim
   on the page — and the page exposes a separate, explicitly labeled
-  affordance whose activation reaches `/logout`. When the visitor
+  affordance whose activation submits `POST /logout`. When the visitor
   has no active web session, the page exposes an affordance whose
   activation reaches `/login`; the page does not render any
   anonymous-visitor placeholder identity (no literal "guest", no
@@ -1076,7 +1086,7 @@ deliberately differs from the reference.
   the lower portion of the banner card in both the signed-out and
   signed-in states. When no agents block is present (signed-out
   visitor, or signed-in visitor with zero live MCP token chains
-  per R-2IRD-A7HD), the auth area is the bottom row of the banner
+  per R-VTZ5-5FF5), the auth area is the bottom row of the banner
   card; when an agents block is present, the agents block sits
   immediately below the auth row and is the bottom element of the
   banner card. The design reference (`reqs/design.md` §3) shows
@@ -1115,7 +1125,7 @@ deliberately differs from the reference.
      button or equivalent visibly-actionable control, bearing the
      literal text `Sign out` (or, if a glyph is used, accompanied
      by an `aria-label="Sign out"`) — whose activation reaches
-     `/logout`.
+     `POST /logout`.
 
   In the design reference's implementation a single button
   element flips its visible label between `Sign in` and `Sign
@@ -1164,15 +1174,25 @@ deliberately differs from the reference.
   every page load; in the signed-out state the auth row exposes
   a reachable route to `/login`; in the signed-in state it shows
   the visitor's bare email as a label (no avatar) *and* exposes
-  a separate, explicitly labeled sign-out control that reaches
-  `/logout`; and the auth area is anchored inside the banner
+  a separate, explicitly labeled sign-out control that submits
+  `POST /logout`; and the auth area is anchored inside the banner
   card, right-aligned within its row, in the lower portion of
   the card in both states (with the agents block from
-  R-2IRD-A7HD sitting beneath it when present).
+  R-VTZ5-5FF5 sitting beneath it when present).
+
+- R-TEP7-Q6UT: any externally sourced identity string rendered in
+  the web UI is treated as untrusted text. In particular, the
+  signed-in visitor's Google email and any owner/client identity
+  text shown on the page are displayed as inert text, not
+  interpreted as HTML, script, attributes, URLs, or markup. An
+  identity string containing characters such as `<`, `>`, `"`,
+  `'`, `&`, or JavaScript-looking text must render visibly as text
+  and must not create DOM elements, execute script, alter
+  attributes, or change the structure of the page.
 
 ## Authenticated MCP agents
 
-- R-2IRD-A7HD: when the signed-in visitor has one or more live
+- R-VTZ5-5FF5: when the signed-in visitor has one or more live
   MCP token chains issued to their email, the index page renders
   an **agents block** inside the banner card, immediately below
   the auth row (R-0WB7-RV1W). The block lists one row per live
@@ -1183,7 +1203,7 @@ deliberately differs from the reference.
   whose refresh ceiling has been hit (R-8UAA-YKR9), whose chain
   has been revoked by reuse detection (R-9HGE-87UG /
   R-A26O-QBG9), or that the visitor has revoked from this page
-  (R-0SNI-MJTT) are not listed.
+  (R-D0XD-1YT0) are not listed.
 
   The block is gated on web-session state: a signed-out visitor
   sees nothing here, and is not told whose agents would be
@@ -1202,30 +1222,39 @@ deliberately differs from the reference.
   does not satisfy this requirement.
 
   **The agents block's visual signature mirrors the signed-in
-  auth row above it** (R-0WB7-RV1W): the block stacks one or
-  more agent rows in a single column, each row right-aligned
-  to the same right edge as the auth row, occupying the lower-
-  right portion of the banner card just as the auth row does.
-  The per-row visual shape is pinned by R-2JZ9-NZ82 — a row
-  reads as a sibling of the `Sign out` row, not as a separate
-  bordered card, not as a centered band beneath the subtitle,
-  and not as a wide horizontal strip filling the banner's
-  width. A rendering in which the agents block is centered, is
-  drawn as its own bordered card, sits above the auth row, or
-  uses a visual chrome unrelated to the auth row's chrome does
-  not satisfy this requirement.
+  auth row above it** (R-0WB7-RV1W): the auth row and all agent
+  rows form one bottom-right stack inside the banner card. The
+  HAL title and subtitle remain centered in the banner; the
+  signed-in identity row and agent rows do not sit under, beside,
+  or visually compete with that centered title/subtitle group.
+  The signed-in web-session row is always the first row in the
+  bottom-right stack, and the agents block appears directly below
+  it. Each row in the stack uses the shared two-column alignment
+  R-VV71-J75U pins: labels right-align in a label column, and
+  `Sign out` / `Revoke` controls align in a single action column.
+  The per-row visual shape is pinned by R-VV71-J75U — a row reads
+  as a sibling of the `Sign out` row, not as a separate bordered
+  card, not as a centered band beneath the subtitle, and not as a
+  wide horizontal strip filling the banner's width. A rendering in
+  which the agents block is centered, is drawn as its own bordered
+  card, sits above the auth row, places agent rows between the
+  title and subtitle, or uses a visual chrome unrelated to the auth
+  row's chrome does not satisfy this requirement.
 
-- R-2JZ9-NZ82: each agent row's visual signature mirrors the
+- R-VV71-J75U: each agent row's visual signature mirrors the
   signed-in auth row's signature pinned by R-0WB7-RV1W: an
-  **inert identity label on the left** sitting immediately
-  beside a **pill-style action control on the right**,
-  right-aligned within the row. The pair reads as a sibling of
-  the `(email) [Sign out]` row above it, with the same pill
-  chrome and the same hover treatment as the `Sign out` pill;
-  a visitor hovering either the `Sign out` pill on the auth row
-  or the `Revoke` pill on an agent row sees the identical
-  dark-fill inversion R-0WB7-RV1W pins. The row's two visible
-  elements are:
+  **inert identity label** paired with a **pill-style action
+  control**. The auth row and every agent row share one two-column
+  layout inside the banner card's lower-right stack: the label
+  column is right-aligned, the action column sits immediately to
+  its right with a consistent gap, and every `Sign out` / `Revoke`
+  control starts at the same horizontal coordinate so the pills
+  form a visually aligned vertical column. The agent row pair reads as a
+  sibling of the `(email) [Sign out]` row above it, with the same
+  pill chrome and the same hover treatment as the `Sign out` pill;
+  a visitor hovering either the `Sign out` pill on the auth row or
+  the `Revoke` pill on an agent row sees the identical dark-fill
+  inversion R-0WB7-RV1W pins. The row's two visible elements are:
 
   1. The **identity label**, rendered as inert, non-interactive
      text (clicking it does nothing, just as clicking the
@@ -1247,14 +1276,15 @@ deliberately differs from the reference.
      the prefix; a row showing the full-length `client_id`, or
      showing the first-8 prefix followed by `…` or `...`, does
      not satisfy this requirement.
-  2. A **Revoke pill** immediately to the right of the identity
-     label, rendered as an actionable pill-style button bearing
+  2. A **Revoke pill** in the shared action column immediately to
+     the right of the identity label, rendered as an actionable
+     pill-style button bearing
      the literal text `Revoke` (or, if a glyph is used,
      accompanied by `aria-label="Revoke"`), with the same pill
      chrome (border, radius, padding, label weight) and the
      same dark-fill hover inversion as the auth row's `Sign
      out` pill (R-0WB7-RV1W). Activating it reaches the
-     chain-revoke action R-0SNI-MJTT defines, scoped to *this
+     chain-revoke action R-D0XD-1YT0 defines, scoped to *this
      row's* token chain.
 
   No other per-row content renders: no issued-at timestamp,
@@ -1266,34 +1296,168 @@ deliberately differs from the reference.
   per R-0WB7-RV1W and the agent row does the same). Adding
   more fields is a spec edit, not an implementation choice.
 
-  Renderings that do not satisfy this requirement include: a
-  row centered under the subtitle, a row spanning the full
-  banner width, a `Revoke` control rendered as a bare text
-  link instead of a pill, a `Revoke` pill whose chrome differs
-  visibly from the `Sign out` pill above it, a `Revoke` pill
-  whose hover lightens toward the page background instead of
-  inverting to dark fill, and an identity label rendered as a
-  link or other interactive control.
+  Renderings that do not satisfy this requirement include: agent
+  rows centered under the subtitle, a row spanning the full banner
+  width, labels centered rather than right-aligned, `Revoke`
+  controls that do not share the same action-column alignment as
+  the `Sign out` control, a `Revoke` control rendered as a bare
+  text link instead of a pill, a `Revoke` pill whose chrome differs
+  visibly from the `Sign out` pill above it, a `Revoke` pill whose
+  hover lightens toward the page background instead of inverting to
+  dark fill, and an identity label rendered as a link or other
+  interactive control.
 
-- R-0RFM-8S34: rows in the agents block are ordered by chain
-  initial issuance, **most recent first**. The chain whose
-  initial token-chain issuance (the authorization-code
-  redemption that first created the chain) is most recent
-  renders at the top of the block. Subsequent refresh-token
-  rotations within a chain (R-89K0-GH5G) update the chain's
-  live refresh token but do not change the chain's place in
-  the order. A rendering in which a freshly-refreshed chain
-  bubbles to the top of the list does not satisfy this
-  requirement; the property is a stable order anchored to the
-  chain's original authorization time.
+- R-6KK2-AAY0: the banner identity/action stack has an observable
+  bottom-right geometry that prevents the former centered-agent
+  layout from satisfying the spec. In any signed-in rendering with
+  at least two live MCP token chains:
+  - The signed-in web-session row's label and `Sign out` pill render
+    above every agent row.
+  - Every agent row's label and `Revoke` pill render below the web-
+    session row and entirely in the lower-right portion of the
+    banner: their bounding boxes are to the right of the banner's
+    horizontal centerline, and their top edges are below the subtitle
+    row's bottom edge.
+  - The left edge of every `Revoke` pill is horizontally aligned
+    with the left edge of the `Sign out` pill, with no more than
+    2 CSS pixels of difference between any pair. The labels for the
+    web-session row and all agent rows end at the same x-coordinate
+    immediately before that shared action column, with no more than
+    2 CSS pixels of difference between any pair.
+  - No `.agent-row`, `.agent-name`, or `Revoke` control appears
+    inside the centered title/subtitle group or between the title
+    and subtitle. A rendering where agent names or revoke buttons
+    are centered under the subtitle while the web-session row remains
+    bottom-right does not satisfy this requirement.
 
-- R-0SNI-MJTT: the page exposes a user-initiated chain-revoke
+- R-2ZZH-LJYA: the banner grows vertically to make room for the
+  bottom-right identity/action stack instead of allowing that stack
+  to intrude into the title/subtitle area. In every signed-in
+  rendering, the first row of the identity/action stack — the
+  visitor's email paired with `Sign out` — starts below the subtitle
+  row with at least the same visual separation used by the signed-in
+  no-agents state. When live MCP agent rows are added below it, the
+  additional rows increase the banner card's height downward; they
+  do not push the web-session row upward toward the title, overlap
+  the `HAL 9000` title, overlap the subtitle row, or reduce the
+  title-to-auth separation below the no-agents spacing. A rendering
+  where the auth stack is absolutely positioned from the banner's
+  bottom edge in a way that causes the email row to sit beside or
+  above the subtitle when multiple agents exist does not satisfy
+  this requirement.
+
+- R-CNWX-9VB2: when live agent rows are present, the bottom padding
+  below the identity/action stack matches the compact no-agent
+  bottom padding. Measure the vertical distance from the bottom edge
+  of the lone `Sign out` pill to the banner card's inner bottom edge
+  in the signed-in, zero-agent state; then measure the vertical
+  distance from the bottom edge of the lowest `Revoke` pill to the
+  banner card's inner bottom edge in the signed-in, with-agent
+  state. The with-agent distance must be within 8 CSS pixels of the
+  zero-agent distance. Adding agent rows may increase the banner
+  height by the height of those rows plus normal row gaps, but it
+  must not add any extra lower spacer beyond the no-agent bottom
+  padding. A rendering where the final `Revoke` row has visibly more
+  blank space below it than the lone `Sign out` row has in the
+  zero-agent state does not satisfy this requirement.
+
+- R-6QIE-4D71: the with-agent banner uses the same bottom-edge
+  breathing room as the canonical no-agent auth placement. The
+  canonical stylesheet positions the no-agent `.banner-auth` at
+  `bottom: 18px`; in the with-agent state, the lowest action pill
+  in the shared identity/action stack (`Sign out` when it is the
+  only row, otherwise the final `Revoke`) sits the same visual
+  distance from the banner's inner bottom edge, within 4 CSS pixels.
+  A with-agent layout that replaces the canonical bottom offset with
+  a larger lower spacer — for example leaving roughly 32 CSS pixels
+  or more between the final `Revoke` pill and the banner's inner
+  bottom edge — does not satisfy this requirement. The banner may
+  grow vertically to fit additional rows above that bottom offset,
+  but the bottom offset itself remains the canonical compact one.
+
+- R-TS71-XRW4: the banner does not reserve agent-row space when no
+  agent rows are present. In the signed-out state and in the
+  signed-in state with zero live MCP token chains, the banner's
+  bottom spacing remains the compact no-agents spacing pinned by
+  R-0WB7-RV1W: the lone `Sign in` or `(email) [Sign out]` row sits
+  in the lower-right of the banner with no blank vertical area below
+  it sized for absent agent rows. The vertical growth R-2ZZH-LJYA
+  requires begins only when one or more live agent rows are actually
+  rendered. A rendering where signing in without any live agents
+  creates a large empty gap beneath the auth row does not satisfy
+  this requirement.
+
+- R-O87H-RSH4: the shared in-flow identity/action stack layout is
+  conditional on agent rows actually existing. When the visitor is
+  signed out, or when the visitor is signed in with zero live MCP
+  token chains, the banner keeps the canonical no-agents placement
+  from R-0WB7-RV1W / `reqs/design.css`: `.banner-auth` is the lone
+  bottom-right auth affordance inside the banner and does not force
+  the entire banner into a flex/grid column that reserves title-to-
+  auth vertical space. In those no-agent states, the `Sign in` or
+  `(email) [Sign out]` affordance is positioned in the lower-right
+  of the banner's existing chrome, and the banner height remains the
+  compact no-agents height. The in-flow grid/stack arrangement
+  required by R-2ZZH-LJYA and R-3RL1-IUP6 applies only in signed-in
+  renderings with one or more live agent rows. A stylesheet or inline
+  rule that globally changes `.banner` to a vertical flex container
+  and `.banner-auth` to `position: static` for signed-out or
+  zero-agent pages does not satisfy this requirement, because it
+  creates the large empty gap that R-TS71-XRW4 forbids.
+
+- R-3RL1-IUP6: the banner's web-session row and live-agent rows are
+  rendered into one shared identity/action stack container, not as
+  separate banner flow items. In the signed-in state, the DOM
+  structure that owns the lower-right two-column alignment contains,
+  in order, the web-session label/control pair and then zero or more
+  agent label/control pairs. The agent rows may be represented by
+  row wrappers, forms, or direct grid children, but their visible
+  labels and `Revoke` controls must be descendants participating in
+  the same layout container that positions the email and `Sign out`
+  control. A structure where `.banner-auth` contains only the web
+  session row while `.agents-block` is emitted as a separate sibling
+  element under `.banner`, with CSS attempting to align agent rows
+  via selectors such as `.banner-auth .agent-row`, does not satisfy
+  this requirement. The zero-agent state omits the agent pairs from
+  this shared stack; it does not leave behind an empty sibling block,
+  placeholder row, or separate flex/grid item that consumes vertical
+  space. `reqs/banner-auth-stack-examples.md` shows acceptable and
+  broken fragment shapes for this structural property; the examples
+  are illustrative, not mandatory tag-for-tag markup.
+
+- R-10ZV-8OFH: any client-supplied Dynamic Client Registration
+  metadata rendered in the web UI is treated as untrusted text. In
+  particular, `client_name` values shown in the agents block are
+  displayed as inert text, not interpreted as HTML, script,
+  attributes, URLs, or markup. A registered client name containing
+  characters such as `<`, `>`, `"`, `'`, `&`, or JavaScript-looking
+  text must render visibly as text and must not create DOM
+  elements, execute script, alter attributes, or change the
+  structure of the page.
+
+- R-VWEX-WYWJ: rows in the bottom-right identity/action stack are
+  ordered for scanning by identity. The signed-in web-session row
+  (the visitor's email paired with `Sign out`) is always first.
+  Live MCP token-chain rows render below it, sorted alphabetically
+  by their rendered identity label (case-insensitive). When two
+  rendered labels compare equal, the tie is broken by the rendered
+  first-8 client-id prefix so the order is stable. Refresh-token
+  rotations within a chain (R-89K0-GH5G) do not change the rendered
+  label and therefore do not change that row's alphabetical place.
+  A rendering in which agent rows are ordered by issue time, recent
+  refresh time, token expiry, or arbitrary storage order does not
+  satisfy this requirement.
+
+- R-D0XD-1YT0: the page exposes a user-initiated chain-revoke
   action reachable from each agent row's Revoke control
-  (R-2JZ9-NZ82). The action is authorized **exclusively** by
-  the visitor's web-session cookie (R-SLGL-B5B4) — it does
-  not accept bearer tokens, and it never operates on a chain
-  whose owner email differs from the web session's owner
-  email. A web-session request asking to revoke a chain
+  (R-VV71-J75U). The action is submitted as a POST browser
+  request and is authorized **exclusively** by the visitor's
+  web-session cookie (R-SLGL-B5B4) — it does not accept bearer
+  tokens, and it never operates on a chain whose owner email
+  differs from the web session's owner email. A GET request to
+  the revoke action does not revoke anything and is rejected
+  under R-7MLK-O6I5 / R-8IPO-FZ7T. A web-session request asking
+  to revoke a chain
   owned by a different email is rejected without revoking
   anything; the service does not disclose whether such a
   chain exists. A request from an unauthenticated user-agent
@@ -1326,8 +1490,25 @@ deliberately differs from the reference.
   owner, missing chain, no web session) leaves the page
   state unchanged and surfaces a brief failure indication
   without disclosing what kind of chain the missed
-  identifier would have matched. The action's HTTP shape
-  (request path, body, response) is HOW.
+  identifier would have matched. The action's request path,
+  body shape, and success response shape are HOW as long as
+  the POST-only, same-origin (R-R4RG-O4Y9), authorization,
+  revocation, and UI-update properties hold.
+
+- R-7E4W-K6HL: user-initiated chain revocation is enforced against
+  an already-connected MCP agent's next authenticated mutation
+  attempt. Concretely: after an MCP agent has completed authorization
+  for a signed-in user's email and has successfully invoked the MCP
+  increment or decrement tool with an access token from that chain,
+  the signed-in user can revoke that same chain through the agents
+  block (R-D0XD-1YT0). Any later MCP request from that agent that
+  presents a token from the revoked chain to invoke increment or
+  decrement is rejected as an invalid revoked token, and the counter
+  value is not modified. This holds even if the MCP client still
+  displays the server's cached tool list, keeps an existing MCP
+  transport session open, or retries without first re-running the
+  authorization flow; tool-list visibility is not proof of live
+  mutation authority.
 
 - R-0TVF-0BKI: while a signed-in visitor's browser has the
   index page open and JavaScript is running, every change
@@ -1335,7 +1516,7 @@ deliberately differs from the reference.
   email — a new chain coming into existence via successful
   authorization-code redemption (R-ZPE1-0DV8), a chain
   being revoked through this visitor's Revoke control
-  (R-0SNI-MJTT), a chain being revoked by reuse detection
+  (R-D0XD-1YT0), a chain being revoked by reuse detection
   (R-9HGE-87UG / R-A26O-QBG9), or a chain crossing its
   refresh ceiling (R-8UAA-YKR9) — is reflected on the page
   without the visitor having to reload. Acceptance
@@ -1380,6 +1561,20 @@ deliberately differs from the reference.
   handler blocks process exit on an in-flight stream is
   disqualified, by the same rule R-FZC6-H2SB applies to
   the counter channel.
+
+- R-KSI8-M0JX: when a signed-in visitor has the index page open
+  with zero live MCP token chains shown, and an MCP authorization
+  flow subsequently creates a live token chain for that same email,
+  the page renders the agents block and the new agent row without
+  requiring a browser refresh. This is the zero-to-one transition
+  case of R-0TVF-0BKI: the page must create the previously-absent
+  agents block, place it immediately below the auth row per
+  R-VTZ5-5FF5, render the row per R-VV71-J75U, and do so within the
+  live-update budget R-0TVF-0BKI names. The same property applies
+  when the new row appears because a previously revoked agent
+  completed a fresh authorization flow and received a new live token
+  chain; the UI must make that reauthorization visible as a new live
+  chain rather than requiring the visitor to reload to discover it.
 
 - R-T6VA-9U84: the SSE channel R-0TVF-0BKI defines honors
   the same resource-budget properties pinned for the

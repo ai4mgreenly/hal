@@ -40,6 +40,14 @@ application root. All paths below are relative to it.
    append to `requirements-verified.jsonl`, and do not touch
    unrelated code. Only proceed past this step when the full suite
    is green (or no tests exist yet).
+   Be aware that this project includes tests that bind localhost TCP
+   sockets. If a sandbox or harness denies local socket creation, the
+   full suite cannot produce a meaningful green/red signal inside that
+   environment; run the suite in a mode that permits loopback listeners
+   rather than treating `listen tcp 127.0.0.1:...` permission errors as
+   product failures. Likewise, if a language tool's default cache or
+   temp directory is outside the writable workspace, redirect it to a
+   writable temp path before running tests.
 3. Compute the unverified set (see "Tracking verified requirements"
    below). If it is empty, return `{"status":"DONE"}`.
 4. Pick one ID from the unverified set — the smallest meaningful unit
