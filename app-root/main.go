@@ -512,11 +512,6 @@ func (b *agentsBroadcaster) notify(email string) {
 	}
 }
 
-// agentsBcast is the singleton fan-out point for per-visitor agent
-// chain changes (R-0TVF-0BKI). The handler at GET /agents/stream is
-// the only subscriber surface today.
-var agentsBcast agentsBroadcaster
-
 // openCounterDB opens (or creates) the SQLite database at path, ensures
 // the single-row counter table exists, and returns the open handle. The
 // schema is fixed: one table with one row identified by id=1, holding the
@@ -1991,9 +1986,10 @@ type oauthToken struct {
 }
 
 type oauthTokenStorage struct {
-	mu sync.Mutex
-	m  map[string]*oauthToken
-	db *sql.DB
+	mu          sync.Mutex
+	m           map[string]*oauthToken
+	db          *sql.DB
+	agentsBcast *agentsBroadcaster
 }
 
 var oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
@@ -2022,6 +2018,23 @@ func oauthTokenTimeFromUnixNano(v int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, v)
+}
+
+func (s *oauthTokenStorage) setAgentsBroadcaster(b *agentsBroadcaster) *agentsBroadcaster {
+	s.mu.Lock()
+	prev := s.agentsBcast
+	s.agentsBcast = b
+	s.mu.Unlock()
+	return prev
+}
+
+func (s *oauthTokenStorage) notifyAgents(email string) {
+	s.mu.Lock()
+	b := s.agentsBcast
+	s.mu.Unlock()
+	if b != nil {
+		b.notify(email)
+	}
 }
 
 // attach loads HAL-issued OAuth token records from SQLite and makes all
@@ -2203,7 +2216,7 @@ func (s *oauthTokenStorage) issueInitialTokenPairR_2HT5_50F4(
 	s.m[refreshHash] = refreshRec
 	s.mu.Unlock()
 	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
-	agentsBcast.notify(ownerEmail)
+	s.notifyAgents(ownerEmail)
 	return accessPlain, refreshPlain, nil
 }
 
@@ -2248,7 +2261,7 @@ func (s *oauthTokenStorage) issueRefresh(ownerEmail, clientID, resource string) 
 	s.m[hash] = rec
 	s.mu.Unlock()
 	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
-	agentsBcast.notify(ownerEmail)
+	s.notifyAgents(ownerEmail)
 	return plaintext, nil
 }
 
@@ -2306,7 +2319,7 @@ func (s *oauthTokenStorage) rotateRefreshForClient(plaintext, clientID string) (
 		s.mu.Unlock()
 		// R-0TVF-0BKI: the chain just disappeared from this owner's live set.
 		if revokedOwner != "" {
-			agentsBcast.notify(revokedOwner)
+			s.notifyAgents(revokedOwner)
 		}
 		s.mu.Lock()
 		return "", "", errors.New("refresh token: already used")
@@ -2402,7 +2415,7 @@ func (s *oauthTokenStorage) revokeChainR_D0XD_1YT0(chainID, ownerEmail string) b
 	}
 	s.mu.Unlock()
 	// R-0TVF-0BKI: the chain just disappeared from this owner's live set.
-	agentsBcast.notify(ownerEmail)
+	s.notifyAgents(ownerEmail)
 	return true
 }
 
@@ -2999,7 +3012,12 @@ func runServeWithEnvAndClock(
 	// method-aware routing and never reaches handleLogout.
 	mux.HandleFunc(http.MethodPost, "/logout", handleLogout)
 	mux.HandleFunc(http.MethodPost, "/agents/revoke", handleAgentsRevoke)
-	mux.HandleFunc(http.MethodGet, "/agents/stream", handleAgentsStream)
+	servingAgentsBcast := &agentsBroadcaster{}
+	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(servingAgentsBcast)
+	defer oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast)
+	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		handleAgentsStreamWithBroadcaster(servingAgentsBcast, w, r)
+	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
 		handleGoogleCallbackWithGoogleIDP(servingGoogleIDP, w, r)
 	})
@@ -4108,7 +4126,7 @@ func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.R
 // mirrors handleCounterStream — vanished clients are detected and
 // released within 5 seconds; idle long-lived connections do not tie
 // up a finite concurrent-request resource.
-func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
+func handleAgentsStreamWithBroadcaster(bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request) {
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
 		session = webSessionStore.lookup(c.Value)
@@ -4133,8 +4151,8 @@ func handleAgentsStream(w http.ResponseWriter, r *http.Request) {
 
 	rc := http.NewResponseController(w)
 
-	sub := agentsBcast.subscribe(email)
-	defer agentsBcast.unsubscribe(sub)
+	sub := bcast.subscribe(email)
+	defer bcast.unsubscribe(sub)
 
 	writeBytes := func(p []byte) error {
 		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))

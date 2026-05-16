@@ -48,12 +48,13 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result - 2026-05-16
 
-Completed one singleton strangle: `counterBcast`. The package-level
-counter broadcaster variable was removed; the counter now owns its
-broadcaster, counter mutations fan out through that owned field, and
-the serve entry point threads the counter instance into the
-`/counter/stream` handler. The remaining `theCounter` singleton is
-unchanged for a later round.
+Completed one singleton strangle: `agentsBcast`. The package-level
+agents broadcaster variable was removed; `runServe` now constructs the
+serving `agentsBroadcaster`, threads it into `/agents/stream`, and binds
+the same instance to `oauthTokenStore` so token-chain issue, rotation,
+reuse-detection, and manual revoke notifications still fan out to the
+same subscriber set. The `oauthTokenStore` singleton remains unchanged
+for a later round.
 
 Files changed:
 - `app-root/main.go`
@@ -62,11 +63,12 @@ Files changed:
 
 Verification:
 - `gofmt -w main.go main_test.go` completed.
-- `env -u GOROOT go test -run 'TestR_UC3P_Z0IX|TestR_FZC6_H2SB|TestR_T5ND_W2HF|TestR_DB9V_B6EK|TestR_FY4A_3B1M'` passed.
-- `env -u GOROOT go test -race -run 'TestR_UC3P_Z0IX|TestR_FZC6_H2SB|TestR_T5ND_W2HF|TestR_DB9V_B6EK|TestR_FY4A_3B1M'` passed.
+- `env -u GOROOT go test -run 'TestR_0TVF_0BKI|TestR_T6VA_9U84|TestR_D0XD_1YT0|TestR_89K0_GH5G|TestR_8UAA_YKR9|TestR_9HGE_87UG|TestR_A26O_QBG9'` passed.
+- `env -u GOROOT go test -race -run 'TestR_0TVF_0BKI|TestR_T6VA_9U84|TestR_D0XD_1YT0|TestR_89K0_GH5G|TestR_8UAA_YKR9|TestR_9HGE_87UG|TestR_A26O_QBG9'` passed.
 - `env -u GOROOT go vet ./...` passed.
 - `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(rg --files -g '*.go')` passed with no output.
 - `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal ./...` passed.
+- `git diff --check` passed.
 - `env -u GOROOT go test ./...` and `env -u GOROOT go test -race ./...` both failed only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because local `.ralph/requirements-verified.jsonl` is permission-denied; this is out-of-scope Ralph state per `helper/REFACTOR.md`.
 
 Blockers / follow-up risks:

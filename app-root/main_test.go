@@ -17609,8 +17609,14 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 //     R-V65K-UVVH structural scan; the test asserts the Content-Type
 //     using the same split-and-rejoin shape.
 func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
+	agentsBcast := &agentsBroadcaster{}
+	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(agentsBcast)
+	t.Cleanup(func() { oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast) })
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /agents/stream", handleAgentsStream)
+	mux.HandleFunc("GET /agents/stream", func(w http.ResponseWriter, r *http.Request) {
+		handleAgentsStreamWithBroadcaster(agentsBcast, w, r)
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -18066,11 +18072,16 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 			t.Fatalf("webSessionStore.issue: %v (R-T6VA-9U84)", err)
 		}
 
+		agentsBcast := &agentsBroadcaster{}
+		prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(agentsBcast)
+		t.Cleanup(func() { oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast) })
 		baseline := agentsBcast.subscriberCount()
 
 		clientConn, serverConn := net.Pipe()
 		mux := http.NewServeMux()
-		mux.HandleFunc("GET /agents/stream", handleAgentsStream)
+		mux.HandleFunc("GET /agents/stream", func(w http.ResponseWriter, r *http.Request) {
+			handleAgentsStreamWithBroadcaster(agentsBcast, w, r)
+		})
 		srv := &http.Server{Handler: mux}
 		lis := &r8we2OneShotListener{c: serverConn, done: make(chan struct{})}
 		serveDone := make(chan struct{})
