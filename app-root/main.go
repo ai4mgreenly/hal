@@ -303,6 +303,7 @@ type counter struct {
 	mu    sync.Mutex
 	value uint64
 	db    *sql.DB
+	bcast *counterBroadcaster
 }
 
 // R-UC3P-Z0IX: there is exactly one counter, shared by all callers. The
@@ -318,6 +319,15 @@ type counter struct {
 // value — value=0 — which trivially satisfies the requirement.
 var theCounter counter
 
+func (c *counter) broadcaster() *counterBroadcaster {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bcast == nil {
+		c.bcast = &counterBroadcaster{}
+	}
+	return c.bcast
+}
+
 func (c *counter) read() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -327,8 +337,8 @@ func (c *counter) read() uint64 {
 // R-XMDZ-2RGA: increment takes no arguments and adds exactly one to the
 // stored value on each successful call. The returned value reflects the
 // post-state per R-RQZQ-81ZC.
-// R-FZC6-H2SB: the post-state value is broadcast on counterBcast so any
-// live-update subscribers reflect the change without polling.
+// R-FZC6-H2SB: the post-state value is broadcast on the counter-owned
+// broadcaster so any live-update subscribers reflect the change without polling.
 func (c *counter) increment() uint64 {
 	c.mu.Lock()
 	c.value++
@@ -336,8 +346,11 @@ func (c *counter) increment() uint64 {
 	if c.db != nil {
 		_, _ = c.db.Exec(`UPDATE counter SET value = ? WHERE id = 1`, int64(v))
 	}
+	bcast := c.bcast
 	c.mu.Unlock()
-	counterBcast.broadcast(v)
+	if bcast != nil {
+		bcast.broadcast(v)
+	}
 	return v
 }
 
@@ -346,8 +359,8 @@ func (c *counter) increment() uint64 {
 // stored value is zero, do not mutate and return (0, false) — an explicit
 // in-band refusal that preserves R-UZ9T-8NM4's non-negativity.
 // R-FZC6-H2SB: on a successful decrement, the post-state value is
-// broadcast on counterBcast. A refused decrement (value already zero) is
-// not a mutation and is not broadcast.
+// broadcast on the counter-owned broadcaster. A refused decrement
+// (value already zero) is not a mutation and is not broadcast.
 func (c *counter) decrement() (uint64, bool) {
 	c.mu.Lock()
 	if c.value == 0 {
@@ -359,8 +372,11 @@ func (c *counter) decrement() (uint64, bool) {
 	if c.db != nil {
 		_, _ = c.db.Exec(`UPDATE counter SET value = ? WHERE id = 1`, int64(v))
 	}
+	bcast := c.bcast
 	c.mu.Unlock()
-	counterBcast.broadcast(v)
+	if bcast != nil {
+		bcast.broadcast(v)
+	}
 	return v, true
 }
 
@@ -431,12 +447,6 @@ func (b *counterBroadcaster) broadcast(v uint64) {
 		}
 	}
 }
-
-// counterBcast is the singleton fan-out point for counter-value changes
-// (R-FZC6-H2SB). The handler at GET /counter/stream is the only
-// subscriber surface today; future transports (web socket, internal
-// observers) would subscribe at the same seam.
-var counterBcast counterBroadcaster
 
 // R-0TVF-0BKI: the agents block's live-update channel is fed by an
 // email-scoped fan-out broadcaster. Subscribers register a bounded
@@ -3012,7 +3022,11 @@ func runServeWithEnvAndClock(
 	})
 	mux.HandleFunc(http.MethodPost, "/oauth/token", handleOAuthToken)
 	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
-	mux.HandleFunc(http.MethodGet, "/counter/stream", handleCounterStream)
+	servingCounter := &theCounter
+	_ = servingCounter.broadcaster()
+	mux.HandleFunc(http.MethodGet, "/counter/stream", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterStreamWithCounter(servingCounter, w, r)
+	})
 	mux.HandleFunc(http.MethodPost, "/counter/increment", handleCounterIncrement)
 	mux.HandleFunc(http.MethodPost, "/counter/decrement", handleCounterDecrement)
 	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
@@ -4000,10 +4014,14 @@ func handleCounterRead(w http.ResponseWriter, r *http.Request) {
 // stops draining its receive window (cable yanked, kernel killed), the
 // server's TCP send buffer fills and the next heartbeat write hits the
 // deadline. The write error returns from the handler, which runs the
-// `defer counterBcast.unsubscribe(sub)` and releases the fd. Clean
+// `defer bcast.unsubscribe(sub)` and releases the fd. Clean
 // FIN/RST disconnects (R-T4FH-IAQQ's domain) cancel `r.Context()` and
 // return via the `<-ctx.Done()` arm.
 func handleCounterStream(w http.ResponseWriter, r *http.Request) {
+	handleCounterStreamWithCounter(&theCounter, w, r)
+}
+
+func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported",
@@ -4017,8 +4035,9 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 
 	rc := http.NewResponseController(w)
 
-	sub := counterBcast.subscribe()
-	defer counterBcast.unsubscribe(sub)
+	bcast := c.broadcaster()
+	sub := bcast.subscribe()
+	defer bcast.unsubscribe(sub)
 
 	writeBytes := func(p []byte) error {
 		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))
@@ -4034,7 +4053,7 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 			"data: {\"value\":%d}\n\n", v)))
 	}
 
-	if err := writeValue(theCounter.read()); err != nil {
+	if err := writeValue(c.read()); err != nil {
 		return
 	}
 

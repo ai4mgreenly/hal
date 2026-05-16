@@ -13748,8 +13748,8 @@ func TestR_FY4A_3B1M_index_wires_counter_mutations(t *testing.T) {
 // a counter change is reflected within 1000ms; the channel requires no
 // authentication. This test spins up the real runServe listener, opens
 // GET /counter/stream with a raw HTTP client, reads the snapshot event,
-// mutates the counter via theCounter.increment (the broadcaster is hooked
-// at the singleton, so any caller triggers the fan-out), and asserts a
+// mutates the counter via theCounter.increment (the broadcaster is owned
+// by the counter, so any caller triggers the fan-out), and asserts a
 // follow-up data event carrying the post-state value arrives within
 // 1000ms. The MIME-type literal is split with concatenation to defeat
 // the R-V65K-UVVH structural scan.
@@ -14008,6 +14008,7 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 		streamWriteTimeoutNS.Store(oldTimeout)
 	}()
 
+	counterBcast := theCounter.broadcaster()
 	baseline := counterBcast.subscriberCount()
 
 	clientConn, serverConn := net.Pipe()
