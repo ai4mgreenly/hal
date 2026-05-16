@@ -41,6 +41,7 @@ import (
 
 	counterpkg "github.com/mgreenly/hal/counter"
 	oauthpkg "github.com/mgreenly/hal/oauth"
+	webpkg "github.com/mgreenly/hal/web"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 )
@@ -3977,14 +3978,14 @@ func TestR_8KKV_TDWF_index_renders_banner_card(t *testing.T) {
 		t.Fatalf("body missing subtitle span (R-8KKV-TDWF): %q", body)
 	}
 	inBank := false
-	for _, s := range subtitleBank {
+	for _, s := range webpkg.SubtitleBank() {
 		if s == m[1] {
 			inBank = true
 			break
 		}
 	}
 	if !inBank {
-		t.Errorf("subtitle text %q is not an entry from subtitleBank "+
+		t.Errorf("subtitle text %q is not an entry from webpkg.SubtitleBank() "+
 			"(R-8KKV-TDWF / R-G47S-05R3)", m[1])
 	}
 	// Re-roll control: a <button> (NOT an <a>) with class refresh and
@@ -4683,9 +4684,9 @@ func TestR_G6NK_RP8H_index_visual_fidelity(t *testing.T) {
 		}
 	}
 
-	css, err := os.ReadFile("design.css")
+	css, err := os.ReadFile("web/design.css")
 	if err != nil {
-		t.Fatalf("read design.css: %v", err)
+		t.Fatalf("read web/design.css: %v", err)
 	}
 	cssText := string(css)
 
@@ -4746,7 +4747,7 @@ func TestR_G6NK_RP8H_index_visual_fidelity(t *testing.T) {
 // load-bearing visual definition; the build agent embeds and serves
 // that file directly rather than re-deriving its rules. `//go:embed`
 // cannot traverse above the module root, so the canonical source is
-// mirrored at app-root/design.css and embedded from there; the drift
+// mirrored at app-root/web/design.css and embedded from there; the drift
 // guard below reads ../reqs/design.css and asserts byte-equality with
 // the embedded copy so the mirror cannot silently fall behind.
 func TestR_8MP8_6B77_design_css_is_embedded_and_served(t *testing.T) {
@@ -4755,12 +4756,12 @@ func TestR_8MP8_6B77_design_css_is_embedded_and_served(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read ../reqs/design.css: %v", err)
 		}
-		mirror, err := os.ReadFile("design.css")
+		mirror, err := os.ReadFile("web/design.css")
 		if err != nil {
-			t.Fatalf("read design.css: %v", err)
+			t.Fatalf("read web/design.css: %v", err)
 		}
 		if !bytes.Equal(canonical, mirror) {
-			t.Fatalf("app-root/design.css has drifted from reqs/design.css; "+
+			t.Fatalf("app-root/web/design.css has drifted from reqs/design.css; "+
 				"recopy the canonical file (len canonical=%d mirror=%d)",
 				len(canonical), len(mirror))
 		}
@@ -4771,10 +4772,10 @@ func TestR_8MP8_6B77_design_css_is_embedded_and_served(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read ../reqs/design.css: %v", err)
 		}
-		if !bytes.Equal(canonical, designCSS) {
-			t.Fatalf("embedded designCSS differs from reqs/design.css "+
+		if !bytes.Equal(canonical, webpkg.CSSBytes()) {
+			t.Fatalf("embedded webpkg.CSSBytes() differs from reqs/design.css "+
 				"(len canonical=%d embed=%d)",
-				len(canonical), len(designCSS))
+				len(canonical), len(webpkg.CSSBytes()))
 		}
 	})
 
@@ -4785,7 +4786,7 @@ func TestR_8MP8_6B77_design_css_is_embedded_and_served(t *testing.T) {
 		}
 		req := httptest.NewRequest(http.MethodGet, "/design.css", nil)
 		rec := httptest.NewRecorder()
-		handleDesignCSS(rec, req)
+		webpkg.HandleDesignCSS(rec, req)
 		resp := rec.Result()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status: got %d want 200", resp.StatusCode)
@@ -5250,9 +5251,9 @@ func TestR_G47S_05R3_subtitle_bank_uniform_random_from_fixed_list(t *testing.T) 
 		"Homemade Agent Lab",
 		"Heuristic Argument Linker",
 	}
-	if !reflect.DeepEqual(subtitleBank, canonical) {
-		t.Fatalf("subtitleBank does not match the canonical list in reqs/web.md:\n"+
-			" got: %#v\nwant: %#v", subtitleBank, canonical)
+	if !reflect.DeepEqual(webpkg.SubtitleBank(), canonical) {
+		t.Fatalf("webpkg.SubtitleBank() does not match the canonical list in reqs/web.md:\n"+
+			" got: %#v\nwant: %#v", webpkg.SubtitleBank(), canonical)
 	}
 
 	inBank := make(map[string]bool, len(canonical))
@@ -5263,7 +5264,7 @@ func TestR_G47S_05R3_subtitle_bank_uniform_random_from_fixed_list(t *testing.T) 
 	const draws = 20000
 	seen := make(map[string]int, len(canonical))
 	for i := 0; i < draws; i++ {
-		got := pickSubtitle()
+		got := webpkg.PickSubtitle()
 		if !inBank[got] {
 			t.Fatalf("pickSubtitle returned %q which is not in the bank", got)
 		}
@@ -15917,7 +15918,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 
 	dir := t.TempDir()
 	for _, name := range []string{
-		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
+		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
 		"websession/session.go",
 	} {
@@ -16004,7 +16005,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 
 	srcDir := t.TempDir()
 	for _, name := range []string{
-		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
+		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
 		"websession/session.go",
 	} {
@@ -21139,9 +21140,9 @@ func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 		t.Errorf("agent row appears inside title/subtitle group (R-6KK2-AAY0): %q", banner)
 	}
 
-	cssBytes, err := os.ReadFile("design.css")
+	cssBytes, err := os.ReadFile("web/design.css")
 	if err != nil {
-		t.Fatalf("read design.css: %v", err)
+		t.Fatalf("read web/design.css: %v", err)
 	}
 	canonicalCSS := string(cssBytes)
 	for _, needle := range []string{
