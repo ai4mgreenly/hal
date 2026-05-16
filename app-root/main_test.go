@@ -42,6 +42,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
+var oauthClientStore = newOAuthClientStorage()
+
 // R-74NI-T9CI: no subcommand prints a usage summary listing the three
 // subcommands and exits non-zero. Same for an unknown subcommand. The
 // three names are exactly serve, reset, version.
@@ -458,7 +460,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 		strings.NewReader(oversizedJSON))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	if regRec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized DCR status = %d, want 413", regRec.Code)
 	}
@@ -3870,7 +3872,7 @@ func TestR_AOTL_OTYZ_index_html_uses_canonical_class_names(t *testing.T) {
 func TestR_8KKV_TDWF_index_renders_banner_card(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-8KKV-TDWF)", rr.Code)
 	}
@@ -3958,7 +3960,7 @@ func TestR_BZQY_DN3B_index_displays_mcp_client_config(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	host := "hal." + "example" + ".test"
 	req.Host = host
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-BZQY-DN3B)", rr.Code)
 	}
@@ -4034,7 +4036,7 @@ func TestR_5GQZ_KWCD_mcp_snippets_in_client_documented_format(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	host := "hal." + "example" + ".test"
 	req.Host = host
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-5GQZ-KWCD)", rr.Code)
 	}
@@ -4116,7 +4118,7 @@ func TestR_G5FO_DXHS_claude_code_panel_has_two_stacked_scope_blocks(t *testing.T
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	host := "hal." + "example" + ".test"
 	req.Host = host
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-G5FO-DXHS)", rr.Code)
 	}
@@ -4218,7 +4220,7 @@ func TestR_H4LJ_G9HR_mcp_client_instructions_is_tab_interface(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "hal." + "example" + ".test"
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-H4LJ-G9HR)", rr.Code)
 	}
@@ -4386,7 +4388,7 @@ func TestR_CO4Y_11X7_mcp_snippets_url_is_request_derived(t *testing.T) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Host = host
-		handleIndex(rr, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-CO4Y-11X7)", rr.Code)
 		}
@@ -4444,7 +4446,7 @@ func TestR_CO4Y_11X7_mcp_snippets_url_is_request_derived(t *testing.T) {
 func TestR_GVMQ_ZCBQ_index_renders_counter_card(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-GVMQ-ZCBQ)", rr.Code)
 	}
@@ -4496,7 +4498,7 @@ func TestR_GVMQ_ZCBQ_index_renders_counter_card(t *testing.T) {
 func TestR_G0K2_UUJ0_index_motion_and_aria(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-G0K2-UUJ0)", rr.Code)
 	}
@@ -4586,7 +4588,7 @@ func TestR_G0K2_UUJ0_index_motion_and_aria(t *testing.T) {
 func TestR_G6NK_RP8H_index_visual_fidelity(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-G6NK-RP8H)", rr.Code)
 	}
@@ -9005,7 +9007,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			strings.NewReader(`{"redirect_uris":["`+redirectURI+`"]}`))
 		regReq.Header.Set("Content-Type", "application/json")
 		regRec := httptest.NewRecorder()
-		handleOAuthRegister(regRec, regReq)
+		handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 		regRes := regRec.Result()
 		defer regRes.Body.Close()
 		if regRes.StatusCode != http.StatusCreated {
@@ -9031,7 +9033,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			"&state=" + url.QueryEscape(clientState)
 		authReq := httptest.NewRequest(http.MethodGet, authURL, nil)
 		authRec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, authRec, authReq)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, authRec, authReq)
 		authRes := authRec.Result()
 		defer authRes.Body.Close()
 
@@ -9321,7 +9323,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		idxReq := httptest.NewRequest(http.MethodGet, "/", nil)
 		idxReq.AddCookie(sessionCookie)
 		idxRec := httptest.NewRecorder()
-		handleIndex(idxRec, idxReq)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, idxRec, idxReq)
 		if idxRec.Code != http.StatusOK {
 			t.Fatalf("index status = %d, want 200 (R-8GJG-64MR)", idxRec.Code)
 		}
@@ -9388,7 +9390,7 @@ func TestR_GUEU_LKL1_index_reflects_web_session_state(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: plaintext})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-GUEU-LKL1)", rec.Code)
 		}
@@ -9434,7 +9436,7 @@ func TestR_GUEU_LKL1_index_reflects_web_session_state(t *testing.T) {
 	t.Run("signed_out_visitor_sees_signin_and_no_placeholder_identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-GUEU-LKL1)", rec.Code)
 		}
@@ -9464,7 +9466,7 @@ func TestR_GUEU_LKL1_index_reflects_web_session_state(t *testing.T) {
 			Value: "not-a-real-session",
 		})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		body := rec.Body.String()
 		if !strings.Contains(body, `href="/login"`) {
 			t.Errorf("unknown session cookie should fall back to /login "+
@@ -9892,16 +9894,27 @@ func TestR_3JCR_C810_dynamic_client_registration(t *testing.T) {
 		t.Errorf("redirect_uris len = %d, want 2; doc=%v (R-3JCR-C810)",
 			len(rus), doc)
 	}
-	// The recorded client must be retrievable by its issued client_id
-	// so the authorize endpoint can later exact-match redirect_uri per
-	// R-1ERW-YD9G.
-	if rec := oauthClientStore.lookup(cid); rec == nil {
-		t.Errorf("registered client %q not in store (R-3JCR-C810)", cid)
-	} else if len(rec.redirectURIs) != 2 ||
-		rec.redirectURIs[0] != "http://127.0.0.1/cb" ||
-		rec.redirectURIs[1] != "http://127.0.0.1/cb2" {
-		t.Errorf("stored redirect_uris = %v, want [http://127.0.0.1/cb http://127.0.0.1/cb2] (R-3JCR-C810)",
-			rec.redirectURIs)
+	// The registered client must be accepted by the same serving instance's
+	// authorize endpoint, proving the record was stored for the later
+	// exact-match gate per R-1ERW-YD9G.
+	authClient := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	authResp, err := authClient.Get(base + "/oauth/authorize?client_id=" + url.QueryEscape(cid) +
+		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
+		"&response_type=code" +
+		"&code_challenge=R_3JCR_C810_PKCE" +
+		"&code_challenge_method=S256" +
+		"&resource=" + url.QueryEscape(canonicalResourceIdentifier()))
+	if err != nil {
+		t.Fatalf("GET authorize for registered client: %v (R-3JCR-C810)", err)
+	}
+	authResp.Body.Close()
+	if authResp.StatusCode < 300 || authResp.StatusCode >= 400 {
+		t.Errorf("authorize registered client status = %d, want 3xx (R-3JCR-C810)",
+			authResp.StatusCode)
 	}
 
 	// 3) Two distinct registrations get two distinct client_ids — the
@@ -9977,7 +9990,7 @@ func TestR_9OWM_O8XJ_dynamic_client_registration_rejects_invalid_redirect_uris(t
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			handleOAuthRegister(rec, req)
+			handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 for %q; body=%q (R-9OWM-O8XJ)",
@@ -10010,7 +10023,7 @@ func TestR_9OWM_O8XJ_dynamic_client_registration_rejects_invalid_redirect_uris(t
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			handleOAuthRegister(rec, req)
+			handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("status = %d, want 201 for %q; body=%q (R-9OWM-O8XJ)",
@@ -10036,7 +10049,7 @@ func TestR_8OBG_7FST_dynamic_client_registration_requires_at_least_one_valid_red
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			handleOAuthRegister(rec, req)
+			handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%q (R-8OBG-7FST)",
@@ -10065,7 +10078,7 @@ func TestR_8OBG_7FST_dynamic_client_registration_requires_at_least_one_valid_red
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
-		handleOAuthRegister(rec, req)
+		handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201; body=%q (R-8OBG-7FST)",
@@ -10122,7 +10135,7 @@ func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	handleOAuthRegister(rec, req)
+	handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%q (R-19BA-4XX4)",
@@ -10153,7 +10166,7 @@ func TestR_19BA_4XX4_dynamic_client_registration_does_not_overwrite_on_client_id
 	failReq.Header.Set("Content-Type", "application/json")
 	failRec := httptest.NewRecorder()
 
-	handleOAuthRegister(failRec, failReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, failRec, failReq)
 
 	if failRec.Code != http.StatusInternalServerError {
 		t.Fatalf("all-colliding registration status = %d, want 500; body=%q (R-19BA-4XX4)",
@@ -10197,7 +10210,7 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
-	handleOAuthRegister(rec, req)
+	handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("registration status = %d, want 201; body=%q (R-YRMT-B7LZ)",
@@ -10238,7 +10251,8 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 			"&resource="+url.QueryEscape(canonicalResourceIdentifier()), nil)
 	authRec := httptest.NewRecorder()
 
-	handleOAuthAuthorize(authRec, authReq)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		nil, newOAuthStateStorage(), oauthClientStore, authRec, authReq)
 
 	if authRec.Code != http.StatusSeeOther {
 		t.Fatalf("authorize after restart status = %d, want 303; body=%q (R-YRMT-B7LZ)",
@@ -10260,7 +10274,7 @@ func TestR_JE3Z_IGI4_dynamic_client_registration_client_name_is_bounded_display_
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
-		handleOAuthRegister(rec, req)
+		handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201; body=%q (R-JE3Z-IGI4)",
@@ -10325,7 +10339,7 @@ func TestR_JE3Z_IGI4_dynamic_client_registration_client_name_is_bounded_display_
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			handleOAuthRegister(rec, req)
+			handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%q (R-JE3Z-IGI4)",
@@ -10379,7 +10393,7 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
-		handleOAuthRegister(rec, req)
+		handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("register status = %d, want 201; body=%q (R-KCBH-CXY9)",
@@ -10434,7 +10448,7 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
-			handleOAuthRegister(rec, req)
+			handleOAuthRegisterWithClientStore(oauthClientStore, rec, req)
 
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%q (R-KCBH-CXY9)",
@@ -10877,7 +10891,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 		strings.NewReader(`{"redirect_uris":[`+strconv.Quote(redirectURI)+`]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -10904,7 +10918,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, rec, req)
 		return rec
 	}
 
@@ -10971,7 +10985,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		strings.NewReader(`{"redirect_uris":[`+strconv.Quote(redirectURI)+`]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -10998,7 +11012,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, rec, req)
 		return rec
 	}
 
@@ -11272,7 +11286,7 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -11296,7 +11310,8 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 	req := httptest.NewRequest(http.MethodGet, authURL, nil)
 	rec := httptest.NewRecorder()
-	handleOAuthAuthorize(rec, req)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		nil, newOAuthStateStorage(), oauthClientStore, rec, req)
 	res := rec.Result()
 	defer res.Body.Close()
 	if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -11343,7 +11358,7 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -11368,7 +11383,8 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 	badReq := httptest.NewRequest(http.MethodGet,
 		authBase+"&resource="+url.QueryEscape(mismatched), nil)
 	badRec := httptest.NewRecorder()
-	handleOAuthAuthorize(badRec, badReq)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		nil, newOAuthStateStorage(), oauthClientStore, badRec, badReq)
 	badRes := badRec.Result()
 	defer badRes.Body.Close()
 	if badRes.StatusCode != http.StatusBadRequest {
@@ -11391,7 +11407,8 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 	okReq := httptest.NewRequest(http.MethodGet,
 		authBase+"&resource="+url.QueryEscape(canonical), nil)
 	okRec := httptest.NewRecorder()
-	handleOAuthAuthorize(okRec, okReq)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		nil, newOAuthStateStorage(), oauthClientStore, okRec, okReq)
 	okRes := okRec.Result()
 	defer okRes.Body.Close()
 	if okRes.StatusCode < 300 || okRes.StatusCode >= 400 {
@@ -11459,7 +11476,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -11484,7 +11501,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 
 	authReq := httptest.NewRequest(http.MethodGet, authBase, nil)
 	authRec := httptest.NewRecorder()
-	handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, authRec, authReq)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, authRec, authReq)
 	authRes := authRec.Result()
 	defer authRes.Body.Close()
 	if authRes.StatusCode < 300 || authRes.StatusCode >= 400 {
@@ -13676,7 +13693,7 @@ func TestR_FY4A_3B1M_index_wires_counter_mutations(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: plaintext})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-FY4A-3B1M)", rec.Code)
 		}
@@ -13713,7 +13730,7 @@ func TestR_FY4A_3B1M_index_wires_counter_mutations(t *testing.T) {
 	t.Run("signed_out_index_still_subscribes_to_stream", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-FY4A-3B1M)", rec.Code)
 		}
@@ -15156,7 +15173,7 @@ func TestR_NSJ9_BJU4_banner_ends_with_blank_line(t *testing.T) {
 func TestR_UBYN_1LY0_client_tab_inner_markup(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-UBYN-1LY0)", rr.Code)
 	}
@@ -15276,7 +15293,7 @@ func TestR_UBYN_1LY0_client_tab_inner_markup(t *testing.T) {
 func TestR_8031_9QQ9_banner_title_is_hal_9000(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-8031-9QQ9)", rr.Code)
 	}
@@ -15300,7 +15317,7 @@ func TestR_8031_9QQ9_banner_title_is_hal_9000(t *testing.T) {
 func TestR_1ZS0_XSZ7_document_title_is_short_form(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-1ZS0-XSZ7)", rr.Code)
 	}
@@ -15333,7 +15350,7 @@ func TestR_1ZS0_XSZ7_document_title_is_short_form(t *testing.T) {
 func TestR_WOEN_ND69_named_blocks_are_children_of_page(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-WOEN-ND69)", rr.Code)
 	}
@@ -15394,7 +15411,7 @@ func TestR_WOEN_ND69_named_blocks_are_children_of_page(t *testing.T) {
 func TestR_9TPL_HQBV_named_blocks_separate_children_of_page(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-9TPL-HQBV)", rr.Code)
 	}
@@ -15494,7 +15511,7 @@ func TestR_9TPL_HQBV_named_blocks_separate_children_of_page(t *testing.T) {
 func TestR_GTPJ_Z8EL_three_sections_share_uniform_gap_markup(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-GTPJ-Z8EL)", rr.Code)
 	}
@@ -15621,7 +15638,7 @@ func TestR_GTPJ_Z8EL_three_sections_share_uniform_gap_markup(t *testing.T) {
 func TestR_NBGD_KUHA_instructions_head_not_card_chrome(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-NBGD-KUHA)", rr.Code)
 	}
@@ -15690,7 +15707,7 @@ func TestR_NBGD_KUHA_instructions_head_not_card_chrome(t *testing.T) {
 func TestR_MCHV_YEO4_no_shadowed_classes(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-MCHV-YEO4)", rr.Code)
 	}
@@ -15726,7 +15743,7 @@ func TestR_MCHV_YEO4_no_shadowed_classes(t *testing.T) {
 func TestR_UAQQ_NU7B_title_subtitle_are_page_scope_only(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-UAQQ-NU7B)", rr.Code)
 	}
@@ -16083,7 +16100,7 @@ func TestR_772N_VHQE_default_active_tab_first_render(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "hal.example.test"
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-772N-VHQE)", rr.Code)
 	}
@@ -16152,7 +16169,7 @@ func TestR_UBPK_DLTT_code_blocks_use_canonical_code_class(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "hal." + "example" + ".test"
-	handleIndex(rr, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (R-UBPK-DLTT)", rr.Code)
 	}
@@ -16484,7 +16501,7 @@ func TestR_0WB7_RV1W_banner_auth_placement_and_shape(t *testing.T) {
 	t.Run("signed_out_pill_sign_in_inside_banner_card", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-0WB7-RV1W)", rec.Code)
 		}
@@ -16541,7 +16558,7 @@ func TestR_0WB7_RV1W_banner_auth_placement_and_shape(t *testing.T) {
 			Value: plaintext,
 		})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-0WB7-RV1W)", rec.Code)
 		}
@@ -16803,7 +16820,7 @@ func TestR_EJAP_XUSB_counter_card_structure(t *testing.T) {
 	t.Run("signed_out_buttons_disabled", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-EJAP-XUSB)", rec.Code)
 		}
@@ -16821,7 +16838,7 @@ func TestR_EJAP_XUSB_counter_card_structure(t *testing.T) {
 			Value: plaintext,
 		})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (R-EJAP-XUSB)", rec.Code)
 		}
@@ -16858,7 +16875,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 	t.Run("signed_out_no_block", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d (R-0NRX-3GV1)", rec.Code)
 		}
@@ -16877,7 +16894,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if strings.Contains(rec.Body.String(), blockOpen) {
 			t.Errorf("signed-in/zero-chains body contains agents block "+
 				"(R-0NRX-3GV1): %q", rec.Body.String())
@@ -16902,7 +16919,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		body := rec.Body.String()
 
 		if got := strings.Count(body, blockOpen); got != 1 {
@@ -16944,7 +16961,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if strings.Contains(rec.Body.String(), blockOpen) {
 			t.Errorf("agents block surfaced another email's chain "+
 				"(R-0NRX-3GV1): %q", rec.Body.String())
@@ -16984,7 +17001,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if strings.Contains(rec.Body.String(), blockOpen) {
 			t.Errorf("agents block surfaced revoked/expired chains "+
 				"(R-0NRX-3GV1): %q", rec.Body.String())
@@ -17061,7 +17078,7 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		body := w.Body.String()
 
 		row := rowFor(t, body, chainID)
@@ -17120,7 +17137,7 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		body := w.Body.String()
 
 		row := rowFor(t, body, chainID)
@@ -17162,7 +17179,7 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	marker := `data-chain-id="` + chainID + `"`
@@ -17213,7 +17230,7 @@ func TestR_TEP7_Q6UT_signed_in_email_renders_as_inert_text(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	start := strings.Index(body, `<div class="banner-auth">`)
@@ -17258,7 +17275,7 @@ func TestR_A2L2_1NA1_signed_in_sign_out_is_post_form_without_href(t *testing.T) 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	start := strings.Index(body, `<div class="banner-auth">`)
@@ -17346,7 +17363,7 @@ func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		return w.Body.String()
 	}
 	assertBefore := func(t *testing.T, body, firstChain, secondChain string) {
@@ -17805,7 +17822,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		}
 		// Every entry must be owned by `mine` — we cross-check by asking
 		// the canonical helper.
-		liveMine := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(mine)
+		liveMine := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(mine, oauthClientStore)
 		if mineCount != len(liveMine) {
 			t.Fatalf("snapshot has %d entries, mine actually has %d — "+
 				"per-email scoping violated (R-0TVF-0BKI)",
@@ -17895,7 +17912,7 @@ func TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	if strings.Contains(body, `<div class="agents-block"`) {
@@ -18187,7 +18204,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 	regReq.Header.Set("Content-Type", "application/json")
 	regRec := httptest.NewRecorder()
-	handleOAuthRegister(regRec, regReq)
+	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 	regRes := regRec.Result()
 	defer regRes.Body.Close()
 	if regRes.StatusCode != http.StatusCreated {
@@ -18233,7 +18250,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 					"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 				req := httptest.NewRequest("GET", u, nil)
 				rec := httptest.NewRecorder()
-				handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
+				handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, rec, req)
 				return rec.Result()
 			},
 		},
@@ -18426,7 +18443,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 			strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 		regReq.Header.Set("Content-Type", "application/json")
 		regRec := httptest.NewRecorder()
-		handleOAuthRegister(regRec, regReq)
+		handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 		regRes := regRec.Result()
 		defer regRes.Body.Close()
 		if regRes.StatusCode != http.StatusCreated {
@@ -18459,7 +18476,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 			"&resource=" + url.QueryEscape(wantResource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -18530,7 +18547,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 		regReq.Header.Set("Content-Type", "application/json")
 		regRec := httptest.NewRecorder()
-		handleOAuthRegister(regRec, regReq)
+		handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
 		regRes := regRec.Result()
 		defer regRes.Body.Close()
 		if regRes.StatusCode != http.StatusCreated {
@@ -18561,7 +18578,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			"&resource=" + url.QueryEscape(resource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(nil, states, oauthClientStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -20724,7 +20741,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		// whose agents would be listed.
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d (R-VTZ5-5FF5)", rec.Code)
 		}
@@ -20745,7 +20762,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		body := rec.Body.String()
 		if strings.Contains(body, blockOpen) {
 			t.Errorf("signed-in/zero-chains response contains agents block "+
@@ -20769,7 +20786,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		body := rec.Body.String()
 
 		if !strings.Contains(body, blockOpen) {
@@ -20816,7 +20833,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		rec := httptest.NewRecorder()
-		handleIndex(rec, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, rec, req)
 		body := rec.Body.String()
 		// No agents block must appear — and the other email's client_id must
 		// not be visible anywhere in the response.
@@ -20889,7 +20906,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, `<span class="agent-name">`) {
@@ -20914,7 +20931,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, "(parens99)") {
@@ -20955,7 +20972,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, "undefined") {
@@ -20979,7 +20996,7 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		row := rowFor(t, w.Body.String(), chainID)
 
 		if !strings.Contains(row, `class="auth-btn"`) {
@@ -21028,7 +21045,7 @@ func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
@@ -21126,7 +21143,7 @@ func TestR_2ZZH_LJYA_banner_grows_for_identity_stack(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
@@ -21179,7 +21196,7 @@ func TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)
@@ -21247,7 +21264,7 @@ func TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding(t *testing.T)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	if !strings.Contains(body, `class="agents-block"`) {
@@ -21309,7 +21326,7 @@ func TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows(t *testing.T) {
 			req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		}
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("GET / status = %d, want 200 (R-TS71-XRW4)", w.Code)
 		}
@@ -21399,7 +21416,7 @@ func TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth(t *testing.T) {
 			req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 		}
 		w := httptest.NewRecorder()
-		handleIndex(w, req)
+		handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("GET / status = %d, want 200 (R-O87H-RSH4)", w.Code)
 		}
@@ -21478,7 +21495,7 @@ func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sess})
 	w := httptest.NewRecorder()
-	handleIndex(w, req)
+	handleIndexWithStores(webSessionStore, oauthTokenStore, oauthClientStore, w, req)
 	body := w.Body.String()
 
 	bannerRe := regexp.MustCompile(`<section class="banner">([\s\S]*?)</section>`)

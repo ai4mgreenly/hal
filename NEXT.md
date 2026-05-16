@@ -78,3 +78,37 @@ Notes:
 - The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
   while `go` is Go 1.26.2; verification used `env -u GOROOT` to select
   `/usr/local/go`.
+
+## Result — 2026-05-16
+
+Strangled singleton: `oauthClientStore`.
+
+Completed:
+- Removed the production mutable package-level OAuth client store singleton.
+- Added `newOAuthClientStorage()` and explicit client-store handler variants.
+- Constructed the production OAuth client store in `runServeWithEnvAndClock`
+  and threaded it through DCR, authorize, index-agent rendering, and
+  agents-stream rendering.
+- Updated tests that inspect OAuth clients to use an explicit test-owned
+  client store.
+
+Files changed:
+- `app-root/main.go`
+- `app-root/main_test.go`
+- `NEXT.md`
+
+Verification:
+- `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
+  state failure: `.ralph/requirements-verified.jsonl: permission denied`.
+- `env -u GOROOT go test -run 'TestR_[^K]' ./...` passed.
+- `env -u GOROOT go test -race -run 'TestR_[^K]' ./...` passed.
+- `env -u GOROOT go vet ./...` passed.
+- `gofmt -w main.go main_test.go` completed.
+- `awk 'length($0) > 120 { ... }' main.go main_test.go` found no
+  overlength lines.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .`
+  passed.
+
+Notes:
+- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
+  while `go` is Go 1.26.2; verification used `env -u GOROOT`.

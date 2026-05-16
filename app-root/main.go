@@ -1668,7 +1668,9 @@ type oauthClientStorage struct {
 	db *sql.DB
 }
 
-var oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
+func newOAuthClientStorage() *oauthClientStorage {
+	return &oauthClientStorage{m: map[string]*oauthClient{}}
+}
 
 func (s *oauthClientStorage) put(clientID string, c *oauthClient) {
 	s.mu.Lock()
@@ -2440,10 +2442,12 @@ type agentChainR_0NRX_3GV1 struct {
 // liveAgentChainsR_0NRX_3GV1 walks the token store under .mu.Lock(),
 // groups un-revoked un-expired refresh records owned by `email` by
 // chainID, and returns one entry per chain. Client name is resolved
-// from oauthClientStore after the token-store lock is released to
+// from the supplied OAuth client store after the token-store lock is released to
 // keep the two stores' critical sections independent. Order is not pinned
 // here; the render and stream seams sort by rendered row identity.
-func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(email string) []agentChainR_0NRX_3GV1 {
+func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(
+	email string, clients *oauthClientStorage,
+) []agentChainR_0NRX_3GV1 {
 	if email == "" {
 		return nil
 	}
@@ -2493,8 +2497,10 @@ func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(email string) []agentChai
 			clientID: p.clientID,
 			issuedAt: p.issuedAt,
 		}
-		if c := oauthClientStore.lookup(p.clientID); c != nil {
-			row.clientName = c.clientName
+		if clients != nil {
+			if c := clients.lookup(p.clientID); c != nil {
+				row.clientName = c.clientName
+			}
 		}
 		out = append(out, row)
 	}
@@ -2899,6 +2905,7 @@ func runServeWithEnvAndClock(
 		prev := testEnvLookups.Swap(false)
 		defer testEnvLookups.Store(prev)
 	}
+	servingOAuthClients := newOAuthClientStorage()
 	var servingGoogleIDP googleIDP
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to theCounter so every increment/decrement persists.
@@ -2917,7 +2924,7 @@ func runServeWithEnvAndClock(
 			fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 			return 1
 		}
-		if err := oauthClientStore.attach(db); err != nil {
+		if err := servingOAuthClients.attach(db); err != nil {
 			fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
 			return 1
 		}
@@ -3006,7 +3013,9 @@ func runServeWithEnvAndClock(
 	// method returns 405 plus Allow here, before any endpoint handler can
 	// fall through to another surface or perform its action.
 	mux := newDocumentedMux()
-	mux.HandleFunc(http.MethodGet, "/", handleIndex)
+	mux.HandleFunc(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
+		handleIndexWithStores(webSessionStore, oauthTokenStore, servingOAuthClients, w, r)
+	})
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
 	servingOAuthStates := newOAuthStateStorage()
 	mux.HandleFunc(http.MethodGet, "/login", func(w http.ResponseWriter, r *http.Request) {
@@ -3022,7 +3031,8 @@ func runServeWithEnvAndClock(
 	defer oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast)
 	servingOAuthAuthCodes := newOAuthAuthCodeStorage()
 	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
-		handleAgentsStreamWithBroadcaster(servingAgentsBcast, w, r)
+		handleAgentsStreamWithStores(
+			webSessionStore, oauthTokenStore, servingOAuthClients, servingAgentsBcast, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
 		handleGoogleCallbackWithGoogleIDPStores(
@@ -3041,9 +3051,12 @@ func runServeWithEnvAndClock(
 	// one MCP clients discover per RFC 9728 §5.1.
 	mux.HandleFunc(http.MethodGet, "/.well-known/oauth-protected-resource/mcp",
 		handleOAuthProtectedResourceMetadata)
-	mux.HandleFunc(http.MethodPost, "/oauth/register", handleOAuthRegister)
+	mux.HandleFunc(http.MethodPost, "/oauth/register", func(w http.ResponseWriter, r *http.Request) {
+		handleOAuthRegisterWithClientStore(servingOAuthClients, w, r)
+	})
 	mux.HandleFunc(http.MethodGet, "/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthAuthorizeWithGoogleIDPAndStateStore(servingGoogleIDP, servingOAuthStates, w, r)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+			servingGoogleIDP, servingOAuthStates, servingOAuthClients, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		handleOAuthTokenWithAuthCodeStore(servingOAuthAuthCodes, w, r)
@@ -3127,6 +3140,13 @@ func runServeWithEnvAndClock(
 // port is deliberately omitted from the left text — a deployment-
 // internal detail the page does not disclose.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
+	handleIndexWithStores(webSessionStore, oauthTokenStore, nil, w, r)
+}
+
+func handleIndexWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
+	w http.ResponseWriter, r *http.Request,
+) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// bankJSON is the subtitle bank embedded in the page so the re-roll
 	// button can pick a fresh entry client-side without a page reload
@@ -3151,7 +3171,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	// (R-GVMQ-ZCBQ pins the no-session "disabled" treatment).
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = webSessionStore.lookup(c.Value)
+		session = sessions.lookup(c.Value)
 	}
 	var bannerAuth, counterDisabled string
 	if session != nil {
@@ -3183,7 +3203,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	// row instead of reserving vertical space for absent agent rows.
 	var agentsBlock string
 	if session != nil {
-		chains := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(session.ownerEmail)
+		chains := tokens.liveAgentChainsR_0NRX_3GV1(session.ownerEmail, clients)
 		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		if len(chains) > 0 {
 			var b strings.Builder
@@ -4155,9 +4175,16 @@ func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.R
 // released within 5 seconds; idle long-lived connections do not tie
 // up a finite concurrent-request resource.
 func handleAgentsStreamWithBroadcaster(bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request) {
+	handleAgentsStreamWithStores(webSessionStore, oauthTokenStore, nil, bcast, w, r)
+}
+
+func handleAgentsStreamWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
+	bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request,
+) {
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = webSessionStore.lookup(c.Value)
+		session = sessions.lookup(c.Value)
 	}
 	if session == nil {
 		http.Error(w, "web session required",
@@ -4192,7 +4219,7 @@ func handleAgentsStreamWithBroadcaster(bcast *agentsBroadcaster, w http.Response
 		return nil
 	}
 	writeSnapshot := func() error {
-		chains := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(email)
+		chains := tokens.liveAgentChainsR_0NRX_3GV1(email, clients)
 		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		type item struct {
 			ChainID    string `json:"chain_id"`
@@ -4366,6 +4393,12 @@ func handleOAuthProtectedResourceMetadata(w http.ResponseWriter,
 // what the authorize endpoint (R-4SH1-HQGP) will exact-match against
 // per R-1ERW-YD9G.
 func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	handleOAuthRegisterWithClientStore(newOAuthClientStorage(), w, r)
+}
+
+func handleOAuthRegisterWithClientStore(
+	clients *oauthClientStorage, w http.ResponseWriter, r *http.Request,
+) {
 	limitRequestBodyR_VKZD_UKVS(w, r)
 	var req struct {
 		RedirectURIs            []string `json:"redirect_uris"`
@@ -4447,7 +4480,7 @@ func handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if oauthClientStore.putIfAbsent(clientID, rec) {
+		if clients.putIfAbsent(clientID, rec) {
 			break
 		}
 		clientID = ""
@@ -4544,11 +4577,20 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
-	handleOAuthAuthorizeWithGoogleIDPAndStateStore(servingIDP, newOAuthStateStorage(), w, r)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		servingIDP, newOAuthStateStorage(), newOAuthClientStorage(), w, r)
 }
 
 func handleOAuthAuthorizeWithGoogleIDPAndStateStore(
 	servingIDP googleIDP, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
+) {
+	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+		servingIDP, states, newOAuthClientStorage(), w, r)
+}
+
+func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+	servingIDP googleIDP, states *oauthStateStorage, clients *oauthClientStorage,
+	w http.ResponseWriter, r *http.Request,
 ) {
 	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
@@ -4562,7 +4604,7 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStore(
 		http.Error(w, "client_id is required", http.StatusBadRequest)
 		return
 	}
-	client := oauthClientStore.lookup(clientID)
+	client := clients.lookup(clientID)
 	if client == nil {
 		http.Error(w, "unknown client_id", http.StatusBadRequest)
 		return
