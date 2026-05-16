@@ -9153,9 +9153,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			t.Fatalf("mcp error redirect state = %q, want %q (R-EMW1-D8A0)",
 				got, clientState)
 		}
-		authCodes.mu.Lock()
-		gotCodes := len(authCodes.m)
-		authCodes.mu.Unlock()
+		gotCodes := authCodes.Count()
 		if gotCodes != 0 {
 			t.Fatalf("auth codes after unverified callback = %d, want 0 "+
 				"(R-EMW1-D8A0)", gotCodes)
@@ -10553,7 +10551,7 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 	codeVerifier := "verifier-kcbh-cxy9-public-pkce-token-exchange"
 	sum := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := authCodes.issueWithResource(clientID, redirectURI,
+	code, err := authCodes.IssueWithResource(clientID, redirectURI,
 		codeChallenge, "S256", "user@example.com", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issue auth code: %v (R-KCBH-CXY9)", err)
@@ -10613,7 +10611,7 @@ func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
 	)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := authCodes.issueWithResource(
+	code, err := authCodes.IssueWithResource(
 		clientID, redirectURI, challenge, "S256",
 		"user@example.com", canonicalResourceIdentifier())
 	if err != nil {
@@ -11133,7 +11131,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	const verifier = "s256-verifier-for-r-jttz-cg5j-long-enough"
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := authCodes.issueWithResource(
+	code, err := authCodes.IssueWithResource(
 		clientID, redirectURI, challenge, "S256", "user@example.com",
 		canonicalResourceIdentifier())
 	if err != nil {
@@ -11173,7 +11171,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 			tokenRec.Code, tokenRec.Body.String())
 	}
 
-	if _, err := authCodes.issue(
+	if _, err := authCodes.Issue(
 		clientID, redirectURI, verifier, "plain", "user@example.com"); !errors.Is(err, errOAuthAuthCodePKCEMethod) {
 		t.Fatalf("issue plain method returned %v, want errOAuthAuthCodePKCEMethod (R-JTTZ-CG5J)", err)
 	}
@@ -12729,7 +12727,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("issue_then_redeem_once_succeeds", func(t *testing.T) {
 		reset()
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: unexpected error %v (R-ZPE1-0DV8)", err)
@@ -12737,12 +12735,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		if code == "" {
 			t.Fatalf("issue: empty code (R-ZPE1-0DV8)")
 		}
-		rec, err := authCodes.redeem(
+		rec, err := authCodes.Redeem(
 			code, clientID, redirectURI, verifier)
 		if err != nil {
 			t.Fatalf("redeem: unexpected error %v (R-ZPE1-0DV8)", err)
 		}
-		if rec == nil || rec.ownerEmail != "user@example.com" {
+		if rec == nil || rec.OwnerEmail() != "user@example.com" {
 			t.Errorf("redeem: returned record %+v missing bound owner email "+
 				"(R-ZPE1-0DV8)", rec)
 		}
@@ -12750,16 +12748,16 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("second_redemption_rejected", func(t *testing.T) {
 		reset()
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		if _, err := authCodes.redeem(
+		if _, err := authCodes.Redeem(
 			code, clientID, redirectURI, verifier); err != nil {
 			t.Fatalf("first redeem: %v", err)
 		}
-		_, err = authCodes.redeem(
+		_, err = authCodes.Redeem(
 			code, clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeConsumed) {
 			t.Errorf("second redeem returned %v, want errOAuthAuthCodeConsumed "+
@@ -12773,7 +12771,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		// configured TTL deterministically without sleeping.
 		base := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 		oauthAuthCodeNow = func() time.Time { return base }
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
@@ -12782,7 +12780,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		oauthAuthCodeNow = func() time.Time {
 			return base.Add(authCfg().AuthCodeTTL + time.Second)
 		}
-		_, err = authCodes.redeem(
+		_, err = authCodes.Redeem(
 			code, clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeExpired) {
 			t.Errorf("expired-code redeem returned %v, want "+
@@ -12793,12 +12791,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("client_id_mismatch_rejected", func(t *testing.T) {
 		reset()
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = authCodes.redeem(
+		_, err = authCodes.Redeem(
 			code, "other-client", redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeClientMismatch) {
 			t.Errorf("client-id-mismatch redeem returned %v, want "+
@@ -12809,12 +12807,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("redirect_uri_mismatch_rejected", func(t *testing.T) {
 		reset()
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = authCodes.redeem(
+		_, err = authCodes.Redeem(
 			code, clientID, "http://127.0.0.1/other", verifier)
 		if !errors.Is(err, errOAuthAuthCodeRedirectMismatch) {
 			t.Errorf("redirect-uri-mismatch redeem returned %v, want "+
@@ -12825,12 +12823,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("pkce_verifier_mismatch_rejected_S256", func(t *testing.T) {
 		reset()
-		code, err := authCodes.issue(
+		code, err := authCodes.Issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = authCodes.redeem(
+		_, err = authCodes.Redeem(
 			code, clientID, redirectURI, "not-the-real-verifier")
 		if !errors.Is(err, errOAuthAuthCodePKCEMismatch) {
 			t.Errorf("pkce-mismatch redeem (S256) returned %v, want "+
@@ -12842,7 +12840,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 	t.Run("issue_rejects_unsupported_method", func(t *testing.T) {
 		reset()
 		for _, method := range []string{"plain", "MD5"} {
-			_, err := authCodes.issue(
+			_, err := authCodes.Issue(
 				clientID, redirectURI, challenge, method, "user@example.com")
 			if !errors.Is(err, errOAuthAuthCodePKCEMethod) {
 				t.Errorf("issue with unsupported method %q returned %v, want "+
@@ -12854,7 +12852,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("unknown_code_rejected", func(t *testing.T) {
 		reset()
-		_, err := authCodes.redeem(
+		_, err := authCodes.Redeem(
 			"never-issued", clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeUnknown) {
 			t.Errorf("redeem of never-issued code returned %v, want "+
@@ -15922,7 +15920,8 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	dir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/state.go", "websession/session.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/state.go",
+		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
@@ -16008,7 +16007,8 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	srcDir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/state.go", "websession/session.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/state.go",
+		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
 		if err != nil {
@@ -18690,9 +18690,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 	t.Run("mcp_origin_redirects_to_recorded_redirect_uri_with_HAL_code_and_echoed_state",
 		func(t *testing.T) {
 			_, state, bindingID, redirect, challenge, alg, clientState, resource := driveAuthorize(t)
-			authCodes.mu.Lock()
-			authCodes.m = map[string]*oauthAuthCode{}
-			authCodes.mu.Unlock()
+			authCodes.ResetForTest()
 			beforeSessions := webSessionStore.Count()
 
 			res := doCallback(t, state, bindingID)
@@ -18737,19 +18735,17 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 				t.Fatalf("Location missing code= (R-MUZJ-RD0L)")
 			}
 
-			authCodes.mu.Lock()
-			codeRec := authCodes.m[halCode]
-			authCodes.mu.Unlock()
-			if codeRec == nil {
+			codeRec, ok := authCodes.Snapshot(halCode)
+			if !ok {
 				t.Fatalf("HAL code %q not in auth-code store (R-MUZJ-RD0L)",
 					halCode)
 			}
 			checks := []struct{ name, got, want string }{
-				{"redirectURI", codeRec.redirectURI, redirect},
-				{"codeChallenge", codeRec.codeChallenge, challenge},
-				{"codeChallengeMethod", codeRec.codeChallengeMethod, alg},
-				{"resource", codeRec.resource, resource},
-				{"ownerEmail", codeRec.ownerEmail, "user@example.com"},
+				{"redirectURI", codeRec.RedirectURI(), redirect},
+				{"codeChallenge", codeRec.CodeChallenge(), challenge},
+				{"codeChallengeMethod", codeRec.CodeChallengeMethod(), alg},
+				{"resource", codeRec.Resource(), resource},
+				{"ownerEmail", codeRec.OwnerEmail(), "user@example.com"},
 			}
 			for _, c := range checks {
 				if c.got != c.want {
@@ -20523,7 +20519,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := authCodes.issueWithResource(
+	code, err := authCodes.IssueWithResource(
 		clientID, redirectURI, challenge, "S256", owner,
 		canonicalResourceIdentifier())
 	if err != nil {

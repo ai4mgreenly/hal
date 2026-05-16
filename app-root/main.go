@@ -1587,41 +1587,18 @@ func randomOAuthClientID() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// R-ZPE1-0DV8: oauthAuthCode is a single-use, short-lived authorization
-// code bound at issue time to the three values the originating authorize
-// request supplied — the requesting client's client_id, the PKCE code
-// challenge (with its method), and the redirect_uri. The token endpoint
-// (R-27SO-F63X, separate iteration) presents (client_id, redirect_uri,
-// code_verifier) alongside the code; redemption succeeds only when the
-// presented client_id matches the bound value, the presented redirect_uri
-// is byte-equal to the bound one, and the presented verifier hashes to
-// the bound challenge under the bound method. A second presentation of
-// an already-redeemed code is rejected; an expired code is rejected.
-// Without these bindings PKCE is decorative and a leaked code is
-// exchangeable by an attacker.
-type oauthAuthCode struct {
-	clientID            string
-	redirectURI         string
-	codeChallenge       string
-	codeChallengeMethod string
-	ownerEmail          string
-	// resource carries the canonical resource identifier the originating
-	// MCP `/oauth/authorize` request bound, either explicitly or through
-	// the R-WLUL-MZCD omission default. R-4GRA-EGBY has already checked
-	// any present value byte-for-byte by the time an authorization code is
-	// minted.
-	resource  string
-	expiresAt time.Time
-	consumed  bool
-}
-
-type oauthAuthCodeStorage struct {
-	mu sync.Mutex
-	m  map[string]*oauthAuthCode
-}
+type oauthAuthCode = oauthpkg.AuthCode
+type oauthAuthCodeStorage = oauthpkg.AuthCodeStore
 
 func newOAuthAuthCodeStorage() *oauthAuthCodeStorage {
-	return &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	return oauthpkg.NewAuthCodeStore(oauthpkg.AuthCodeOptions{
+		Now: func() time.Time {
+			return oauthAuthCodeNow()
+		},
+		TTL: func() time.Duration {
+			return authCfg().AuthCodeTTL
+		},
+	})
 }
 
 // oauthAuthCodeNow is the clock the auth-code store reads for issue and
@@ -1634,106 +1611,14 @@ var oauthAuthCodeNow = appNow
 // distinct failure". These are internal errors; the /oauth/token handler
 // translates them to the wire-level OAuth error response shape.
 var (
-	errOAuthAuthCodeUnknown          = errors.New("authorization code not recognized")
-	errOAuthAuthCodeExpired          = errors.New("authorization code expired")
-	errOAuthAuthCodeConsumed         = errors.New("authorization code already redeemed")
-	errOAuthAuthCodeClientMismatch   = errors.New("client_id does not match the bound value")
-	errOAuthAuthCodeRedirectMismatch = errors.New("redirect_uri does not match the bound value")
-	errOAuthAuthCodePKCEMismatch     = errors.New("code_verifier does not satisfy the bound code_challenge")
-	errOAuthAuthCodePKCEMethod       = errors.New("unsupported code_challenge_method")
+	errOAuthAuthCodeUnknown          = oauthpkg.ErrAuthCodeUnknown
+	errOAuthAuthCodeExpired          = oauthpkg.ErrAuthCodeExpired
+	errOAuthAuthCodeConsumed         = oauthpkg.ErrAuthCodeConsumed
+	errOAuthAuthCodeClientMismatch   = oauthpkg.ErrAuthCodeClientMismatch
+	errOAuthAuthCodeRedirectMismatch = oauthpkg.ErrAuthCodeRedirectMismatch
+	errOAuthAuthCodePKCEMismatch     = oauthpkg.ErrAuthCodePKCEMismatch
+	errOAuthAuthCodePKCEMethod       = oauthpkg.ErrAuthCodePKCEMethod
 )
-
-// issue records a freshly generated authorization code with its three
-// bindings and the configured TTL, returning the opaque code string the
-// authorize endpoint redirects back to the user-agent.
-func (s *oauthAuthCodeStorage) issue(
-	clientID, redirectURI, codeChallenge, codeChallengeMethod, ownerEmail string,
-) (string, error) {
-	return s.issueWithResource(
-		clientID, redirectURI, codeChallenge, codeChallengeMethod,
-		ownerEmail, "")
-}
-
-// issueWithResource is the R-MUZJ-RD0L variant: it additionally binds
-// the recorded MCP-authorize `resource` value onto the code so the
-// token-exchange path can propagate it onto the access-token record.
-func (s *oauthAuthCodeStorage) issueWithResource(
-	clientID, redirectURI, codeChallenge, codeChallengeMethod, ownerEmail, resource string,
-) (string, error) {
-	// R-JTTZ-CG5J: HAL supports only the S256 PKCE transform. Keeping
-	// the issuance gate here ensures even direct code-minting paths cannot
-	// create a redeemable authorization code bound to `plain`.
-	if codeChallengeMethod != "S256" {
-		return "", errOAuthAuthCodePKCEMethod
-	}
-	var buf [32]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	code := hex.EncodeToString(buf[:])
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[code] = &oauthAuthCode{
-		clientID:            clientID,
-		redirectURI:         redirectURI,
-		codeChallenge:       codeChallenge,
-		codeChallengeMethod: codeChallengeMethod,
-		ownerEmail:          ownerEmail,
-		resource:            resource,
-		expiresAt:           oauthAuthCodeNow().Add(authCfg().AuthCodeTTL),
-	}
-	return code, nil
-}
-
-// pkceVerifierMatches reports whether the presented verifier satisfies
-// the bound challenge under the only supported method (R-JTTZ-CG5J):
-// S256 is base64url(SHA-256(verifier)) without padding.
-func pkceVerifierMatches(method, challenge, verifier string) bool {
-	switch method {
-	case "S256":
-		sum := sha256.Sum256([]byte(verifier))
-		return challenge == base64.RawURLEncoding.EncodeToString(sum[:])
-	default:
-		return false
-	}
-}
-
-// redeem validates the presented (clientID, redirectURI, codeVerifier)
-// against the bindings the code was issued with and atomically marks the
-// record consumed on success. A second call with the same code reports
-// errOAuthAuthCodeConsumed regardless of the presented values.
-//
-// The redeemed record (or nil on failure) is returned so the caller can
-// honor the R-9HGE-87UG chain-revocation posture — the same code being
-// presented twice is the trigger to revoke every token previously issued
-// from it. That revocation lands when the token store does.
-func (s *oauthAuthCodeStorage) redeem(
-	code, clientID, redirectURI, codeVerifier string,
-) (*oauthAuthCode, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.m[code]
-	if !ok {
-		return nil, errOAuthAuthCodeUnknown
-	}
-	if rec.consumed {
-		return rec, errOAuthAuthCodeConsumed
-	}
-	if !oauthAuthCodeNow().Before(rec.expiresAt) {
-		return nil, errOAuthAuthCodeExpired
-	}
-	if rec.clientID != clientID {
-		return nil, errOAuthAuthCodeClientMismatch
-	}
-	if rec.redirectURI != redirectURI {
-		return nil, errOAuthAuthCodeRedirectMismatch
-	}
-	if !pkceVerifierMatches(rec.codeChallengeMethod, rec.codeChallenge, codeVerifier) {
-		return nil, errOAuthAuthCodePKCEMismatch
-	}
-	rec.consumed = true
-	return rec, nil
-}
 
 // R-27SO-F63X: the service mints its own access tokens — opaque
 // cryptographically-random strings issued by the service itself, not
@@ -3605,7 +3490,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// value (R-4GRA-EGBY-vetted at authorize time) is bound onto
 		// the code so token exchange can propagate it onto the
 		// access-token record.
-		code, err := authCodes.issueWithResource(
+		code, err := authCodes.IssueWithResource(
 			mcpCtx.ClientID,
 			mcpCtx.RedirectURI,
 			mcpCtx.CodeChallenge,
@@ -4448,13 +4333,13 @@ func handleOAuthTokenAuthCodeWithStores(
 				"redirect_uri, code_verifier")
 		return
 	}
-	rec, err := authCodes.redeem(code, clientID, redirectURI, codeVerifier)
+	rec, err := authCodes.Redeem(code, clientID, redirectURI, codeVerifier)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
 	access, refresh, err := tokens.issueInitialTokenPairR_2HT5_50F4(
-		rec.ownerEmail, rec.clientID, rec.resource)
+		rec.OwnerEmail(), rec.ClientID(), rec.Resource())
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

@@ -82,3 +82,32 @@ Verification from `app-root/`:
 Follow-up risk: `main` still carries temporary compatibility type aliases and
 constructor/error wiring for the extracted state package so the rest of the
 large OAuth/token cluster can be moved incrementally without weakening tests.
+
+## Result — 2026-05-16 auth-code slice
+
+Completed the next coherent OAuth/token extraction slice: the authorization-code
+record and store now live in `app-root/oauth`, including code issuance, S256 PKCE
+verification, redemption, expiry, single-use detection, distinct redemption
+errors, count/reset/snapshot diagnostics, and host-supplied clock/TTL policy.
+`main` now wires the package through the existing application clock and
+configured auth-code TTL, and the callback/token handlers consume the exported
+store surface. OAuth client registration and access/refresh-token storage remain
+in `main` for later slices.
+
+Files changed: `app-root/oauth/authcode.go`, `app-root/main.go`,
+`app-root/main_test.go`, `NEXT.md`.
+
+Verification from `app-root/`:
+- `gofmt -w main.go main_test.go oauth/authcode.go oauth/state.go` — passed.
+- `GOROOT=/usr/local/go go vet ./...` — passed.
+- line-length awk check over Go sources — no output.
+- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` — passed.
+- `GOROOT=/usr/local/go go test ./... -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_2HT5_50F4|TestR_WLUL_MZCD|TestR_EMW1_D8A0|TestR_8OAK_OKFV|TestR_8PIH_2C6K'` — passed.
+- `GOROOT=/usr/local/go go test ./...` — blocked only by out-of-scope local
+  Ralph state: `.ralph/requirements-verified.jsonl` permission denied.
+- `GOROOT=/usr/local/go go test -race ./...` — blocked only by the same
+  out-of-scope local Ralph state.
+
+Follow-up risk: `main` still carries compatibility aliases and constructor/error
+wiring for the extracted state and auth-code packages while client registration
+and token-chain storage remain to be moved.
