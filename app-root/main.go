@@ -108,6 +108,10 @@ func appNewTicker(d time.Duration) appTicker {
 // description states what the tool does, what it returns, and when to
 // choose it, so a model can pick the right tool without further context.
 func newMCPServer() *mcp.Server {
+	return newMCPServerWithTokenStore(newOAuthTokenStorage())
+}
+
+func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{Name: "hal", Version: halVersion},
 		nil,
@@ -135,7 +139,7 @@ func newMCPServer() *mcp.Server {
 			"arguments. The returned value is the counter's state AFTER the increment, " +
 			"a non-negative integer. Use this when the user wants the counter to go up by " +
 			"one; call counter_read first if you need the pre-increment value.",
-	}, counterIncrementTool)
+	}, counterIncrementToolWithTokenStore(tokens))
 	// R-GG9B-GS8T: the decrement tool accepts no arguments. When the
 	// counter is greater than zero, subtract one and return the
 	// post-decrement value. When the counter is exactly zero, return
@@ -150,7 +154,7 @@ func newMCPServer() *mcp.Server {
 			"non-negative integer. The counter cannot go below zero: if it is already zero, " +
 			"this tool returns an error and does not modify the counter. Use this when the " +
 			"user wants the counter to go down by one.",
-	}, counterDecrementTool)
+	}, counterDecrementToolWithTokenStore(tokens))
 	return s
 }
 
@@ -169,25 +173,35 @@ type counterIncrementOutput struct {
 }
 
 func counterIncrementTool(
-	_ context.Context, req *mcp.CallToolRequest, _ struct{},
+	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterIncrementOutput, error) {
-	// R-ZQS0-HWZ8: gate on a valid bearer access token issued by this
-	// service. The Streamable HTTP transport hands the per-request HTTP
-	// headers to handlers on req.Extra.Header; we validate via the same
-	// oauthTokenStore the /counter/increment HTTP gate uses, so an MCP
-	// client and a browser client see the same accept/reject decision
-	// against the same store.
-	var hdr http.Header
-	if req != nil && req.Extra != nil {
-		hdr = req.Extra.Header
+	return counterIncrementToolWithTokenStore(newOAuthTokenStorage())(ctx, req, struct{}{})
+}
+
+func counterIncrementToolWithTokenStore(tokens *oauthTokenStorage) func(
+	context.Context, *mcp.CallToolRequest, struct{},
+) (*mcp.CallToolResult, counterIncrementOutput, error) {
+	return func(
+		_ context.Context, req *mcp.CallToolRequest, _ struct{},
+	) (*mcp.CallToolResult, counterIncrementOutput, error) {
+		// R-ZQS0-HWZ8: gate on a valid bearer access token issued by this
+		// service. The Streamable HTTP transport hands the per-request HTTP
+		// headers to handlers on req.Extra.Header; we validate via the same
+		// token store the /counter/increment HTTP gate uses, so an MCP
+		// client and a browser client see the same accept/reject decision
+		// against the same store.
+		var hdr http.Header
+		if req != nil && req.Extra != nil {
+			hdr = req.Extra.Header
+		}
+		if ok, errDesc := checkMCPBearerWithTokenStore(tokens, hdr); !ok {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
+			}, counterIncrementOutput{}, nil
+		}
+		return nil, counterIncrementOutput{Value: theCounter.increment()}, nil
 	}
-	if ok, errDesc := checkMCPBearer(hdr); !ok {
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
-		}, counterIncrementOutput{}, nil
-	}
-	return nil, counterIncrementOutput{Value: theCounter.increment()}, nil
 }
 
 type counterDecrementOutput struct {
@@ -195,31 +209,41 @@ type counterDecrementOutput struct {
 }
 
 func counterDecrementTool(
-	_ context.Context, req *mcp.CallToolRequest, _ struct{},
+	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterDecrementOutput, error) {
-	// R-285U-FWW3: MCP counter_decrement uses the same bearer-token
-	// validation as counter_increment; access tokens are service-wide
-	// for counter mutations, not scoped per operation.
-	var hdr http.Header
-	if req != nil && req.Extra != nil {
-		hdr = req.Extra.Header
+	return counterDecrementToolWithTokenStore(newOAuthTokenStorage())(ctx, req, struct{}{})
+}
+
+func counterDecrementToolWithTokenStore(tokens *oauthTokenStorage) func(
+	context.Context, *mcp.CallToolRequest, struct{},
+) (*mcp.CallToolResult, counterDecrementOutput, error) {
+	return func(
+		_ context.Context, req *mcp.CallToolRequest, _ struct{},
+	) (*mcp.CallToolResult, counterDecrementOutput, error) {
+		// R-285U-FWW3: MCP counter_decrement uses the same bearer-token
+		// validation as counter_increment; access tokens are service-wide
+		// for counter mutations, not scoped per operation.
+		var hdr http.Header
+		if req != nil && req.Extra != nil {
+			hdr = req.Extra.Header
+		}
+		if ok, errDesc := checkMCPBearerWithTokenStore(tokens, hdr); !ok {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
+			}, counterDecrementOutput{}, nil
+		}
+		v, ok := theCounter.decrement()
+		if !ok {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{
+					Text: "the counter cannot go below zero",
+				}},
+			}, counterDecrementOutput{}, nil
+		}
+		return nil, counterDecrementOutput{Value: v}, nil
 	}
-	if ok, errDesc := checkMCPBearer(hdr); !ok {
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
-		}, counterDecrementOutput{}, nil
-	}
-	v, ok := theCounter.decrement()
-	if !ok {
-		return &mcp.CallToolResult{
-			IsError: true,
-			Content: []mcp.Content{&mcp.TextContent{
-				Text: "the counter cannot go below zero",
-			}},
-		}, counterDecrementOutput{}, nil
-	}
-	return nil, counterDecrementOutput{Value: v}, nil
 }
 
 // R-8MP8-6B77: the canonical stylesheet is embedded from a checked-in
@@ -1998,7 +2022,22 @@ type oauthTokenStorage struct {
 	agentsBcast *agentsBroadcaster
 }
 
-var oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+type serveOAuthTokenStoreKey struct{}
+
+func contextWithOAuthTokenStore(ctx context.Context, tokens *oauthTokenStorage) context.Context {
+	return context.WithValue(ctx, serveOAuthTokenStoreKey{}, tokens)
+}
+
+func oauthTokenStoreFromContext(ctx context.Context) *oauthTokenStorage {
+	if tokens, ok := ctx.Value(serveOAuthTokenStoreKey{}).(*oauthTokenStorage); ok && tokens != nil {
+		return tokens
+	}
+	return newOAuthTokenStorage()
+}
+
+func newOAuthTokenStorage() *oauthTokenStorage {
+	return &oauthTokenStorage{m: map[string]*oauthToken{}}
+}
 
 const oauthRefreshTokenFormField = "refresh_token"
 
@@ -2922,6 +2961,7 @@ func runServeWithEnvAndClock(
 	}
 	servingOAuthClients := newOAuthClientStorage()
 	servingWebSessions := webSessionStoreFromContext(ctx)
+	servingOAuthTokens := oauthTokenStoreFromContext(ctx)
 	var servingGoogleIDP googleIDP
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to theCounter so every increment/decrement persists.
@@ -2948,7 +2988,7 @@ func runServeWithEnvAndClock(
 			fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
 			return 1
 		}
-		if err := oauthTokenStore.attach(db); err != nil {
+		if err := servingOAuthTokens.attach(db); err != nil {
 			fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
 			return 1
 		}
@@ -3030,7 +3070,7 @@ func runServeWithEnvAndClock(
 	// fall through to another surface or perform its action.
 	mux := newDocumentedMux()
 	mux.HandleFunc(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
-		handleIndexWithStores(servingWebSessions, oauthTokenStore, servingOAuthClients, w, r)
+		handleIndexWithStores(servingWebSessions, servingOAuthTokens, servingOAuthClients, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
 	servingOAuthStates := newOAuthStateStorage()
@@ -3044,15 +3084,15 @@ func runServeWithEnvAndClock(
 		handleLogoutWithSessionStore(servingWebSessions, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/agents/revoke", func(w http.ResponseWriter, r *http.Request) {
-		handleAgentsRevokeWithStores(servingWebSessions, oauthTokenStore, w, r)
+		handleAgentsRevokeWithStores(servingWebSessions, servingOAuthTokens, w, r)
 	})
 	servingAgentsBcast := &agentsBroadcaster{}
-	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(servingAgentsBcast)
-	defer oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast)
+	prevAgentsBcast := servingOAuthTokens.setAgentsBroadcaster(servingAgentsBcast)
+	defer servingOAuthTokens.setAgentsBroadcaster(prevAgentsBcast)
 	servingOAuthAuthCodes := newOAuthAuthCodeStorage()
 	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleAgentsStreamWithStores(
-			servingWebSessions, oauthTokenStore, servingOAuthClients, servingAgentsBcast, w, r)
+			servingWebSessions, servingOAuthTokens, servingOAuthClients, servingAgentsBcast, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
 		handleGoogleCallbackWithGoogleIDPStores(
@@ -3079,7 +3119,7 @@ func runServeWithEnvAndClock(
 			servingGoogleIDP, servingOAuthStates, servingOAuthClients, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/oauth/token", func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthTokenWithAuthCodeStore(servingOAuthAuthCodes, w, r)
+		handleOAuthTokenWithStores(servingOAuthAuthCodes, servingOAuthTokens, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
 	servingCounter := &theCounter
@@ -3088,17 +3128,17 @@ func runServeWithEnvAndClock(
 		handleCounterStreamWithCounter(servingCounter, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/counter/increment", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterIncrementWithStores(servingWebSessions, oauthTokenStore, w, r)
+		handleCounterIncrementWithStores(servingWebSessions, servingOAuthTokens, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/counter/decrement", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterDecrementWithStores(servingWebSessions, oauthTokenStore, w, r)
+		handleCounterDecrementWithStores(servingWebSessions, servingOAuthTokens, w, r)
 	})
 	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
 	// (github.com/modelcontextprotocol/go-sdk). The serve entry point owns
 	// this SDK server instance and threads it to the Streamable HTTP
 	// transport below; JSON-RPC and transport framing stay owned by the SDK,
 	// not hand-rolled in this codebase.
-	mcpServer := newMCPServer()
+	mcpServer := newMCPServerWithTokenStore(servingOAuthTokens)
 	// R-UK7D-Z0IZ: the MCP server speaks the Streamable HTTP transport
 	// defined in the current Model Context Protocol specification. The
 	// SDK-provided handler owns JSON-RPC framing, session management,
@@ -3118,7 +3158,7 @@ func runServeWithEnvAndClock(
 	// runtime, and the operator cannot configure a different path
 	// through environment or flags — there is no env var, no flag, and
 	// no code path that mounts the MCP transport at any other location.
-	mcpHandler := mcpPromptSignal(mcp.NewStreamableHTTPHandler(
+	mcpHandler := mcpPromptSignalWithTokenStore(servingOAuthTokens, mcp.NewStreamableHTTPHandler(
 		func(r *http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{JSONResponse: true},
 	))
@@ -3164,7 +3204,7 @@ func runServeWithEnvAndClock(
 // port is deliberately omitted from the left text — a deployment-
 // internal detail the page does not disclose.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	handleIndexWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, nil, w, r)
+	handleIndexWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), nil, w, r)
 }
 
 func handleIndexWithStores(
@@ -4042,7 +4082,7 @@ func handleLogoutWithSessionStore(sessions *webSessionStorage, w http.ResponseWr
 // unaffected (R-0XJ4-5MSL's lifetime-independence holds in this
 // direction too).
 func handleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
-	handleAgentsRevokeWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+	handleAgentsRevokeWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
 }
 
 func handleAgentsRevokeWithStores(
@@ -4211,7 +4251,7 @@ func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.R
 // released within 5 seconds; idle long-lived connections do not tie
 // up a finite concurrent-request resource.
 func handleAgentsStreamWithBroadcaster(bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request) {
-	handleAgentsStreamWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, nil, bcast, w, r)
+	handleAgentsStreamWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), nil, bcast, w, r)
 }
 
 func handleAgentsStreamWithStores(
@@ -4753,10 +4793,16 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 // `resource` parameter is rejected with RFC 8707 `invalid_target`
 // before any token would be minted.
 func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
-	handleOAuthTokenWithAuthCodeStore(newOAuthAuthCodeStorage(), w, r)
+	handleOAuthTokenWithStores(newOAuthAuthCodeStorage(), newOAuthTokenStorage(), w, r)
 }
 
 func handleOAuthTokenWithAuthCodeStore(authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request) {
+	handleOAuthTokenWithStores(authCodes, newOAuthTokenStorage(), w, r)
+}
+
+func handleOAuthTokenWithStores(
+	authCodes *oauthAuthCodeStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
 	limitRequestBodyR_VKZD_UKVS(w, r)
 	if err := r.ParseForm(); err != nil {
 		if requestBodyTooLargeR_VKZD_UKVS(err) {
@@ -4779,9 +4825,9 @@ func handleOAuthTokenWithAuthCodeStore(authCodes *oauthAuthCodeStorage, w http.R
 	}
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
-		handleOAuthTokenAuthCodeWithAuthCodeStore(authCodes, w, r)
+		handleOAuthTokenAuthCodeWithStores(authCodes, tokens, w, r)
 	case "refresh_token":
-		handleOAuthTokenRefresh(w, r)
+		handleOAuthTokenRefreshWithStore(tokens, w, r)
 	default:
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
 			"only authorization_code and refresh_token are supported")
@@ -4789,11 +4835,17 @@ func handleOAuthTokenWithAuthCodeStore(authCodes *oauthAuthCodeStorage, w http.R
 }
 
 func handleOAuthTokenAuthCode(w http.ResponseWriter, r *http.Request) {
-	handleOAuthTokenAuthCodeWithAuthCodeStore(newOAuthAuthCodeStorage(), w, r)
+	handleOAuthTokenAuthCodeWithStores(newOAuthAuthCodeStorage(), newOAuthTokenStorage(), w, r)
 }
 
 func handleOAuthTokenAuthCodeWithAuthCodeStore(
 	authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
+) {
+	handleOAuthTokenAuthCodeWithStores(authCodes, newOAuthTokenStorage(), w, r)
+}
+
+func handleOAuthTokenAuthCodeWithStores(
+	authCodes *oauthAuthCodeStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	code := r.PostForm.Get("code")
 	clientID := r.PostForm.Get("client_id")
@@ -4810,7 +4862,7 @@ func handleOAuthTokenAuthCodeWithAuthCodeStore(
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
-	access, refresh, err := oauthTokenStore.issueInitialTokenPairR_2HT5_50F4(
+	access, refresh, err := tokens.issueInitialTokenPairR_2HT5_50F4(
 		rec.ownerEmail, rec.clientID, rec.resource)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -4834,6 +4886,10 @@ func handleOAuthTokenAuthCodeWithAuthCodeStore(
 }
 
 func handleOAuthTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	handleOAuthTokenRefreshWithStore(newOAuthTokenStorage(), w, r)
+}
+
+func handleOAuthTokenRefreshWithStore(tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request) {
 	refreshToken := r.PostForm.Get(oauthRefreshTokenFormField)
 	clientID := r.PostForm.Get("client_id")
 	if refreshToken == "" || clientID == "" {
@@ -4844,7 +4900,7 @@ func handleOAuthTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// R-B78O-8X0F: the refresh-token grant rotates a valid refresh
 	// token into a fresh bearer access token plus successor refresh
 	// token without any browser or Google round trip.
-	access, refresh, err := oauthTokenStore.rotateRefreshForClient(refreshToken, clientID)
+	access, refresh, err := tokens.rotateRefreshForClient(refreshToken, clientID)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
@@ -4894,7 +4950,7 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 // (unknown / expired / revoked) and adding the malformed-header and
 // resource-mismatch causes here.
 func checkMutationAuth(r *http.Request) (bool, int, string, string) {
-	return checkMutationAuthWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, r)
+	return checkMutationAuthWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), r)
 }
 
 func checkMutationAuthWithStores(
@@ -5006,6 +5062,10 @@ func parseBearerAuthHeader(h string) (string, bool) {
 // the HTTP side so R-0YOE-9NO8 can pick a single error_description
 // surface when it lands.
 func checkMCPBearer(h http.Header) (bool, string) {
+	return checkMCPBearerWithTokenStore(newOAuthTokenStorage(), h)
+}
+
+func checkMCPBearerWithTokenStore(tokens *oauthTokenStorage, h http.Header) (bool, string) {
 	authHeader := h.Get("Authorization")
 	if authHeader == "" {
 		return false, "no credentials presented"
@@ -5014,7 +5074,7 @@ func checkMCPBearer(h http.Header) (bool, string) {
 	if !parsed {
 		return false, "bearer authorization header malformed"
 	}
-	rec, reason := oauthTokenStore.lookupAccessReason(plaintext)
+	rec, reason := tokens.lookupAccessReason(plaintext)
 	if rec != nil {
 		if rec.resource != canonicalResourceIdentifier() {
 			return false, "bearer token resource binding does not match"
@@ -5042,9 +5102,13 @@ func checkMCPBearer(h http.Header) (bool, string) {
 // or wrong-resource bearer credentials, the HTTP authorization boundary
 // rejects it before the SDK handler or any MCP tool handler runs.
 func mcpPromptSignal(next http.Handler) http.Handler {
+	return mcpPromptSignalWithTokenStore(newOAuthTokenStorage(), next)
+}
+
+func mcpPromptSignalWithTokenStore(tokens *oauthTokenStorage, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
-			if ok, errDesc := checkMCPBearer(r.Header); !ok {
+			if ok, errDesc := checkMCPBearerWithTokenStore(tokens, r.Header); !ok {
 				writeMCPBearerChallenge(w, r, "invalid_token", errDesc)
 				return
 			}
@@ -5142,7 +5206,7 @@ func writeSameOriginForbiddenR_R4RG_O4Y9(w http.ResponseWriter) {
 // invalid-auth request is rejected with HTTP 401 before the counter
 // is touched, so the stored value does not change.
 func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
-	handleCounterIncrementWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+	handleCounterIncrementWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
 }
 
 func handleCounterIncrementWithStores(
@@ -5167,7 +5231,7 @@ func handleCounterIncrementWithStores(
 // request is rejected with HTTP 401 before the counter is touched, so
 // the stored value does not change.
 func handleCounterDecrement(w http.ResponseWriter, r *http.Request) {
-	handleCounterDecrementWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+	handleCounterDecrementWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
 }
 
 func handleCounterDecrementWithStores(

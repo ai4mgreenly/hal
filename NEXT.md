@@ -48,16 +48,17 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result — 2026-05-16
 
-Strangled singleton: `oauthStateStore`.
+Strangled singleton: `oauthTokenStore`.
 
 Completed:
-- Removed the mutable package-level OAuth state store singleton.
-- Added `newOAuthStateStorage()` and explicit state-store handler variants.
-- Constructed the production OAuth state store in `runServeWithEnvAndClock`
-  and threaded it through `/login`, `/oauth/google/callback`, and
-  `/oauth/authorize`.
-- Updated tests that inspect or share OAuth state to use explicit test-owned
-  state stores.
+- Removed the production mutable package-level OAuth token store singleton.
+- Added `newOAuthTokenStorage()` and explicit token-store variants for MCP
+  setup, MCP bearer checks, OAuth token handling, mutation auth, agents, and
+  counter mutation handlers.
+- Constructed the serving OAuth token store in `runServeWithEnvAndClock` and
+  threaded it through the HTTP and MCP surfaces that consume token records.
+- Kept the existing test substitution point as a test-owned store in
+  `main_test.go`, with explicit context injection for serve tests.
 
 Files changed:
 - `app-root/main.go`
@@ -65,81 +66,16 @@ Files changed:
 - `NEXT.md`
 
 Verification:
-- `env -u GOROOT go test -run 'TestR_ETP6_60VA|TestR_5LQM_O89D|TestR_EMW1_D8A0|TestR_CXJ2_R3BN|TestR_8GJG_64MR|TestR_BAXT_SBU9|TestR_JTTZ_CG5J|TestR_WLUL_MZCD|TestR_T37L_4J01|TestR_MTRN_DL9W|TestR_MUZJ_RD0L' ./...` passed.
-- `env -u GOROOT go test ./...` reached the out-of-scope local Ralph state
-  failure: `.ralph/requirements-verified.jsonl: permission denied`.
-- `env -u GOROOT go test -race -run 'TestR_ETP6_60VA|TestR_5LQM_O89D|TestR_EMW1_D8A0|TestR_CXJ2_R3BN|TestR_8GJG_64MR|TestR_BAXT_SBU9|TestR_JTTZ_CG5J|TestR_WLUL_MZCD|TestR_T37L_4J01|TestR_MTRN_DL9W|TestR_MUZJ_RD0L' ./...` passed.
-- `env -u GOROOT go vet ./...` passed.
-- `rg -n "^.{121,}$" main.go main_test.go` found no overlength lines.
-- `git diff --check` passed.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-refactor-build .` passed.
-
-Notes:
-- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
-  while `go` is Go 1.26.2; verification used `env -u GOROOT` to select
-  `/usr/local/go`.
-
-## Result — 2026-05-16
-
-Strangled singleton: `oauthClientStore`.
-
-Completed:
-- Removed the production mutable package-level OAuth client store singleton.
-- Added `newOAuthClientStorage()` and explicit client-store handler variants.
-- Constructed the production OAuth client store in `runServeWithEnvAndClock`
-  and threaded it through DCR, authorize, index-agent rendering, and
-  agents-stream rendering.
-- Updated tests that inspect OAuth clients to use an explicit test-owned
-  client store.
-
-Files changed:
-- `app-root/main.go`
-- `app-root/main_test.go`
-- `NEXT.md`
-
-Verification:
+- `env -u GOROOT go test -run 'TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies|TestR_ZQS0_HWZ8|TestR_285U_FWW3|TestR_B78O_8X0F|TestR_42V5_GJW4' ./...` passed.
 - `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
   state failure: `.ralph/requirements-verified.jsonl: permission denied`.
 - `env -u GOROOT go test -run 'TestR_[^K]' ./...` passed.
 - `env -u GOROOT go test -race -run 'TestR_[^K]' ./...` passed.
 - `env -u GOROOT go vet ./...` passed.
 - `gofmt -w main.go main_test.go` completed.
-- `awk 'length($0) > 120 { ... }' main.go main_test.go` found no
-  overlength lines.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .`
-  passed.
-
-Notes:
-- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
-  while `go` is Go 1.26.2; verification used `env -u GOROOT`.
-
-## Result — 2026-05-16
-
-Strangled singleton: `webSessionStore`.
-
-Completed:
-- Removed the production mutable package-level web session store singleton.
-- Added `newWebSessionStorage()` and explicit web-session store handler variants.
-- Constructed the serving web session store in `runServeWithEnvAndClock` and
-  threaded it through index rendering, Google callback session issuance, logout,
-  agents revoke, agents stream, and counter mutation cookie auth.
-- Updated tests that preseed or inspect web sessions to use a test-owned store.
-
-Files changed:
-- `app-root/main.go`
-- `app-root/main_test.go`
-- `NEXT.md`
-
-Verification:
-- `env -u GOROOT go test -run 'TestR_[^K]' ./...` passed.
-- `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
-  state failure: `.ralph/requirements-verified.jsonl: permission denied`.
-- `env -u GOROOT go test -race -run 'TestR_[^K]' ./...` passed.
-- `env -u GOROOT go vet ./...` passed.
 - `rg -n '^.{121,}$' main.go main_test.go` found no overlength lines.
 - `git diff --check` passed.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .`
-  passed.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .` passed.
 
 Notes:
 - The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
