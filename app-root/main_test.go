@@ -39,6 +39,7 @@ import (
 	"testing"
 	"time"
 
+	counterpkg "github.com/mgreenly/hal/counter"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 )
@@ -46,7 +47,7 @@ import (
 var oauthClientStore = newOAuthClientStorage()
 var oauthTokenStore = newOAuthTokenStorage()
 var webSessionStore = newWebSessionStorage()
-var theCounter = &counter{}
+var theCounter = counterpkg.New()
 
 func installTestAuthConfig(t testing.TB, env map[string]string) authConfig {
 	t.Helper()
@@ -99,11 +100,7 @@ func detachTestStoresFromDB(db *sql.DB) {
 	if db == nil {
 		return
 	}
-	theCounter.mu.Lock()
-	if theCounter.db == db {
-		theCounter.db = nil
-	}
-	theCounter.mu.Unlock()
+	theCounter.DetachDBIf(db)
 	oauthClientStore.mu.Lock()
 	if oauthClientStore.db == db {
 		oauthClientStore.db = nil
@@ -1058,6 +1055,7 @@ func TestR_NAGM_EQAH_no_non_google_identity_providers(t *testing.T) {
 		// that path before scanning so the "github" token check
 		// continues to catch genuine GitHub-as-IDP references.
 		lower = strings.ReplaceAll(lower, "github.com/modelcontextprotocol/go-sdk", "")
+		lower = strings.ReplaceAll(lower, "github.com/mgreenly/hal", "")
 		for _, tok := range forbidden {
 			if strings.Contains(lower, tok) {
 				t.Errorf("%s: references non-Google identity provider token %q "+
@@ -1424,7 +1422,7 @@ func TestR_XS1U_B7YY_mcp_counter_read_tool(t *testing.T) {
 		t.Fatalf("initialize did not return Mcp-Session-Id header; body=%q", string(buf))
 	}
 
-	want := theCounter.read()
+	want := theCounter.Read()
 
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
 		`"params":{"name":"counter_read","arguments":{}}}`
@@ -1547,7 +1545,7 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 		t.Fatalf("initialize did not return Mcp-Session-Id header; body=%q", string(buf))
 	}
 
-	before := theCounter.read()
+	before := theCounter.Read()
 
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
 		`"params":{"name":"counter_increment","arguments":{}}}`
@@ -1579,8 +1577,8 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 		t.Fatalf("counter_increment returned %d, want %d; body=%q",
 			rpc.Result.StructuredContent.Value, before+1, string(buf))
 	}
-	if got := theCounter.read(); got != before+1 {
-		t.Fatalf("theCounter.read() = %d after increment, want %d", got, before+1)
+	if got := theCounter.Read(); got != before+1 {
+		t.Fatalf("theCounter.Read() = %d after increment, want %d", got, before+1)
 	}
 }
 
@@ -1691,13 +1689,13 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := theCounter.read()
+			before := theCounter.Read()
 			resp, buf := post(callBody, sessionID, tc.bearer)
 			if resp.StatusCode != http.StatusUnauthorized {
 				t.Fatalf("tools/call status = %d, want 401 at HTTP boundary; "+
 					"body=%q", resp.StatusCode, string(buf))
 			}
-			if got := theCounter.read(); got != before {
+			if got := theCounter.Read(); got != before {
 				t.Fatalf("counter advanced past R-ZQS0-HWZ8 gate: before=%d after=%d",
 					before, got)
 			}
@@ -1794,7 +1792,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 		`"params":{"name":"counter_read","arguments":{}}}`
 
 	t.Run("no_credentials_increment_returns_401_with_www_authenticate", func(t *testing.T) {
-		before := theCounter.read()
+		before := theCounter.Read()
 		resp, buf := post(incBody, sessionID, "")
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401; body=%q",
@@ -1815,7 +1813,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 			t.Fatalf("WWW-Authenticate = %q, want substring %q (R-0YOE-9NO8)",
 				wa, expected)
 		}
-		if got := theCounter.read(); got != before {
+		if got := theCounter.Read(); got != before {
 			t.Fatalf("counter advanced past prompt-signal: before=%d after=%d",
 				before, got)
 		}
@@ -1834,7 +1832,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 	})
 
 	t.Run("bad_bearer_increment_rejected_at_http_boundary", func(t *testing.T) {
-		before := theCounter.read()
+		before := theCounter.Read()
 		resp, buf := post(incBody, sessionID, "deadbeef-not-issued")
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("bad-bearer status = %d, want 401 "+
@@ -1846,7 +1844,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 			t.Fatalf("WWW-Authenticate = %q, want invalid_token "+
 				"(R-51PZ-MEQR)", wa)
 		}
-		if got := theCounter.read(); got != before {
+		if got := theCounter.Read(); got != before {
 			t.Fatalf("counter advanced past HTTP-boundary gate: before=%d after=%d",
 				before, got)
 		}
@@ -1953,7 +1951,7 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 				if err != nil {
 					t.Fatalf("issueAccess(%q,%q): %v", owner, client, err)
 				}
-				before := theCounter.read()
+				before := theCounter.Read()
 				resp, buf := post(callBody, sessionID, bearer)
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("tools/call status = %d, want 200; body=%q",
@@ -1982,8 +1980,8 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 					t.Fatalf("counter_increment returned %d, want %d; body=%q",
 						rpc.Result.StructuredContent.Value, before+1, string(buf))
 				}
-				if got := theCounter.read(); got != before+1 {
-					t.Fatalf("theCounter.read() = %d, want %d", got, before+1)
+				if got := theCounter.Read(); got != before+1 {
+					t.Fatalf("theCounter.Read() = %d, want %d", got, before+1)
 				}
 			})
 		}
@@ -2001,7 +1999,7 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 // we assert deltas, not absolutes), call counter_decrement and assert
 // prev-1, then drain the counter to zero via direct calls and assert the
 // next authenticated decrement returns isError with the documented message
-// and that theCounter.read() is still zero.
+// and that theCounter.Read() is still zero.
 func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	ready := make(chan net.Addr, 1)
 	onListenerReady = func(a net.Addr) { ready <- a }
@@ -2079,8 +2077,8 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 
 	// Bring the counter to a known nonzero state so the success path is
 	// observable regardless of singleton state at test entry.
-	theCounter.increment()
-	before := theCounter.read()
+	theCounter.Increment()
+	before := theCounter.Read()
 	if before == 0 {
 		t.Fatalf("counter should be nonzero after increment; got 0")
 	}
@@ -2115,17 +2113,17 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 		t.Fatalf("counter_decrement returned %d, want %d; body=%q",
 			ok.Result.StructuredContent.Value, before-1, string(buf))
 	}
-	if got := theCounter.read(); got != before-1 {
-		t.Fatalf("theCounter.read() = %d after decrement, want %d", got, before-1)
+	if got := theCounter.Read(); got != before-1 {
+		t.Fatalf("theCounter.Read() = %d after decrement, want %d", got, before-1)
 	}
 
 	// Drain to zero, then assert the zero-floor error path.
-	for theCounter.read() > 0 {
-		if _, dok := theCounter.decrement(); !dok {
+	for theCounter.Read() > 0 {
+		if _, dok := theCounter.Decrement(); !dok {
 			break
 		}
 	}
-	if got := theCounter.read(); got != 0 {
+	if got := theCounter.Read(); got != 0 {
 		t.Fatalf("counter not at zero after drain; got %d", got)
 	}
 
@@ -2166,8 +2164,8 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	if !foundMsg {
 		t.Fatalf("zero-floor error content does not name the cause; body=%q", string(buf))
 	}
-	if got := theCounter.read(); got != 0 {
-		t.Fatalf("theCounter.read() = %d after zero-floor decrement, want 0", got)
+	if got := theCounter.Read(); got != 0 {
+		t.Fatalf("theCounter.Read() = %d after zero-floor decrement, want 0", got)
 	}
 }
 
@@ -2499,7 +2497,7 @@ func TestR_0CQ7_DSBQ_mcp_counter_read_is_unauthenticated(t *testing.T) {
 		t.Fatalf("initialize did not return Mcp-Session-Id header; body=%q", string(buf))
 	}
 
-	want := theCounter.read()
+	want := theCounter.Read()
 
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
 		`"params":{"name":"counter_read","arguments":{}}}`
@@ -4956,7 +4954,7 @@ func TestR_VF61_2Y6I_test_env_uses_google_double(t *testing.T) {
 // so a negative value is unrepresentable. This test reflects on the
 // counter type's value field and refuses any signed-kind storage.
 func TestR_UZ9T_8NM4_counter_is_non_negative_integer(t *testing.T) {
-	var c counter
+	var c counterpkg.Counter
 	field, ok := reflect.TypeOf(&c).Elem().FieldByName("value")
 	if !ok {
 		t.Fatalf("counter has no field named \"value\"; R-UZ9T-8NM4 " +
@@ -4973,8 +4971,8 @@ func TestR_UZ9T_8NM4_counter_is_non_negative_integer(t *testing.T) {
 			"kind so a negative value is unrepresentable (R-UZ9T-8NM4)",
 			kind)
 	}
-	if got := c.read(); got != 0 {
-		t.Errorf("zero-value counter.read() = %d; want 0 "+
+	if got := c.Read(); got != 0 {
+		t.Errorf("zero-value counter.Read() = %d; want 0 "+
 			"(R-UZ9T-8NM4: counter is a non-negative integer; the "+
 			"zero value is its lower bound)", got)
 	}
@@ -4987,16 +4985,16 @@ func TestR_UZ9T_8NM4_counter_is_non_negative_integer(t *testing.T) {
 // runtime body exercises a sequence of calls from the zero pre-state to
 // confirm the +1-per-call invariant.
 func TestR_XMDZ_2RGA_increment_no_args_adds_one(t *testing.T) {
-	var c counter
+	var c counterpkg.Counter
 	for i := uint64(1); i <= 5; i++ {
-		pre := c.read()
-		c.increment()
-		if got := c.read(); got != pre+1 {
+		pre := c.Read()
+		c.Increment()
+		if got := c.Read(); got != pre+1 {
 			t.Errorf("increment from pre=%d left read()=%d; "+
 				"want pre+1=%d (R-XMDZ-2RGA: adds exactly one)",
 				pre, got, pre+1)
 		}
-		if got := c.read(); got != i {
+		if got := c.Read(); got != i {
 			t.Errorf("after %d increments read()=%d; want %d "+
 				"(R-XMDZ-2RGA: each call adds exactly one)",
 				i, got, i)
@@ -5009,16 +5007,16 @@ func TestR_XMDZ_2RGA_increment_no_args_adds_one(t *testing.T) {
 // assert it equals both the pre-state + 1 and the value read() reports
 // after the call returns.
 func TestR_RQZQ_81ZC_increment_returns_post_state(t *testing.T) {
-	var c counter
+	var c counterpkg.Counter
 	for i := uint64(1); i <= 5; i++ {
-		pre := c.read()
-		post := c.increment()
+		pre := c.Read()
+		post := c.Increment()
 		if post != pre+1 {
 			t.Errorf("increment returned %d from pre=%d; want pre+1=%d "+
 				"(R-RQZQ-81ZC: returns the post-state value)",
 				post, pre, pre+1)
 		}
-		if got := c.read(); post != got {
+		if got := c.Read(); post != got {
 			t.Errorf("increment returned %d but read()=%d; want equal "+
 				"(R-RQZQ-81ZC: returned value is the post-state)",
 				post, got)
@@ -5038,23 +5036,23 @@ func TestR_RQZQ_81ZC_increment_returns_post_state(t *testing.T) {
 // shape is pinned at compile time: the call site below passes zero
 // arguments so a signature growth would fail to build.
 func TestR_F5X4_XI2F_decrement_no_args_rejects_at_zero(t *testing.T) {
-	var c counter
-	if got, ok := c.decrement(); ok || got != 0 {
+	var c counterpkg.Counter
+	if got, ok := c.Decrement(); ok || got != 0 {
 		t.Errorf("decrement from zero returned (%d, %v); "+
 			"want (0, false) (R-F5X4-XI2F: rejected at zero)",
 			got, ok)
 	}
-	if got := c.read(); got != 0 {
+	if got := c.Read(); got != 0 {
 		t.Errorf("after rejected decrement read()=%d; want 0 "+
 			"(R-F5X4-XI2F: rejection does not mutate)", got)
 	}
 
 	for i := uint64(1); i <= 5; i++ {
-		c.increment()
+		c.Increment()
 	}
 	for i := uint64(4); ; i-- {
-		pre := c.read()
-		post, ok := c.decrement()
+		pre := c.Read()
+		post, ok := c.Decrement()
 		if !ok {
 			t.Errorf("decrement from pre=%d returned ok=false; "+
 				"want true (R-F5X4-XI2F: non-zero subtracts one)", pre)
@@ -5065,7 +5063,7 @@ func TestR_F5X4_XI2F_decrement_no_args_rejects_at_zero(t *testing.T) {
 				"want pre-1=%d (R-F5X4-XI2F: subtracts exactly one)",
 				post, pre, pre-1)
 		}
-		if got := c.read(); got != post {
+		if got := c.Read(); got != post {
 			t.Errorf("decrement returned %d but read()=%d; "+
 				"want equal (R-F5X4-XI2F: returned is post-state)",
 				post, got)
@@ -5079,12 +5077,12 @@ func TestR_F5X4_XI2F_decrement_no_args_rejects_at_zero(t *testing.T) {
 		}
 	}
 
-	if got, ok := c.decrement(); ok || got != 0 {
+	if got, ok := c.Decrement(); ok || got != 0 {
 		t.Errorf("decrement back at zero returned (%d, %v); "+
 			"want (0, false) (R-F5X4-XI2F: rejection re-applies)",
 			got, ok)
 	}
-	if got := c.read(); got != 0 {
+	if got := c.Read(); got != 0 {
 		t.Errorf("after second rejection read()=%d; want 0 "+
 			"(R-F5X4-XI2F: rejection does not mutate)", got)
 	}
@@ -5146,64 +5144,64 @@ func TestR_68WP_XVCK_google_credentials_not_committed(t *testing.T) {
 // that no decrement is rejected) settles at pre-state + (N - M).
 func TestR_TOI0_0Z8X_concurrent_inc_dec_no_lost_updates(t *testing.T) {
 	t.Run("increments_only", func(t *testing.T) {
-		var c counter
+		var c counterpkg.Counter
 		const N = 1000
 		var wg sync.WaitGroup
 		wg.Add(N)
 		for i := 0; i < N; i++ {
 			go func() {
 				defer wg.Done()
-				c.increment()
+				c.Increment()
 			}()
 		}
 		wg.Wait()
-		if got := c.read(); got != N {
+		if got := c.Read(); got != N {
 			t.Fatalf("after %d concurrent increments: got %d, want %d", N, got, N)
 		}
 	})
 
 	t.Run("decrements_only", func(t *testing.T) {
-		var c counter
+		var c counterpkg.Counter
 		const M = 1000
 		for i := 0; i < M; i++ {
-			c.increment()
+			c.Increment()
 		}
 		var wg sync.WaitGroup
 		wg.Add(M)
 		for i := 0; i < M; i++ {
 			go func() {
 				defer wg.Done()
-				if _, ok := c.decrement(); !ok {
+				if _, ok := c.Decrement(); !ok {
 					t.Errorf("decrement returned ok=false; pre-state should "+
 						"keep all %d decrements successful", M)
 				}
 			}()
 		}
 		wg.Wait()
-		if got := c.read(); got != 0 {
+		if got := c.Read(); got != 0 {
 			t.Fatalf("after %d concurrent decrements from %d: got %d, want 0", M, M, got)
 		}
 	})
 
 	t.Run("interleaved_inc_and_dec", func(t *testing.T) {
-		var c counter
+		var c counterpkg.Counter
 		const N, M = 1500, 500
 		// Pre-load so no decrement is rejected regardless of interleaving.
 		for i := 0; i < M; i++ {
-			c.increment()
+			c.Increment()
 		}
 		var wg sync.WaitGroup
 		wg.Add(N + M)
 		for i := 0; i < N; i++ {
 			go func() {
 				defer wg.Done()
-				c.increment()
+				c.Increment()
 			}()
 		}
 		for i := 0; i < M; i++ {
 			go func() {
 				defer wg.Done()
-				if _, ok := c.decrement(); !ok {
+				if _, ok := c.Decrement(); !ok {
 					t.Errorf("decrement returned ok=false; pre-state %d should "+
 						"keep all %d decrements successful", M, M)
 				}
@@ -5211,7 +5209,7 @@ func TestR_TOI0_0Z8X_concurrent_inc_dec_no_lost_updates(t *testing.T) {
 		}
 		wg.Wait()
 		want := uint64(M + N - M)
-		if got := c.read(); got != want {
+		if got := c.Read(); got != want {
 			t.Fatalf("after %d concurrent inc + %d concurrent dec from %d: got %d, want %d",
 				N, M, M, got, want)
 		}
@@ -6043,21 +6041,12 @@ func TestR_H3FE_QFC0_post_counter_decrement(t *testing.T) {
 func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 	originalTokens := oauthTokenStore
 	originalSessions := webSessionStore
-	theCounter.mu.Lock()
-	originalCounterValue := theCounter.value
-	originalCounterDB := theCounter.db
-	theCounter.value = 0
-	theCounter.db = nil
-	theCounter.mu.Unlock()
+	isolatedCounter := counterpkg.New()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
 		webSessionStore = originalSessions
-		theCounter.mu.Lock()
-		theCounter.value = originalCounterValue
-		theCounter.db = originalCounterDB
-		theCounter.mu.Unlock()
 	})
 
 	assertHTTPAuthFailure := func(name, path string, decorate func(*http.Request)) {
@@ -6069,9 +6058,9 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 		rr := httptest.NewRecorder()
 		switch path {
 		case "/counter/increment":
-			handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rr, req)
+			handleCounterIncrementWithCounterAndStores(isolatedCounter, webSessionStore, oauthTokenStore, rr, req)
 		case "/counter/decrement":
-			handleCounterDecrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rr, req)
+			handleCounterDecrementWithCounterAndStores(isolatedCounter, webSessionStore, oauthTokenStore, rr, req)
 		default:
 			t.Fatalf("unknown mutation path %q", path)
 		}
@@ -6084,7 +6073,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 			t.Fatalf("%s leaked counter state/business-rule detail in auth "+
 				"failure (R-OBU9-0WFI): body=%q", name, rr.Body.String())
 		}
-		if got := theCounter.read(); got != 0 {
+		if got := isolatedCounter.Read(); got != 0 {
 			t.Fatalf("%s changed counter to %d, want unchanged 0 (R-OBU9-0WFI)",
 				name, got)
 		}
@@ -6111,7 +6100,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 			name: "mcp increment",
 			call: func() (*mcp.CallToolResult, error) {
 				res, _, err := counterIncrementToolWithCounterAndTokenStore(
-					theCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
+					isolatedCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
@@ -6119,7 +6108,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 			name: "mcp decrement at zero",
 			call: func() (*mcp.CallToolResult, error) {
 				res, _, err := counterDecrementToolWithCounterAndTokenStore(
-					theCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
+					isolatedCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
@@ -6144,7 +6133,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 			t.Fatalf("%s leaked zero-floor detail before auth (R-OBU9-0WFI): %q",
 				tc.name, text)
 		}
-		if got := theCounter.read(); got != 0 {
+		if got := isolatedCounter.Read(); got != 0 {
 			t.Fatalf("%s changed counter to %d, want unchanged 0 (R-OBU9-0WFI)",
 				tc.name, got)
 		}
@@ -7217,7 +7206,7 @@ func TestR_QY5R_PYDH_root_renders_count_as_html(t *testing.T) {
 	}
 	body := string(bodyBytes)
 
-	want := strconv.FormatUint(theCounter.read(), 10)
+	want := strconv.FormatUint(theCounter.Read(), 10)
 	if !strings.Contains(body, want) {
 		t.Fatalf("GET / body = %q, want to contain count %q (R-QY5R-PYDH)",
 			body, want)
@@ -7242,8 +7231,8 @@ func TestR_QY5R_PYDH_root_renders_count_as_html(t *testing.T) {
 // this test should grow to also assert that opening a fresh DB file
 // yields a counter that reads zero.
 func TestR_WD9O_X90L_fresh_database_counter_is_zero(t *testing.T) {
-	var c counter
-	if got := c.read(); got != 0 {
+	var c counterpkg.Counter
+	if got := c.Read(); got != 0 {
 		t.Fatalf("fresh counter read = %d, want 0 (R-WD9O-X90L)", got)
 	}
 }
@@ -7572,12 +7561,12 @@ func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open fresh db: %v (R-VNNS-W2G0)", err)
 		}
-		var c counter
-		if err := c.attach(db); err != nil {
+		var c counterpkg.Counter
+		if err := c.Attach(db); err != nil {
 			_ = db.Close()
 			t.Fatalf("attach: %v (R-VNNS-W2G0)", err)
 		}
-		if got := c.read(); got != 0 {
+		if got := c.Read(); got != 0 {
 			_ = db.Close()
 			t.Fatalf("fresh db: read = %d, want 0 (R-VNNS-W2G0 / R-WD9O-X90L)", got)
 		}
@@ -7591,14 +7580,14 @@ func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open db: %v (R-VNNS-W2G0)", err)
 		}
-		var c counter
-		if err := c.attach(db); err != nil {
+		var c counterpkg.Counter
+		if err := c.Attach(db); err != nil {
 			_ = db.Close()
 			t.Fatalf("attach: %v (R-VNNS-W2G0)", err)
 		}
-		c.increment()
-		c.increment()
-		if got := c.increment(); got != 3 {
+		c.Increment()
+		c.Increment()
+		if got := c.Increment(); got != 3 {
 			_ = db.Close()
 			t.Fatalf("after 3 increments: read = %d, want 3 (R-VNNS-W2G0)", got)
 		}
@@ -7611,11 +7600,11 @@ func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 			t.Fatalf("reopen db: %v (R-VNNS-W2G0)", err)
 		}
 		defer db2.Close()
-		var c2 counter
-		if err := c2.attach(db2); err != nil {
+		var c2 counterpkg.Counter
+		if err := c2.Attach(db2); err != nil {
 			t.Fatalf("reattach: %v (R-VNNS-W2G0)", err)
 		}
-		if got := c2.read(); got != 3 {
+		if got := c2.Read(); got != 3 {
 			t.Fatalf("after reopen: read = %d, want 3 — persisted "+
 				"value must survive process restart (R-VNNS-W2G0)", got)
 		}
@@ -7626,16 +7615,16 @@ func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open db: %v (R-VNNS-W2G0)", err)
 		}
-		var c counter
-		if err := c.attach(db); err != nil {
+		var c counterpkg.Counter
+		if err := c.Attach(db); err != nil {
 			_ = db.Close()
 			t.Fatalf("attach: %v (R-VNNS-W2G0)", err)
 		}
-		if _, ok := c.decrement(); !ok {
+		if _, ok := c.Decrement(); !ok {
 			_ = db.Close()
 			t.Fatalf("decrement #1: ok=false, want true (R-VNNS-W2G0)")
 		}
-		v, ok := c.decrement()
+		v, ok := c.Decrement()
 		if !ok || v != 1 {
 			_ = db.Close()
 			t.Fatalf("decrement #2: (v=%d, ok=%v), want (1, true) (R-VNNS-W2G0)", v, ok)
@@ -7649,11 +7638,11 @@ func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 			t.Fatalf("reopen db: %v (R-VNNS-W2G0)", err)
 		}
 		defer db2.Close()
-		var c2 counter
-		if err := c2.attach(db2); err != nil {
+		var c2 counterpkg.Counter
+		if err := c2.Attach(db2); err != nil {
 			t.Fatalf("reattach: %v (R-VNNS-W2G0)", err)
 		}
-		if got := c2.read(); got != 1 {
+		if got := c2.Read(); got != 1 {
 			t.Fatalf("after reopen: read = %d, want 1 (R-VNNS-W2G0)", got)
 		}
 	})
@@ -8308,14 +8297,14 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
 		}
-		before := theCounter.read()
+		before := theCounter.Read()
 		rec, req := postWithCookie("/counter/increment", sessionPlaintext)
 		handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("cross-origin cookie increment status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
 		}
-		if got := theCounter.read(); got != before {
+		if got := theCounter.Read(); got != before {
 			t.Fatalf("cross-origin cookie increment changed counter: got %d, "+
 				"want %d (R-R4RG-O4Y9)", got, before)
 		}
@@ -11922,11 +11911,11 @@ func TestR_773B_KSTW_schema_current_before_first_request(t *testing.T) {
 			t.Fatalf("%s: openCounterDB: %v (R-773B-KSTW)", label, err)
 		}
 		defer db.Close()
-		var c counter
-		if err := c.attach(db); err != nil {
+		var c counterpkg.Counter
+		if err := c.Attach(db); err != nil {
 			t.Fatalf("%s: attach: %v (R-773B-KSTW)", label, err)
 		}
-		return c.read()
+		return c.Read()
 	}
 
 	// Case 1: fresh checkout — no DB file present.
@@ -12002,7 +11991,7 @@ func TestR_773B_KSTW_schema_current_before_first_request(t *testing.T) {
 		t.Fatalf("main.go does not reference openCounterDB — the " +
 			"schema seam is missing (R-773B-KSTW)")
 	}
-	attachIdx := strings.Index(src, ".attach(")
+	attachIdx := strings.Index(src, ".Attach(")
 	if attachIdx < 0 {
 		t.Fatalf("main.go does not reference counter.attach — the " +
 			"schema seam is missing (R-773B-KSTW)")
@@ -13901,7 +13890,7 @@ func TestR_FZC6_H2SB_counter_stream_live_updates(t *testing.T) {
 		}
 	}()
 
-	baseValue := theCounter.read()
+	baseValue := theCounter.Read()
 
 	streamURL := "http://" + addr.String() + "/counter/stream"
 	// Bare http.Get with no credentials — the channel must be open to
@@ -13979,7 +13968,7 @@ func TestR_FZC6_H2SB_counter_stream_live_updates(t *testing.T) {
 	// value within 1000ms. theCounter.increment broadcasts after the
 	// in-memory update so the wire event must carry the same value the
 	// mutator observed.
-	wantNext := theCounter.increment()
+	wantNext := theCounter.Increment()
 
 	start := time.Now()
 	select {
@@ -14125,8 +14114,8 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 		streamWriteTimeoutNS.Store(oldTimeout)
 	}()
 
-	counterBcast := theCounter.broadcaster()
-	baseline := counterBcast.subscriberCount()
+	counterBcast := theCounter.Broadcaster()
+	baseline := counterBcast.SubscriberCount()
 
 	clientConn, serverConn := net.Pipe()
 	mux := http.NewServeMux()
@@ -14167,7 +14156,7 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 	}
 	_ = clientConn.SetReadDeadline(time.Time{})
 
-	if got := counterBcast.subscriberCount(); got != baseline+1 {
+	if got := counterBcast.SubscriberCount(); got != baseline+1 {
 		t.Fatalf("subscriberCount=%d after subscribe, want %d "+
 			"(R-T5ND-W2HF)", got, baseline+1)
 	}
@@ -14177,14 +14166,14 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 	// deferred unsubscribe runs. Must observe the drop well under 5s.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if counterBcast.subscriberCount() == baseline {
+		if counterBcast.SubscriberCount() == baseline {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("subscriber not released within 5s of client going silent; "+
 		"count=%d, want %d (R-T5ND-W2HF)",
-		counterBcast.subscriberCount(), baseline)
+		counterBcast.SubscriberCount(), baseline)
 }
 
 type r8we2OneShotListener struct {
@@ -15965,10 +15954,13 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	}
 
 	dir := t.TempDir()
-	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css"} {
+	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css", "counter/counter.go"} {
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0755); err != nil {
+			t.Fatalf("mkdir for %s: %v", name, err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, name), src, 0644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -16045,10 +16037,13 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	}
 
 	srcDir := t.TempDir()
-	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css"} {
+	for _, name := range []string{"Makefile", "main.go", "go.mod", "go.sum", "design.css", "counter/counter.go"} {
 		src, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.MkdirAll(filepath.Join(srcDir, filepath.Dir(name)), 0755); err != nil {
+			t.Fatalf("mkdir for %s: %v", name, err)
 		}
 		if err := os.WriteFile(filepath.Join(srcDir, name), src, 0644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -16425,15 +16420,15 @@ func TestR_FFOQ_Y4JG_auth_check_runs_before_zero_floor(t *testing.T) {
 	// Drain the package-singleton counter to zero so the zero-floor gate
 	// is the one R-FFOQ-Y4JG would route the unauth request to if the
 	// ordering were reversed.
-	for i := 0; theCounter.read() > 0; i++ {
+	for i := 0; theCounter.Read() > 0; i++ {
 		if i > 100000 {
 			t.Fatalf("counter did not reach zero after %d direct decrements", i)
 		}
-		if _, ok := theCounter.decrement(); !ok {
+		if _, ok := theCounter.Decrement(); !ok {
 			break
 		}
 	}
-	if got := theCounter.read(); got != 0 {
+	if got := theCounter.Read(); got != 0 {
 		t.Fatalf("setup: counter not zero, got %d", got)
 	}
 
@@ -16472,7 +16467,7 @@ func TestR_FFOQ_Y4JG_auth_check_runs_before_zero_floor(t *testing.T) {
 		}
 	}
 
-	if got := theCounter.read(); got != 0 {
+	if got := theCounter.Read(); got != 0 {
 		t.Fatalf("counter mutated by rejected request: got %d, want 0 "+
 			"(R-FFOQ-Y4JG)", got)
 	}
@@ -19211,7 +19206,7 @@ func TestR_KDRI_X863_mcp_oauth_full_round_trip(t *testing.T) {
 		t.Fatalf("leg 7: initialize did not return Mcp-Session-Id; "+
 			"body=%q (R-KDRI-X863)", initRespBody)
 	}
-	before := theCounter.read()
+	before := theCounter.Read()
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
 		`"params":{"name":"counter_increment","arguments":{}}}`
 	callResp, callRespBody := post(callBody, sessionID, accessToken)
@@ -19239,7 +19234,7 @@ func TestR_KDRI_X863_mcp_oauth_full_round_trip(t *testing.T) {
 			"rejected at the MCP endpoint; body=%q (R-KDRI-X863)",
 			callRespBody)
 	}
-	if got := theCounter.read(); got != before+1 {
+	if got := theCounter.Read(); got != before+1 {
 		t.Fatalf("leg 7: counter = %d, want %d (one increment authorized "+
 			"by the round-trip token) (R-KDRI-X863)", got, before+1)
 	}
@@ -19746,7 +19741,7 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := theCounter.read()
+			before := theCounter.Read()
 			resp, buf := postWithAuth(tc.authHeader)
 			if resp.StatusCode != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401; body=%q (R-51PZ-MEQR)",
@@ -19784,7 +19779,7 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 					"invalid bearer must not reach tool layer (R-51PZ-MEQR)",
 					body.Result)
 			}
-			if got := theCounter.read(); got != before {
+			if got := theCounter.Read(); got != before {
 				t.Fatalf("counter changed after rejected bearer: before=%d "+
 					"after=%d (R-51PZ-MEQR)", before, got)
 			}
@@ -20333,7 +20328,7 @@ func TestR_77U1_PZY1_mcp_oauth_e2e_round_trip(t *testing.T) {
 		t.Fatalf("leg 8: authenticated initialize did not return "+
 			"Mcp-Session-Id; body=%q (R-77U1-PZY1)", bInitBody)
 	}
-	before := theCounter.read()
+	before := theCounter.Read()
 	callBody := `{"jsonrpc":"2.0","id":4,"method":"tools/call",` +
 		`"params":{"name":"counter_increment","arguments":{}}}`
 	callResp, callRespBody := postMCP(callBody, bearerSession, accessToken)
@@ -20361,7 +20356,7 @@ func TestR_77U1_PZY1_mcp_oauth_e2e_round_trip(t *testing.T) {
 			"round-trip bearer — credential rejected at /mcp; "+
 			"body=%q (R-77U1-PZY1)", callRespBody)
 	}
-	if got := theCounter.read(); got != before+1 {
+	if got := theCounter.Read(); got != before+1 {
 		t.Fatalf("leg 8: counter = %d, want %d (one increment "+
 			"authorized by the round-trip token) (R-77U1-PZY1)",
 			got, before+1)
@@ -20475,13 +20470,13 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 
 	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
 		`"params":{"name":"counter_increment","arguments":{}}}`
-	before := theCounter.read()
+	before := theCounter.Read()
 	okResp, okBody := postMCP(callBody, mcpSessionID, accessToken)
 	if okResp.StatusCode != http.StatusOK {
 		t.Fatalf("pre-revoke tools/call status = %d, want 200; body=%q (R-7E4W-K6HL)",
 			okResp.StatusCode, okBody)
 	}
-	if got := theCounter.read(); got != before+1 {
+	if got := theCounter.Read(); got != before+1 {
 		t.Fatalf("pre-revoke counter = %d, want %d (R-7E4W-K6HL)", got, before+1)
 	}
 
@@ -20509,7 +20504,7 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 			revokeResp.StatusCode, revokeBody)
 	}
 
-	afterRevoke := theCounter.read()
+	afterRevoke := theCounter.Read()
 	rejectedResp, rejectedBody := postMCP(callBody, mcpSessionID, accessToken)
 	if rejectedResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("post-revoke tools/call status = %d, want 401; body=%q "+
@@ -20540,7 +20535,7 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 		t.Fatalf("post-revoke rejection body = %+v, want revoked invalid_token "+
 			"without JSON-RPC result (R-7E4W-K6HL)", body)
 	}
-	if got := theCounter.read(); got != afterRevoke {
+	if got := theCounter.Read(); got != afterRevoke {
 		t.Fatalf("post-revoke counter = %d, want unchanged %d (R-7E4W-K6HL)",
 			got, afterRevoke)
 	}
@@ -20633,7 +20628,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 			revokeRec.Code, revokeRec.Body.String())
 	}
 
-	before := theCounter.read()
+	before := theCounter.Read()
 	incReq := httptest.NewRequest(http.MethodPost, "/counter/increment", nil)
 	incReq.Header.Set("Authorization", "Bearer "+tokenDoc.AccessToken)
 	incRec := httptest.NewRecorder()
@@ -20646,7 +20641,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 		t.Fatalf("increment rejection body = %q, want revoked cause (R-2HT5-50F4)",
 			incRec.Body.String())
 	}
-	if got := theCounter.read(); got != before {
+	if got := theCounter.Read(); got != before {
 		t.Fatalf("counter changed after revoked initial access: got %d want %d (R-2HT5-50F4)",
 			got, before)
 	}

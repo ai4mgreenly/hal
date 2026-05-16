@@ -33,6 +33,7 @@ import (
 	"syscall"
 	"time"
 
+	counterpkg "github.com/mgreenly/hal/counter"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -114,7 +115,7 @@ func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
 	return newMCPServerWithCounterAndTokenStore(newCounter(), tokens)
 }
 
-func newMCPServerWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) *mcp.Server {
+func newMCPServerWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{Name: "hal", Version: halVersion},
 		nil,
@@ -171,13 +172,13 @@ func counterReadTool(
 	return counterReadToolWithCounter(newCounter())(ctx, req, struct{}{})
 }
 
-func counterReadToolWithCounter(c *counter) func(
+func counterReadToolWithCounter(c *counterpkg.Counter) func(
 	context.Context, *mcp.CallToolRequest, struct{},
 ) (*mcp.CallToolResult, counterReadOutput, error) {
 	return func(
 		_ context.Context, _ *mcp.CallToolRequest, _ struct{},
 	) (*mcp.CallToolResult, counterReadOutput, error) {
-		return nil, counterReadOutput{Value: c.read()}, nil
+		return nil, counterReadOutput{Value: c.Read()}, nil
 	}
 }
 
@@ -197,7 +198,7 @@ func counterIncrementToolWithTokenStore(tokens *oauthTokenStorage) func(
 	return counterIncrementToolWithCounterAndTokenStore(newCounter(), tokens)
 }
 
-func counterIncrementToolWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) func(
+func counterIncrementToolWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) func(
 	context.Context, *mcp.CallToolRequest, struct{},
 ) (*mcp.CallToolResult, counterIncrementOutput, error) {
 	return func(
@@ -219,7 +220,7 @@ func counterIncrementToolWithCounterAndTokenStore(c *counter, tokens *oauthToken
 				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
 			}, counterIncrementOutput{}, nil
 		}
-		return nil, counterIncrementOutput{Value: c.increment()}, nil
+		return nil, counterIncrementOutput{Value: c.Increment()}, nil
 	}
 }
 
@@ -239,7 +240,7 @@ func counterDecrementToolWithTokenStore(tokens *oauthTokenStorage) func(
 	return counterDecrementToolWithCounterAndTokenStore(newCounter(), tokens)
 }
 
-func counterDecrementToolWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) func(
+func counterDecrementToolWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) func(
 	context.Context, *mcp.CallToolRequest, struct{},
 ) (*mcp.CallToolResult, counterDecrementOutput, error) {
 	return func(
@@ -258,7 +259,7 @@ func counterDecrementToolWithCounterAndTokenStore(c *counter, tokens *oauthToken
 				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
 			}, counterDecrementOutput{}, nil
 		}
-		v, ok := c.decrement()
+		v, ok := c.Decrement()
 		if !ok {
 			return &mcp.CallToolResult{
 				IsError: true,
@@ -333,172 +334,21 @@ func pickSubtitle() string {
 	return subtitleBank[rand.IntN(len(subtitleBank))]
 }
 
-// R-UZ9T-8NM4: the counter is a non-negative integer. The in-process
-// representation stores the value in an unsigned 64-bit field, so a
-// negative value is unrepresentable at the type level. Behavioral
-// guards on decrement-at-zero live with R-F5X4-XI2F.
-// R-TOI0-0Z8X: the mutex serializes the read-modify-write sequence on
-// value across goroutines, so concurrent increments and decrements compose
-// without lost updates. A single mutex covers all three methods rather than
-// sync/atomic so decrement's zero-check + subtract stay one critical
-// section (avoiding a TOCTOU between the check and the store).
-// R-VNNS-W2G0: when db is non-nil, every successful mutation writes the
-// post-state value back to the SQLite single-row counter table under the
-// same critical section that updates the in-memory value, so a
-// crash-and-restart that reopens the same database recovers the last
-// successfully applied value. When db is nil, the counter is in-memory
-// only — the shape exercised by unit tests that do not need persistence.
-type counter struct {
-	mu    sync.Mutex
-	value uint64
-	db    *sql.DB
-	bcast *counterBroadcaster
-}
-
-func newCounter() *counter {
-	return &counter{}
+func newCounter() *counterpkg.Counter {
+	return counterpkg.New()
 }
 
 type serveCounterKey struct{}
 
-func contextWithCounter(ctx context.Context, c *counter) context.Context {
+func contextWithCounter(ctx context.Context, c *counterpkg.Counter) context.Context {
 	return context.WithValue(ctx, serveCounterKey{}, c)
 }
 
-func counterFromContext(ctx context.Context) *counter {
-	if c, ok := ctx.Value(serveCounterKey{}).(*counter); ok && c != nil {
+func counterFromContext(ctx context.Context) *counterpkg.Counter {
+	if c, ok := ctx.Value(serveCounterKey{}).(*counterpkg.Counter); ok && c != nil {
 		return c
 	}
 	return newCounter()
-}
-
-func (c *counter) broadcaster() *counterBroadcaster {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.bcast == nil {
-		c.bcast = &counterBroadcaster{}
-	}
-	return c.bcast
-}
-
-func (c *counter) read() uint64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.value
-}
-
-// R-XMDZ-2RGA: increment takes no arguments and adds exactly one to the
-// stored value on each successful call. The returned value reflects the
-// post-state per R-RQZQ-81ZC.
-// R-FZC6-H2SB: the post-state value is broadcast on the counter-owned
-// broadcaster so any live-update subscribers reflect the change without polling.
-func (c *counter) increment() uint64 {
-	c.mu.Lock()
-	c.value++
-	v := c.value
-	if c.db != nil {
-		_, _ = c.db.Exec(`UPDATE counter SET value = ? WHERE id = 1`, int64(v))
-	}
-	bcast := c.bcast
-	c.mu.Unlock()
-	if bcast != nil {
-		bcast.broadcast(v)
-	}
-	return v
-}
-
-// R-F5X4-XI2F: decrement takes no arguments. When the stored value is
-// greater than zero, subtract one and return (post-state, true). When the
-// stored value is zero, do not mutate and return (0, false) — an explicit
-// in-band refusal that preserves R-UZ9T-8NM4's non-negativity.
-// R-FZC6-H2SB: on a successful decrement, the post-state value is
-// broadcast on the counter-owned broadcaster. A refused decrement
-// (value already zero) is not a mutation and is not broadcast.
-func (c *counter) decrement() (uint64, bool) {
-	c.mu.Lock()
-	if c.value == 0 {
-		c.mu.Unlock()
-		return 0, false
-	}
-	c.value--
-	v := c.value
-	if c.db != nil {
-		_, _ = c.db.Exec(`UPDATE counter SET value = ? WHERE id = 1`, int64(v))
-	}
-	bcast := c.bcast
-	c.mu.Unlock()
-	if bcast != nil {
-		bcast.broadcast(v)
-	}
-	return v, true
-}
-
-// R-FZC6-H2SB: the index page's live-update channel is fed by a
-// fan-out broadcaster. Subscribers register a bounded coalescing channel
-// (capacity 1) and the broadcaster delivers the latest counter value to
-// each subscriber on every mutation. The send is non-blocking: a slow
-// subscriber drops intermediate values but always converges on the
-// latest value the moment its channel drains, which is the property a
-// browser displaying a single rendered count actually needs. Snapshot-
-// on-connect (the handler's first event) plus latest-value coalescing
-// means a fresh subscriber always sees the current value, and a
-// subscriber that misses an interim mutation still reflects the final
-// state.
-type counterBroadcaster struct {
-	mu   sync.Mutex
-	subs map[*counterSubscriber]struct{}
-}
-
-type counterSubscriber struct {
-	ch chan uint64
-}
-
-func (b *counterBroadcaster) subscribe() *counterSubscriber {
-	sub := &counterSubscriber{ch: make(chan uint64, 1)}
-	b.mu.Lock()
-	if b.subs == nil {
-		b.subs = make(map[*counterSubscriber]struct{})
-	}
-	b.subs[sub] = struct{}{}
-	b.mu.Unlock()
-	return sub
-}
-
-func (b *counterBroadcaster) unsubscribe(sub *counterSubscriber) {
-	b.mu.Lock()
-	delete(b.subs, sub)
-	b.mu.Unlock()
-}
-
-// subscriberCount returns the number of live subscribers. Used by tests
-// to observe R-T5ND-W2HF cleanup (a departed stream client must be
-// released and unsubscribed within 5 seconds).
-func (b *counterBroadcaster) subscriberCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.subs)
-}
-
-func (b *counterBroadcaster) broadcast(v uint64) {
-	b.mu.Lock()
-	targets := make([]*counterSubscriber, 0, len(b.subs))
-	for s := range b.subs {
-		targets = append(targets, s)
-	}
-	b.mu.Unlock()
-	for _, s := range targets {
-		// Coalescing: drop any pending value the subscriber has not
-		// drained yet, then deliver the latest. Both ops are
-		// non-blocking so a slow subscriber never stalls a mutator.
-		select {
-		case <-s.ch:
-		default:
-		}
-		select {
-		case s.ch <- v:
-		default:
-		}
-	}
 }
 
 // R-0TVF-0BKI: the agents block's live-update channel is fed by an
@@ -635,27 +485,6 @@ func openCounterDB(path string) (*sql.DB, error) {
 }
 
 type databaseOpener func(string) (*sql.DB, error)
-
-// attach binds a backing database to the counter and loads the current
-// stored value from the database into the in-memory field. After attach
-// returns, every successful increment and decrement persists the new
-// value back through db. R-WD9O-X90L: a freshly opened database has the
-// singleton row at value=0, so the loaded value is 0.
-func (c *counter) attach(db *sql.DB) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var v int64
-	if err := db.QueryRow(
-		`SELECT value FROM counter WHERE id = 1`).Scan(&v); err != nil {
-		return err
-	}
-	if v < 0 {
-		return fmt.Errorf("counter: stored value %d is negative", v)
-	}
-	c.value = uint64(v)
-	c.db = db
-	return nil
-}
 
 // R-T0B2-A4E5: the seam between the service's Google client and Google
 // is narrow — exactly two operations. AuthorizationURL produces the URL
@@ -3021,7 +2850,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 		return 1
 	}
 	defer func() { _ = db.Close() }()
-	if err := servingCounter.attach(db); err != nil {
+	if err := servingCounter.Attach(db); err != nil {
 		fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 		return 1
 	}
@@ -3170,7 +2999,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 	mux.HandleFunc(http.MethodGet, "/counter", func(w http.ResponseWriter, r *http.Request) {
 		handleCounterReadWithCounter(servingCounter, w, r)
 	})
-	_ = servingCounter.broadcaster()
+	_ = servingCounter.Broadcaster()
 	mux.HandleFunc(http.MethodGet, "/counter/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleCounterStreamWithCounter(servingCounter, w, r)
 	})
@@ -3263,7 +3092,7 @@ func handleIndexWithStores(
 }
 
 func handleIndexWithCounterAndStores(
-	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -3798,7 +3627,7 @@ func handleIndexWithCounterAndStores(
 			`})();`+
 			`</script>`+
 			`</body></html>`+"\n",
-		htmlEscape(pickSubtitle()), bannerAuth, agentsBlock, c.read(),
+		htmlEscape(pickSubtitle()), bannerAuth, agentsBlock, c.Read(),
 		counterDisabled, counterDisabled, mcpInstructions, halVersion, bankJSON)
 }
 
@@ -4181,11 +4010,11 @@ func handleCounterRead(w http.ResponseWriter, r *http.Request) {
 	handleCounterReadWithCounter(counterFromContext(r.Context()), w, r)
 }
 
-func handleCounterReadWithCounter(c *counter, w http.ResponseWriter, _ *http.Request) {
+func handleCounterReadWithCounter(c *counterpkg.Counter, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value uint64 `json:"value"`
-	}{Value: c.read()})
+	}{Value: c.Read()})
 }
 
 // R-FZC6-H2SB: GET /counter/stream is the live-update channel the index
@@ -4223,60 +4052,13 @@ func handleCounterStream(w http.ResponseWriter, r *http.Request) {
 	handleCounterStreamWithCounter(counterFromContext(r.Context()), w, r)
 }
 
-func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported",
-			http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-"+"stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
+func handleCounterStreamWithCounter(c *counterpkg.Counter, w http.ResponseWriter, r *http.Request) {
+	counterpkg.StreamHTTP(
+		c, appNow, newCounterStreamTicker, streamHeartbeatInterval(), streamWriteTimeout(), w, r)
+}
 
-	rc := http.NewResponseController(w)
-
-	bcast := c.broadcaster()
-	sub := bcast.subscribe()
-	defer bcast.unsubscribe(sub)
-
-	writeBytes := func(p []byte) error {
-		_ = rc.SetWriteDeadline(appNow().Add(streamWriteTimeout()))
-		if _, err := w.Write(p); err != nil {
-			return err
-		}
-		flusher.Flush()
-		_ = rc.SetWriteDeadline(time.Time{})
-		return nil
-	}
-	writeValue := func(v uint64) error {
-		return writeBytes([]byte(fmt.Sprintf(
-			"data: {\"value\":%d}\n\n", v)))
-	}
-
-	if err := writeValue(c.read()); err != nil {
-		return
-	}
-
-	hb := appNewTicker(streamHeartbeatInterval())
-	defer hb.Stop()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case v := <-sub.ch:
-			if err := writeValue(v); err != nil {
-				return
-			}
-		case <-hb.C():
-			if err := writeBytes([]byte(":hb\n\n")); err != nil {
-				return
-			}
-		}
-	}
+func newCounterStreamTicker(d time.Duration) counterpkg.Ticker {
+	return appNewTicker(d)
 }
 
 // R-0TVF-0BKI: GET /agents/stream is the per-visitor live-update channel
@@ -5277,13 +5059,13 @@ func handleCounterIncrementWithStores(
 }
 
 func handleCounterIncrementWithCounterAndStores(
-	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
-	v := c.increment()
+	v := c.Increment()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value uint64 `json:"value"`
@@ -5309,14 +5091,14 @@ func handleCounterDecrementWithStores(
 }
 
 func handleCounterDecrementWithCounterAndStores(
-	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	v, ok := c.decrement()
+	v, ok := c.Decrement()
 	if !ok {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(struct {

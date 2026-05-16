@@ -1,78 +1,78 @@
 # NEXT — one transformation
 
-## Retire the last test-only hook: pass the token-exchange context as a parameter
+## Extract the counter capability into its own package (establish the multi-package layout)
 
-**Outcome.** The Google token-exchange code obtains the context it uses
-from its caller — passed in as an ordinary argument, the way Go
-conventionally threads a context — rather than reading a package-level
-variable that tests assign. The test-only package variable, and the
-production branch that consults it, no longer exist. Production callers
-pass the context they already hold (the request's context, or a
-background context where none applies); tests that must redirect the
-exchange's HTTPS POST at a loopback server supply their client-bearing
-context through that same parameter. No non-test code reads any
-test-assigned global.
+**Outcome.** The application is no longer a single package. The counter
+capability — its state and persistence binding, the broadcaster it owns,
+and the behavior that increments, decrements, reads, persists, and
+streams it — lives in its own package with a deliberately small exported
+surface. The rest of the program depends on the counter only through
+that surface and no longer reaches into its internals. The program still
+builds as one binary and every observable behavior is unchanged. This
+round also establishes the module's multi-package layout that the
+remaining capability extractions will follow.
 
-**Why.** This is the last place production code behaves differently
-because a test assigned a global — the final test/production coupling
-left after the `testing.Testing()` retirement. Threading the context as
-a parameter is both the idiomatic Go shape (a context flows as an
-explicit argument, not ambient global state) and what lets tests inject
-their HTTP client without a shared mutable hook. With this gone the
-codebase has one path for every caller — the precondition for the
-package split that follows, since a package boundary cannot straddle a
-global that production and tests both mutate.
+**Why.** With every dependency injected and no test/production fork
+left, the code is decoupled but still one large package — the headline
+of an idiomatic-Go structure refactor is unmet until capabilities live
+in their own packages behind explicit boundaries. The counter goes
+first because it is the most self-contained capability and the cleanest
+place to set the precedent — package-boundary shape, exported-surface
+style, and how the entry point wires a capability — that every
+subsequent extraction round reuses.
 
 ## Scope
 
-- Remove the test-only exchange-context package variable and the
-  production branch that reads it. The exchange context becomes an
-  explicit parameter supplied by the caller.
-- Production behavior is identical: callers pass the context they
-  already hold; with no test client present the exchange uses the same
-  effective context it does today.
-- Tests inject their client-bearing context through the new parameter
-  (directly, or via the request context that reaches the exchange) — not
-  through a reinstated global. Adjust test wiring as needed; do not
-  weaken, skip, or delete any test or its assertions.
-- If the exchange method is part of an interface, update the interface
-  and every implementer and caller consistently. Do not change routing
-  or handler behavior, do not extract packages this round, and do not
-  edit reqs/ (the behavioral contract) or helper/.
+- Extract exactly the **counter** capability this round. Other
+  capabilities (web sessions, the OAuth/token cluster, web rendering,
+  the JSON API, MCP wiring) stay where they are; each is its own later
+  round.
+- The counter package exposes only the minimal surface its consumers
+  need; consumers use only that surface. The tests that pin counter
+  behavior move with it or continue to run and assert unchanged — do
+  not weaken, skip, or delete any test or its assertions.
+- Package name, directory path, and module layout are yours to choose —
+  pick the idiomatic Go shape; the spec does not pin them.
+- If the whole counter capability cannot move while staying green in
+  one round, move the largest coherent slice that stays green (core
+  state and persistence first, handlers and tools after) and name in
+  the result note exactly what moved and what remains, so the next
+  counter round continues it. Never loosen the invariant to fit more in.
+- Production behavior is identical. Do not edit reqs/ (the behavioral
+  contract) or helper/.
 
 ## Done when
 
 From app-root/, with no behavioral change versus before: the full test
-suite passes, the race-detector run passes, gofmt and go vet are clean,
-no source line exceeds 120 columns, and the static binary still builds.
-Additionally, a search across non-test source for the retired hook name
-returns nothing.
+suite passes, the race-detector run passes, gofmt and go vet are clean
+across the whole module, no source line in the module exceeds 120
+columns, and the static binary still builds.
 
 ## Result — 2026-05-16
 
-Completed the token-exchange context refactor. `googleIDP.ExchangeCode`
-now accepts a `context.Context`; the real Google provider uses that context
-for both the OAuth token POST and ID-token JWK fetch, with nil preserving the
-previous background-context fallback. The Google callback passes the request
-context, and tests that need the loopback HTTPS client pass an
-`oauth2.HTTPClient` context directly. Removed `testHookGoogleExchangeContext`
-and the production branch that read it.
+Completed the counter package extraction. The counter state, persistence
+attachment, broadcaster, and SSE stream implementation now live in
+`app-root/counter`; `main` wires that package into MCP tools, HTTP handlers,
+and the page renderer through the exported counter surface. Auth gates remain
+in `main` because they depend on web-session and OAuth token stores that are
+out of scope for this round. Tests were updated to use the package boundary
+and to include the counter package in isolated Makefile build fixtures.
 
-Files changed: `app-root/main.go`, `app-root/main_test.go`, `NEXT.md`.
+Files changed: `app-root/counter/counter.go`, `app-root/main.go`,
+`app-root/main_test.go`, `NEXT.md`.
 
 Verification from `app-root/`:
-- `gofmt -w main.go main_test.go` — passed.
-- `awk 'length($0)>120 {print FILENAME ":" FNR ":" length($0)}' main.go main_test.go` — no output.
-- `rg -n "testHookGoogleExchangeContext" app-root --glob '!**/.ralph/**'` — no output.
+- `gofmt -w main.go main_test.go counter/counter.go` — passed.
+- `awk 'length($0)>120 {print FILENAME ":" FNR ":" length($0)}' $(rg --files -g '*.go')` — no output.
 - `GOROOT= go vet ./...` — passed.
 - `GOROOT= CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-check .` — passed.
-- `GOROOT= go test -run 'TestR_(T0B2_A4E5|VF61_2Y6I|W3K0_QD0E|ZBV4_KEJ6|EMW1_D8A0)' -count=1 -v` — passed.
-- `GOROOT= go test -race -run 'TestR_(T0B2_A4E5|VF61_2Y6I|W3K0_QD0E|ZBV4_KEJ6|EMW1_D8A0)' -count=1` — passed.
+- `GOROOT= make build` — passed.
+- `GOROOT= go test ./counter && GOROOT= go test -race ./counter` — passed.
 - `GOROOT= go test ./...` — blocked only by out-of-scope local Ralph state:
   `.ralph/requirements-verified.jsonl` permission denied.
 - `GOROOT= go test -race ./...` — blocked only by the same out-of-scope local
   Ralph state.
 
-Issue noted: the default shell environment still has `GOROOT` pointing at a
-Go 1.23.5 tree while `go` is Go 1.26.2; verification used `GOROOT=` to select
-the matching `/usr/local/go` toolchain.
+Issue noted: the HTTP mutation auth gates and MCP tool registration still live
+in `main` pending later extraction of the OAuth/token and MCP wiring
+capabilities.
