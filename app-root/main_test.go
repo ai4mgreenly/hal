@@ -47,6 +47,18 @@ var oauthTokenStore = newOAuthTokenStorage()
 var webSessionStore = newWebSessionStorage()
 var theCounter = &counter{}
 
+func installTestAuthConfig(t testing.TB, env map[string]string) authConfig {
+	t.Helper()
+	prev := authCfg()
+	cfg := loadAuthConfig(func(name string) (string, bool) {
+		v, ok := env[name]
+		return v, ok
+	})
+	setAuthCfg(cfg)
+	t.Cleanup(func() { setAuthCfg(prev) })
+	return cfg
+}
+
 func contextWithTestStores(ctx context.Context) context.Context {
 	return contextWithGoogleIDP(
 		contextWithCounter(
@@ -7196,14 +7208,15 @@ func TestR_WD9O_X90L_fresh_database_counter_is_zero(t *testing.T) {
 // part of the identifier, not optional decoration.
 func TestR_3UT3_IKZG_single_configured_resource_identifier(t *testing.T) {
 	const pinned = "http://localhost:8443/mcp"
-	t.Setenv("HAL_RESOURCE_IDENTIFIER", pinned)
+	installTestAuthConfig(t, map[string]string{"HAL_RESOURCE_IDENTIFIER": pinned})
 	if got := canonicalResourceIdentifier(); got != pinned {
 		t.Fatalf("env override = %q, want %q (R-3UT3-IKZG)", got, pinned)
 	}
 	if a, b := canonicalResourceIdentifier(), canonicalResourceIdentifier(); a != b {
 		t.Fatalf("two calls disagree: %q vs %q (R-3UT3-IKZG)", a, b)
 	}
-	os.Unsetenv("HAL_RESOURCE_IDENTIFIER")
+
+	installTestAuthConfig(t, nil)
 	def := canonicalResourceIdentifier()
 	if !strings.HasSuffix(def, "/mcp") {
 		t.Fatalf("default %q lacks `/mcp` suffix (R-3UT3-IKZG / R-7A9U-HJFF)", def)
@@ -8778,7 +8791,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 
 	t.Run("callback_accepts_valid_state_and_consumes_single_use",
 		func(t *testing.T) {
-			t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+			installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 			state, bindingID := loginAndExtract(t)
 			res := callbackResult(t, state, bindingID)
 			defer res.Body.Close()
@@ -8861,7 +8874,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 // domain "127.0.0.1"; we drive the callback under a configured
 // allow-domain of "allowed.example.org" so the check rejects.
 func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
-	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+	installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "allowed.example.org"})
 	states := newOAuthStateStorage()
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
@@ -8914,7 +8927,7 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 // HostedDomain claim, so the success path is exercised without any
 // environment plumbing.
 func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
-	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 	states := newOAuthStateStorage()
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
@@ -8971,7 +8984,7 @@ func (i rEMW1D8A0IDP) ExchangeCode(code, redirectURI string) (googleIdentity, er
 // not establish a web session, and mcp-origin callbacks do not mint a HAL
 // authorization code or web session.
 func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
-	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 	unverifiedIDP := rEMW1D8A0IDP{identity: googleIdentity{
 		Sub:           "sub-unverified",
 		Email:         "user@example.com",
@@ -9182,7 +9195,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 	}
 
 	t.Run("successful_callback_mints_session_and_sets_cookie", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+		installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 		res := runFlow(t, nil)
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusSeeOther {
@@ -9225,7 +9238,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 	})
 
 	t.Run("session_cookie_is_secure_under_forwarded_https", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+		installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 		res := runFlow(t, func(req *http.Request) {
 			req.Header.Set("X-Forwarded-Proto", "https")
 		})
@@ -9241,7 +9254,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 	})
 
 	t.Run("off_domain_callback_does_not_mint_session", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+		installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "allowed.example.org"})
 		res := runFlow(t, nil)
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusForbidden {
@@ -9289,7 +9302,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 // subtest pins the workspace-domain rejection contract.
 func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.T) {
 	t.Run("login_callback_session_surfaces_google_email_in_index", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+		installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 		states := newOAuthStateStorage()
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
@@ -9375,7 +9388,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 	})
 
 	t.Run("off_domain_identity_is_rejected_with_no_session", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+		installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "allowed.example.org"})
 		states := newOAuthStateStorage()
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
@@ -11502,7 +11515,7 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 // as if the client had supplied it. Present non-canonical values are
 // still rejected by R-4GRA-EGBY; this test covers the omission default.
 func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) {
-	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
 	canonical := canonicalResourceIdentifier()
 
 	originalTokens := oauthTokenStore
@@ -12163,8 +12176,7 @@ func TestR_LWCN_ZBXO_central_auth_configuration_surface(t *testing.T) {
 	})
 
 	t.Run("default_values_match_pinned_posture", func(t *testing.T) {
-		os.Unsetenv("GOOGLE_WORKSPACE_DOMAIN")
-		os.Unsetenv("HAL_RESOURCE_IDENTIFIER")
+		installTestAuthConfig(t, nil)
 		cfg := authCfg()
 		if cfg.WebSessionAbsoluteTTL != 12*time.Hour {
 			t.Errorf("WebSessionAbsoluteTTL = %v, want 12h "+
@@ -12197,8 +12209,10 @@ func TestR_LWCN_ZBXO_central_auth_configuration_surface(t *testing.T) {
 	})
 
 	t.Run("env_overrides_apply_to_string_values", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "elsewhere.example.org")
-		t.Setenv("HAL_RESOURCE_IDENTIFIER", "https://"+"elsewhere.example.org"+"/")
+		installTestAuthConfig(t, map[string]string{
+			"GOOGLE_WORKSPACE_DOMAIN": "elsewhere.example.org",
+			"HAL_RESOURCE_IDENTIFIER": "https://" + "elsewhere.example.org" + "/",
+		})
 		cfg := authCfg()
 		if cfg.WorkspaceDomain != "elsewhere.example.org" {
 			t.Errorf("WorkspaceDomain override = %q, want "+
@@ -12237,8 +12251,10 @@ func TestR_LWCN_ZBXO_central_auth_configuration_surface(t *testing.T) {
 	})
 
 	t.Run("consumers_route_through_central_surface", func(t *testing.T) {
-		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "consumer.example.org")
-		t.Setenv("HAL_RESOURCE_IDENTIFIER", "https://"+"consumer.example.org"+"/")
+		installTestAuthConfig(t, map[string]string{
+			"GOOGLE_WORKSPACE_DOMAIN": "consumer.example.org",
+			"HAL_RESOURCE_IDENTIFIER": "https://" + "consumer.example.org" + "/",
+		})
 		if got := googleWorkspaceDomain(); got != authCfg().WorkspaceDomain {
 			t.Errorf("googleWorkspaceDomain() = %q, want authCfg "+
 				"value %q — accessor must read through the central "+
@@ -14910,8 +14926,8 @@ func TestR_D1IO_90H0_stdout_is_access_log_only(t *testing.T) {
 // than discarded. The requireEnv helper's fail-loudly mechanics are
 // pinned by R-LWCN-ZBXO; in-process consumer wiring of
 // authCfg().WorkspaceDomain to the hosted_domain check is pinned by
-// the R-5LQM-O89D tests at lines 8069 / 8264 / 8394 which exercise
-// the override via t.Setenv on this same env var name.
+// the R-5LQM-O89D tests, which exercise the override by installing
+// config through this same env var name.
 func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -15009,15 +15025,14 @@ func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 		// Verifies by behavior, not by source scan: setting the bare
 		// name must override the default; setting the HAL_-prefixed
 		// name must not.
-		t.Setenv(wantVar, "evfs-gtw7.example.org")
+		installTestAuthConfig(t, map[string]string{wantVar: "evfs-gtw7.example.org"})
 		if got := authCfg().WorkspaceDomain; got != "evfs-gtw7.example.org" {
 			t.Errorf("authCfg().WorkspaceDomain with %s set = %q, want "+
 				"%q — R-ANRQ-04PK requires the bare env var to flow "+
 				"to the in-memory surface", wantVar, got,
 				"evfs-gtw7.example.org")
 		}
-		os.Unsetenv(wantVar)
-		t.Setenv(halVar, "evfs-gtw7-hal.example.org")
+		installTestAuthConfig(t, map[string]string{halVar: "evfs-gtw7-hal.example.org"})
 		if got := authCfg().WorkspaceDomain; got == "evfs-gtw7-hal.example.org" {
 			t.Errorf("authCfg().WorkspaceDomain honored %s — R-ANRQ-04PK "+
 				"forbids a HAL_-prefixed variant; only the bare name "+
@@ -18741,7 +18756,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 
 	t.Run("mcp_origin_off_domain_redirects_oauth_error_to_recorded_redirect_uri",
 		func(t *testing.T) {
-			t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+			installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "allowed.example.org"})
 			_, state, bindingID, redirect, _, _, clientState, _ := driveAuthorize(t)
 			webSessionStore.mu.Lock()
 			beforeSessions := len(webSessionStore.m)

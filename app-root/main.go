@@ -1009,12 +1009,7 @@ var (
 	activeAuthCfg   = loadAuthConfig(os.LookupEnv)
 	envLookupMu     sync.RWMutex
 	activeEnvLookup envLookup = os.LookupEnv
-	testEnvLookups  atomic.Bool
 )
-
-func init() {
-	testEnvLookups.Store(true)
-}
 
 // loadAuthConfig reads the authentication configuration once through the
 // supplied lookup and returns the immutable value used by runtime consumers.
@@ -1038,7 +1033,7 @@ func loadAuthConfig(lookup envLookup) authConfig {
 		// at runtime because the requireEnv gate fails before any
 		// request lands, but it keeps the wide existing test surface
 		// (and the R-LWCN-ZBXO default-values audit) coherent without
-		// forcing `t.Setenv` into every test.
+		// forcing every test to install explicit config.
 		ResourceIdentifier: "http://127.0.0.1:3000/mcp",
 	}
 	// R-ANRQ-04PK: the allowed Workspace domain is supplied via the
@@ -1046,8 +1041,8 @@ func loadAuthConfig(lookup envLookup) authConfig {
 	// the bare-`GOOGLE_*` convention R-68WP-XVCK pins for the Google
 	// federation seam, not a `HAL_`-prefixed variant. runServe enforces
 	// the fail-loudly contract via requireEnv at startup; this in-memory
-	// surface honors the same name so tests using `t.Setenv` exercise
-	// the same plumbing the operator does.
+	// surface honors the same name so tests that install config through
+	// loadAuthConfig exercise the same plumbing the operator does.
 	if v, ok := lookup("GOOGLE_WORKSPACE_DOMAIN"); ok {
 		c.WorkspaceDomain = v
 	}
@@ -1071,15 +1066,9 @@ func setEnvLookup(lookup envLookup) envLookup {
 	return prev
 }
 
-// authCfg returns the current authentication configuration surface. In the
-// serving path, runServe installs a single startup-parsed value before any
-// handler is reachable, so consumers never re-consult the environment during
-// runtime. Tests retain their historical t.Setenv behavior because many
-// focused unit tests exercise accessors without starting the full command.
+// authCfg returns the current authentication configuration surface installed
+// by startup or by tests through the same loadAuthConfig/setAuthCfg seam.
 func authCfg() authConfig {
-	if testing.Testing() && testEnvLookups.Load() {
-		return loadAuthConfig(os.LookupEnv)
-	}
 	authCfgMu.RLock()
 	defer authCfgMu.RUnlock()
 	return activeAuthCfg
@@ -2988,10 +2977,6 @@ func runServeWithEnvAndClock(
 	setAuthCfg(cfg)
 	prevLookup := setEnvLookup(lookup)
 	defer setEnvLookup(prevLookup)
-	if testing.Testing() {
-		prev := testEnvLookups.Swap(false)
-		defer testEnvLookups.Store(prev)
-	}
 	servingOAuthClients := newOAuthClientStorage()
 	servingWebSessions := webSessionStoreFromContext(ctx)
 	servingOAuthTokens := oauthTokenStoreFromContext(ctx)
