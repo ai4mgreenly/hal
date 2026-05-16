@@ -40,15 +40,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
-// (github.com/modelcontextprotocol/go-sdk). The package-level server
-// is the foundation future iterations attach tool registrations and
-// the Streamable HTTP transport to; constructing it via the SDK here
-// is what makes "the MCP server is built on the SDK" structurally
-// true — JSON-RPC and transport framing are owned by the SDK, not
-// hand-rolled in this codebase.
-var mcpServer = newMCPServer()
-
 type appTicker interface {
 	C() <-chan time.Time
 	Stop()
@@ -3023,6 +3014,12 @@ func runServeWithEnvAndClock(
 	mux.HandleFunc(http.MethodGet, "/counter/stream", handleCounterStream)
 	mux.HandleFunc(http.MethodPost, "/counter/increment", handleCounterIncrement)
 	mux.HandleFunc(http.MethodPost, "/counter/decrement", handleCounterDecrement)
+	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
+	// (github.com/modelcontextprotocol/go-sdk). The serve entry point owns
+	// this SDK server instance and threads it to the Streamable HTTP
+	// transport below; JSON-RPC and transport framing stay owned by the SDK,
+	// not hand-rolled in this codebase.
+	mcpServer := newMCPServer()
 	// R-UK7D-Z0IZ: the MCP server speaks the Streamable HTTP transport
 	// defined in the current Model Context Protocol specification. The
 	// SDK-provided handler owns JSON-RPC framing, session management,
