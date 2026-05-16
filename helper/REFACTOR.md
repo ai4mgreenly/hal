@@ -52,8 +52,11 @@ the only permitted write outside the active code root. The note should include:
 - verification performed, including commands and outcomes
 - blockers, issues, or follow-up risks discovered
 
-After appending the result note, stop. Do not begin another action.
+After appending the result note, commit all changes made during the iteration.
+The commit is the final step. After committing, stop. Do not begin another
+action.
 
-If the result is imperfect, still stop after the single action and report the
-state clearly. Future iterations will handle dissatisfaction by refining
-`../NEXT.md`, this prompt, or the specifications in fail-forward mode.
+If the result is imperfect, still stop after the single action, result note,
+and commit, and report the state clearly. Future iterations will handle
+dissatisfaction by refining `../NEXT.md`, this prompt, or the specifications
+in fail-forward mode.
