@@ -673,7 +673,7 @@ func (c *counter) attach(db *sql.DB) error {
 // existing AuthorizationURL operation, not a new operation.
 type googleIDP interface {
 	AuthorizationURL(redirectURI, state string, forceLogin bool) string
-	ExchangeCode(code, redirectURI string) (googleIdentity, error)
+	ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error)
 }
 
 // R-T0B2-A4E5: the identity value the code-exchange operation returns
@@ -728,7 +728,7 @@ func (googleFakeIDP) AuthorizationURL(redirectURI, state string, forceLogin bool
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + v.Encode()
 }
 
-func (googleFakeIDP) ExchangeCode(code, redirectURI string) (googleIdentity, error) {
+func (googleFakeIDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
 	const fakeDomain = "example.com"
 	return googleIdentity{
 		Sub:           "fake-sub-" + code,
@@ -792,20 +792,11 @@ func (g *googleRealIDP) AuthorizationURL(redirectURI, state string, forceLogin b
 	return cfg.AuthCodeURL(state, opts...)
 }
 
-// testHookGoogleExchangeContext, when non-nil, overrides the context
-// passed to oauth2.Config.Exchange in googleRealIDP.ExchangeCode. The
-// oauth2 package looks for an *http.Client at oauth2.HTTPClient on the
-// supplied context; a test that needs to redirect the HTTPS POST at a
-// loopback httptest server injects its client through this hook.
-// Production callers leave it nil.
-var testHookGoogleExchangeContext context.Context
-
-func (g *googleRealIDP) ExchangeCode(code, redirectURI string) (googleIdentity, error) {
+func (g *googleRealIDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
 	cfg := g.cfg
 	cfg.RedirectURL = redirectURI
-	ctx := context.Background()
-	if testHookGoogleExchangeContext != nil {
-		ctx = testHookGoogleExchangeContext
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	tok, err := cfg.Exchange(ctx, code)
 	if err != nil {
@@ -3975,6 +3966,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		return
 	}
 	identity, err := idp.ExchangeCode(
+		r.Context(),
 		r.URL.Query().Get("code"),
 		requestBaseURL(r)+"/oauth/google/callback",
 	)

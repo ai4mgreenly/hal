@@ -4923,7 +4923,7 @@ func TestR_VF61_2Y6I_test_env_uses_google_double(t *testing.T) {
 			"match Google's documented authorization shape (R-VF61-2Y6I)")
 	}
 
-	id, err := idp.ExchangeCode("auth-code-abc", redirect)
+	id, err := idp.ExchangeCode(context.Background(), "auth-code-abc", redirect)
 	if err != nil {
 		t.Fatalf("fake ExchangeCode returned error (R-VF61-2Y6I): %v", err)
 	}
@@ -9026,7 +9026,7 @@ func (i rEMW1D8A0IDP) AuthorizationURL(redirectURI, state string, forceLogin boo
 	return googleFakeIDP{}.AuthorizationURL(redirectURI, state, forceLogin)
 }
 
-func (i rEMW1D8A0IDP) ExchangeCode(code, redirectURI string) (googleIdentity, error) {
+func (i rEMW1D8A0IDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
 	return i.identity, nil
 }
 
@@ -12490,18 +12490,17 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		t.Cleanup(ts.Close)
 
 		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
-		// Redirect the oauth2 client at our loopback server and supply
-		// a context whose oauth2.HTTPClient value carries an HTTP client
+		// Redirect the oauth2 client at our loopback server and pass a
+		// context whose oauth2.HTTPClient value carries an HTTP client
 		// that trusts the httptest CA, so the HTTPS POST completes
 		// against the in-process server rather than reaching out to
 		// Google (R-VF61-2Y6I).
 		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
 		idp.jwksURL = ts.URL + "/certs"
-		testHookGoogleExchangeContext = context.WithValue(
+		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
-		t.Cleanup(func() { testHookGoogleExchangeContext = nil })
 
-		identity, err := idp.ExchangeCode("auth-code-abc", redirectURI)
+		identity, err := idp.ExchangeCode(exchangeCtx, "auth-code-abc", redirectURI)
 		if err != nil {
 			t.Fatalf("ExchangeCode: %v", err)
 		}
@@ -12670,10 +12669,9 @@ func TestR_ZBV4_KEJ6_real_google_id_token_validation(t *testing.T) {
 		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
 		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
 		idp.jwksURL = ts.URL + "/certs"
-		testHookGoogleExchangeContext = context.WithValue(
+		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
-		t.Cleanup(func() { testHookGoogleExchangeContext = nil })
-		_, err := idp.ExchangeCode("auth-code-abc", redirectURI)
+		_, err := idp.ExchangeCode(exchangeCtx, "auth-code-abc", redirectURI)
 		return err
 	}
 
