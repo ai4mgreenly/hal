@@ -1831,7 +1831,9 @@ type oauthAuthCodeStorage struct {
 	m  map[string]*oauthAuthCode
 }
 
-var oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+func newOAuthAuthCodeStorage() *oauthAuthCodeStorage {
+	return &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+}
 
 // oauthAuthCodeNow is the clock the auth-code store reads for issue and
 // expiry comparisons. Tests may replace it directly; production resolves
@@ -3015,11 +3017,12 @@ func runServeWithEnvAndClock(
 	servingAgentsBcast := &agentsBroadcaster{}
 	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(servingAgentsBcast)
 	defer oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast)
+	servingOAuthAuthCodes := newOAuthAuthCodeStorage()
 	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleAgentsStreamWithBroadcaster(servingAgentsBcast, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
-		handleGoogleCallbackWithGoogleIDP(servingGoogleIDP, w, r)
+		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(servingGoogleIDP, servingOAuthAuthCodes, w, r)
 	})
 	// R-1KML-5J0Q: every OAuth 2.1 authorization endpoint the service
 	// exposes is mounted on the same http.ServeMux that serves the
@@ -3038,7 +3041,9 @@ func runServeWithEnvAndClock(
 	mux.HandleFunc(http.MethodGet, "/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
 		handleOAuthAuthorizeWithGoogleIDP(servingGoogleIDP, w, r)
 	})
-	mux.HandleFunc(http.MethodPost, "/oauth/token", handleOAuthToken)
+	mux.HandleFunc(http.MethodPost, "/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		handleOAuthTokenWithAuthCodeStore(servingOAuthAuthCodes, w, r)
+	})
 	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
 	servingCounter := &theCounter
 	_ = servingCounter.broadcaster()
@@ -3761,6 +3766,12 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+	handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(servingIDP, newOAuthAuthCodeStorage(), w, r)
+}
+
+func handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(
+	servingIDP googleIDP, authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
+) {
 	state := r.URL.Query().Get("state")
 	if state == "" {
 		http.Error(w, errOAuthStateMissing.Error(), http.StatusBadRequest)
@@ -3857,7 +3868,7 @@ func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWrit
 		// value (R-4GRA-EGBY-vetted at authorize time) is bound onto
 		// the code so token exchange can propagate it onto the
 		// access-token record.
-		code, err := oauthAuthCodeStore.issueWithResource(
+		code, err := authCodes.issueWithResource(
 			stateRec.mcp.clientID,
 			stateRec.mcp.redirectURI,
 			stateRec.mcp.codeChallenge,
@@ -4641,6 +4652,10 @@ func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWrit
 // `resource` parameter is rejected with RFC 8707 `invalid_target`
 // before any token would be minted.
 func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
+	handleOAuthTokenWithAuthCodeStore(newOAuthAuthCodeStorage(), w, r)
+}
+
+func handleOAuthTokenWithAuthCodeStore(authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request) {
 	limitRequestBodyR_VKZD_UKVS(w, r)
 	if err := r.ParseForm(); err != nil {
 		if requestBodyTooLargeR_VKZD_UKVS(err) {
@@ -4663,7 +4678,7 @@ func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
-		handleOAuthTokenAuthCode(w, r)
+		handleOAuthTokenAuthCodeWithAuthCodeStore(authCodes, w, r)
 	case "refresh_token":
 		handleOAuthTokenRefresh(w, r)
 	default:
@@ -4673,6 +4688,12 @@ func handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOAuthTokenAuthCode(w http.ResponseWriter, r *http.Request) {
+	handleOAuthTokenAuthCodeWithAuthCodeStore(newOAuthAuthCodeStorage(), w, r)
+}
+
+func handleOAuthTokenAuthCodeWithAuthCodeStore(
+	authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
+) {
 	code := r.PostForm.Get("code")
 	clientID := r.PostForm.Get("client_id")
 	redirectURI := r.PostForm.Get("redirect_uri")
@@ -4683,7 +4704,7 @@ func handleOAuthTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 				"redirect_uri, code_verifier")
 		return
 	}
-	rec, err := oauthAuthCodeStore.redeem(code, clientID, redirectURI, codeVerifier)
+	rec, err := authCodes.redeem(code, clientID, redirectURI, codeVerifier)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return

@@ -48,13 +48,11 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result - 2026-05-16
 
-Completed one singleton strangle: `agentsBcast`. The package-level
-agents broadcaster variable was removed; `runServe` now constructs the
-serving `agentsBroadcaster`, threads it into `/agents/stream`, and binds
-the same instance to `oauthTokenStore` so token-chain issue, rotation,
-reuse-detection, and manual revoke notifications still fan out to the
-same subscriber set. The `oauthTokenStore` singleton remains unchanged
-for a later round.
+Completed one singleton strangle: `oauthAuthCodeStore`. The package-level
+authorization-code store variable was removed; `runServe` now constructs the
+serving `oauthAuthCodeStorage` instance and threads it into the Google callback
+code-issuance path and the OAuth token authorization-code redemption path. Tests
+that need shared auth-code state now use explicit local stores.
 
 Files changed:
 - `app-root/main.go`
@@ -63,8 +61,8 @@ Files changed:
 
 Verification:
 - `gofmt -w main.go main_test.go` completed.
-- `env -u GOROOT go test -run 'TestR_0TVF_0BKI|TestR_T6VA_9U84|TestR_D0XD_1YT0|TestR_89K0_GH5G|TestR_8UAA_YKR9|TestR_9HGE_87UG|TestR_A26O_QBG9'` passed.
-- `env -u GOROOT go test -race -run 'TestR_0TVF_0BKI|TestR_T6VA_9U84|TestR_D0XD_1YT0|TestR_89K0_GH5G|TestR_8UAA_YKR9|TestR_9HGE_87UG|TestR_A26O_QBG9'` passed.
+- `env -u GOROOT go test -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_WLUL_MZCD|TestR_KX4N_DZ44|TestR_JTTZ_CG5J|TestR_2HT5_50F4|TestR_EMW1_D8A0|TestR_KCBH_CXY9|TestR_7NWT_PODV'` passed.
+- `env -u GOROOT go test -race -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_WLUL_MZCD|TestR_KX4N_DZ44|TestR_JTTZ_CG5J|TestR_2HT5_50F4|TestR_EMW1_D8A0|TestR_KCBH_CXY9|TestR_7NWT_PODV'` passed.
 - `env -u GOROOT go vet ./...` passed.
 - `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(rg --files -g '*.go')` passed with no output.
 - `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal ./...` passed.

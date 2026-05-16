@@ -8941,9 +8941,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 	webSessionStore.mu.Lock()
 	webSessionStore.m = map[string]*webSession{}
 	webSessionStore.mu.Unlock()
-	oauthAuthCodeStore.mu.Lock()
-	oauthAuthCodeStore.m = map[string]*oauthAuthCode{}
-	oauthAuthCodeStore.mu.Unlock()
+	authCodes := newOAuthAuthCodeStorage()
 
 	callback := func(t *testing.T, state, bindingID string) *http.Response {
 		t.Helper()
@@ -8952,7 +8950,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			nil)
 		req.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		rec := httptest.NewRecorder()
-		handleGoogleCallback(rec, req)
+		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, rec, req)
 		return rec.Result()
 	}
 
@@ -9069,9 +9067,9 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			t.Fatalf("mcp error redirect state = %q, want %q (R-EMW1-D8A0)",
 				got, clientState)
 		}
-		oauthAuthCodeStore.mu.Lock()
-		gotCodes := len(oauthAuthCodeStore.m)
-		oauthAuthCodeStore.mu.Unlock()
+		authCodes.mu.Lock()
+		gotCodes := len(authCodes.m)
+		authCodes.mu.Unlock()
 		if gotCodes != 0 {
 			t.Fatalf("auth codes after unverified callback = %d, want 0 "+
 				"(R-EMW1-D8A0)", gotCodes)
@@ -10452,11 +10450,12 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 	}
 
 	clientID, _ := explicit["client_id"].(string)
+	authCodes := newOAuthAuthCodeStorage()
 	redirectURI := "http://127.0.0.1/cb-kcbh-explicit"
 	codeVerifier := "verifier-kcbh-cxy9-public-pkce-token-exchange"
 	sum := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := oauthAuthCodeStore.issueWithResource(clientID, redirectURI,
+	code, err := authCodes.issueWithResource(clientID, redirectURI,
 		codeChallenge, "S256", "user@example.com", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issue auth code: %v (R-KCBH-CXY9)", err)
@@ -10474,7 +10473,7 @@ func TestR_KCBH_CXY9_public_pkce_clients_use_no_token_endpoint_auth(t *testing.T
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenRec := httptest.NewRecorder()
 
-	handleOAuthToken(tokenRec, tokenReq)
+	handleOAuthTokenWithAuthCodeStore(authCodes, tokenRec, tokenReq)
 
 	if tokenRec.Code != http.StatusOK {
 		t.Fatalf("token status = %d, want 200 without client_secret; body=%q (R-KCBH-CXY9)",
@@ -10502,13 +10501,11 @@ func oauthClientStoreCount() int {
 }
 
 func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
-	originalCodes := oauthAuthCodeStore
 	originalTokens := oauthTokenStore
 	t.Cleanup(func() {
-		oauthAuthCodeStore = originalCodes
 		oauthTokenStore = originalTokens
 	})
-	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 
 	const (
@@ -10518,7 +10515,7 @@ func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
 	)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := oauthAuthCodeStore.issueWithResource(
+	code, err := authCodes.issueWithResource(
 		clientID, redirectURI, challenge, "S256",
 		"user@example.com", canonicalResourceIdentifier())
 	if err != nil {
@@ -10537,7 +10534,7 @@ func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 
-	handleOAuthToken(rec, req)
+	handleOAuthTokenWithAuthCodeStore(authCodes, rec, req)
 
 	res := rec.Result()
 	defer res.Body.Close()
@@ -10955,17 +10952,15 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	originalClients := oauthClientStore
 	originalStates := oauthStateStore
-	originalCodes := oauthAuthCodeStore
 	originalTokens := oauthTokenStore
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
 		oauthStateStore = originalStates
-		oauthAuthCodeStore = originalCodes
 		oauthTokenStore = originalTokens
 	})
 	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
 	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
-	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 
 	const redirectURI = "http://127.0.0.1/cb-r-jttz"
@@ -11044,7 +11039,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	const verifier = "s256-verifier-for-r-jttz-cg5j-long-enough"
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := oauthAuthCodeStore.issueWithResource(
+	code, err := authCodes.issueWithResource(
 		clientID, redirectURI, challenge, "S256", "user@example.com",
 		canonicalResourceIdentifier())
 	if err != nil {
@@ -11061,7 +11056,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		}.Encode()))
 	wrongReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	wrongRec := httptest.NewRecorder()
-	handleOAuthToken(wrongRec, wrongReq)
+	handleOAuthTokenWithAuthCodeStore(authCodes, wrongRec, wrongReq)
 	if wrongRec.Code != http.StatusBadRequest {
 		t.Fatalf("token with challenge-as-verifier status = %d, want 400 (R-JTTZ-CG5J)",
 			wrongRec.Code)
@@ -11078,13 +11073,13 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		}.Encode()))
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenRec := httptest.NewRecorder()
-	handleOAuthToken(tokenRec, tokenReq)
+	handleOAuthTokenWithAuthCodeStore(authCodes, tokenRec, tokenReq)
 	if tokenRec.Code != http.StatusOK {
 		t.Fatalf("token with S256 verifier status = %d, want 200; body=%q (R-JTTZ-CG5J)",
 			tokenRec.Code, tokenRec.Body.String())
 	}
 
-	if _, err := oauthAuthCodeStore.issue(
+	if _, err := authCodes.issue(
 		clientID, redirectURI, verifier, "plain", "user@example.com"); !errors.Is(err, errOAuthAuthCodePKCEMethod) {
 		t.Fatalf("issue plain method returned %v, want errOAuthAuthCodePKCEMethod (R-JTTZ-CG5J)", err)
 	}
@@ -11450,15 +11445,13 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 	canonical := canonicalResourceIdentifier()
 
 	originalTokens := oauthTokenStore
-	originalCodes := oauthAuthCodeStore
 	originalStates := oauthStateStore
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
-		oauthAuthCodeStore = originalCodes
 		oauthStateStore = originalStates
 	})
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
-	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	authCodes := newOAuthAuthCodeStorage()
 	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
 
 	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
@@ -11528,7 +11521,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake-code", nil)
 	callbackReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	callbackRec := httptest.NewRecorder()
-	handleGoogleCallback(callbackRec, callbackReq)
+	handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, callbackRec, callbackReq)
 	callbackRes := callbackRec.Result()
 	defer callbackRes.Body.Close()
 	if callbackRes.StatusCode != http.StatusSeeOther {
@@ -11555,7 +11548,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		strings.NewReader(tokenForm.Encode()))
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenRec := httptest.NewRecorder()
-	handleOAuthToken(tokenRec, tokenReq)
+	handleOAuthTokenWithAuthCodeStore(authCodes, tokenRec, tokenReq)
 	tokenRes := tokenRec.Result()
 	defer tokenRes.Body.Close()
 	if tokenRes.StatusCode != http.StatusOK {
@@ -12635,12 +12628,10 @@ func TestR_33DF_7OX1_upstream_oauth_client_built_on_x_oauth2(t *testing.T) {
 // failure rather than a generic "redemption failed".
 func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T) {
 	// Reset the store between sub-test cases so they are independent;
-	// the package-level store is shared with other tests in the binary
-	// but no other test should be using R-ZPE1-0DV8 codes today.
+	// each subtest gets a fresh explicit store and clock.
+	var authCodes *oauthAuthCodeStorage
 	reset := func() {
-		oauthAuthCodeStore.mu.Lock()
-		oauthAuthCodeStore.m = map[string]*oauthAuthCode{}
-		oauthAuthCodeStore.mu.Unlock()
+		authCodes = newOAuthAuthCodeStorage()
 		oauthAuthCodeNow = time.Now
 	}
 
@@ -12657,7 +12648,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("issue_then_redeem_once_succeeds", func(t *testing.T) {
 		reset()
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: unexpected error %v (R-ZPE1-0DV8)", err)
@@ -12665,7 +12656,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		if code == "" {
 			t.Fatalf("issue: empty code (R-ZPE1-0DV8)")
 		}
-		rec, err := oauthAuthCodeStore.redeem(
+		rec, err := authCodes.redeem(
 			code, clientID, redirectURI, verifier)
 		if err != nil {
 			t.Fatalf("redeem: unexpected error %v (R-ZPE1-0DV8)", err)
@@ -12678,16 +12669,16 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("second_redemption_rejected", func(t *testing.T) {
 		reset()
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		if _, err := oauthAuthCodeStore.redeem(
+		if _, err := authCodes.redeem(
 			code, clientID, redirectURI, verifier); err != nil {
 			t.Fatalf("first redeem: %v", err)
 		}
-		_, err = oauthAuthCodeStore.redeem(
+		_, err = authCodes.redeem(
 			code, clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeConsumed) {
 			t.Errorf("second redeem returned %v, want errOAuthAuthCodeConsumed "+
@@ -12701,7 +12692,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		// configured TTL deterministically without sleeping.
 		base := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
 		oauthAuthCodeNow = func() time.Time { return base }
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
@@ -12710,7 +12701,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 		oauthAuthCodeNow = func() time.Time {
 			return base.Add(authCfg().AuthCodeTTL + time.Second)
 		}
-		_, err = oauthAuthCodeStore.redeem(
+		_, err = authCodes.redeem(
 			code, clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeExpired) {
 			t.Errorf("expired-code redeem returned %v, want "+
@@ -12721,12 +12712,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("client_id_mismatch_rejected", func(t *testing.T) {
 		reset()
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = oauthAuthCodeStore.redeem(
+		_, err = authCodes.redeem(
 			code, "other-client", redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeClientMismatch) {
 			t.Errorf("client-id-mismatch redeem returned %v, want "+
@@ -12737,12 +12728,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("redirect_uri_mismatch_rejected", func(t *testing.T) {
 		reset()
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = oauthAuthCodeStore.redeem(
+		_, err = authCodes.redeem(
 			code, clientID, "http://127.0.0.1/other", verifier)
 		if !errors.Is(err, errOAuthAuthCodeRedirectMismatch) {
 			t.Errorf("redirect-uri-mismatch redeem returned %v, want "+
@@ -12753,12 +12744,12 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("pkce_verifier_mismatch_rejected_S256", func(t *testing.T) {
 		reset()
-		code, err := oauthAuthCodeStore.issue(
+		code, err := authCodes.issue(
 			clientID, redirectURI, challenge, "S256", "user@example.com")
 		if err != nil {
 			t.Fatalf("issue: %v", err)
 		}
-		_, err = oauthAuthCodeStore.redeem(
+		_, err = authCodes.redeem(
 			code, clientID, redirectURI, "not-the-real-verifier")
 		if !errors.Is(err, errOAuthAuthCodePKCEMismatch) {
 			t.Errorf("pkce-mismatch redeem (S256) returned %v, want "+
@@ -12770,7 +12761,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 	t.Run("issue_rejects_unsupported_method", func(t *testing.T) {
 		reset()
 		for _, method := range []string{"plain", "MD5"} {
-			_, err := oauthAuthCodeStore.issue(
+			_, err := authCodes.issue(
 				clientID, redirectURI, challenge, method, "user@example.com")
 			if !errors.Is(err, errOAuthAuthCodePKCEMethod) {
 				t.Errorf("issue with unsupported method %q returned %v, want "+
@@ -12782,7 +12773,7 @@ func TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound(t *testing.T)
 
 	t.Run("unknown_code_rejected", func(t *testing.T) {
 		reset()
-		_, err := oauthAuthCodeStore.redeem(
+		_, err := authCodes.redeem(
 			"never-issued", clientID, redirectURI, verifier)
 		if !errors.Is(err, errOAuthAuthCodeUnknown) {
 			t.Errorf("redeem of never-issued code returned %v, want "+
@@ -18526,6 +18517,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 // to the recorded redirect_uri rather than the in-browser 403 used
 // for the web arm.
 func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
+	authCodes := newOAuthAuthCodeStorage()
 	driveAuthorize := func(t *testing.T) (mcpClientID, state, bindingID,
 		redirect, challenge, alg, clientState, resource string) {
 		t.Helper()
@@ -18594,16 +18586,16 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			Value: bindingID,
 		})
 		rec := httptest.NewRecorder()
-		handleGoogleCallback(rec, req)
+		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, rec, req)
 		return rec.Result()
 	}
 
 	t.Run("mcp_origin_redirects_to_recorded_redirect_uri_with_HAL_code_and_echoed_state",
 		func(t *testing.T) {
 			_, state, bindingID, redirect, challenge, alg, clientState, resource := driveAuthorize(t)
-			oauthAuthCodeStore.mu.Lock()
-			oauthAuthCodeStore.m = map[string]*oauthAuthCode{}
-			oauthAuthCodeStore.mu.Unlock()
+			authCodes.mu.Lock()
+			authCodes.m = map[string]*oauthAuthCode{}
+			authCodes.mu.Unlock()
 			webSessionStore.mu.Lock()
 			beforeSessions := len(webSessionStore.m)
 			webSessionStore.mu.Unlock()
@@ -18652,9 +18644,9 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 				t.Fatalf("Location missing code= (R-MUZJ-RD0L)")
 			}
 
-			oauthAuthCodeStore.mu.Lock()
-			codeRec := oauthAuthCodeStore.m[halCode]
-			oauthAuthCodeStore.mu.Unlock()
+			authCodes.mu.Lock()
+			codeRec := authCodes.m[halCode]
+			authCodes.mu.Unlock()
 			if codeRec == nil {
 				t.Fatalf("HAL code %q not in auth-code store (R-MUZJ-RD0L)",
 					halCode)
@@ -20427,15 +20419,13 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 // agents-block revoke action therefore revokes the initial access token even
 // before the client ever uses the paired refresh token.
 func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *testing.T) {
-	originalCodes := oauthAuthCodeStore
 	originalTokens := oauthTokenStore
 	originalSessions := webSessionStore
 	t.Cleanup(func() {
-		oauthAuthCodeStore = originalCodes
 		oauthTokenStore = originalTokens
 		webSessionStore = originalSessions
 	})
-	oauthAuthCodeStore = &oauthAuthCodeStorage{m: map[string]*oauthAuthCode{}}
+	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 	webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
 
@@ -20447,7 +20437,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	code, err := oauthAuthCodeStore.issueWithResource(
+	code, err := authCodes.issueWithResource(
 		clientID, redirectURI, challenge, "S256", owner,
 		canonicalResourceIdentifier())
 	if err != nil {
@@ -20465,7 +20455,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 		}.Encode()))
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenRec := httptest.NewRecorder()
-	handleOAuthToken(tokenRec, tokenReq)
+	handleOAuthTokenWithAuthCodeStore(authCodes, tokenRec, tokenReq)
 	if tokenRec.Code != http.StatusOK {
 		t.Fatalf("token status = %d, want 200; body=%q (R-2HT5-50F4)",
 			tokenRec.Code, tokenRec.Body.String())
