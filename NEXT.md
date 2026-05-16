@@ -48,17 +48,16 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result — 2026-05-16
 
-Strangled singleton: `oauthTokenStore`.
+Strangled singleton: `theCounter`.
 
 Completed:
-- Removed the production mutable package-level OAuth token store singleton.
-- Added `newOAuthTokenStorage()` and explicit token-store variants for MCP
-  setup, MCP bearer checks, OAuth token handling, mutation auth, agents, and
-  counter mutation handlers.
-- Constructed the serving OAuth token store in `runServeWithEnvAndClock` and
-  threaded it through the HTTP and MCP surfaces that consume token records.
-- Kept the existing test substitution point as a test-owned store in
-  `main_test.go`, with explicit context injection for serve tests.
+- Removed the production mutable package-level counter singleton.
+- Added a `newCounter()` constructor plus context/threaded counter helpers.
+- Constructed the serving counter at the serve entry point and threaded that
+  instance to the index renderer, counter HTTP endpoints, counter stream, and
+  MCP counter tools.
+- Kept test counter substitution in `main_test.go` and updated counter tests
+  to call counter-aware helpers explicitly where they bypass `runServe`.
 
 Files changed:
 - `app-root/main.go`
@@ -66,17 +65,16 @@ Files changed:
 - `NEXT.md`
 
 Verification:
-- `env -u GOROOT go test -run 'TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies|TestR_ZQS0_HWZ8|TestR_285U_FWW3|TestR_B78O_8X0F|TestR_42V5_GJW4' ./...` passed.
 - `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
   state failure: `.ralph/requirements-verified.jsonl: permission denied`.
-- `env -u GOROOT go test -run 'TestR_[^K]' ./...` passed.
-- `env -u GOROOT go test -race -run 'TestR_[^K]' ./...` passed.
-- `env -u GOROOT go vet ./...` passed.
+- `env -u GOROOT go test ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
+- `env -u GOROOT go test -race ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
 - `gofmt -w main.go main_test.go` completed.
-- `rg -n '^.{121,}$' main.go main_test.go` found no overlength lines.
+- `env -u GOROOT go vet ./...` passed.
+- `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' main.go main_test.go` produced no output.
 - `git diff --check` passed.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .` passed.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` passed.
 
 Notes:
-- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
-  while `go` is Go 1.26.2; verification used `env -u GOROOT`.
+- The shell environment still has a stale `GOROOT` pointing at a Go 1.23.5
+  tree while `go` is Go 1.26.2; verification used `env -u GOROOT`.

@@ -108,10 +108,14 @@ func appNewTicker(d time.Duration) appTicker {
 // description states what the tool does, what it returns, and when to
 // choose it, so a model can pick the right tool without further context.
 func newMCPServer() *mcp.Server {
-	return newMCPServerWithTokenStore(newOAuthTokenStorage())
+	return newMCPServerWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())
 }
 
 func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
+	return newMCPServerWithCounterAndTokenStore(newCounter(), tokens)
+}
+
+func newMCPServerWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{Name: "hal", Version: halVersion},
 		nil,
@@ -126,7 +130,7 @@ func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
 			"The value is a non-negative integer that any client can observe; reading does " +
 			"not modify it. Use this when you need to know the counter's state before " +
 			"deciding whether to call counter_increment or counter_decrement.",
-	}, counterReadTool)
+	}, counterReadToolWithCounter(c))
 	// R-YHNQ-CEJJ: the increment tool accepts no arguments. On success it
 	// adds one to the counter and returns the post-increment value.
 	// R-ZQS0-HWZ8: an inbound request invoking this tool must present a
@@ -139,7 +143,7 @@ func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
 			"arguments. The returned value is the counter's state AFTER the increment, " +
 			"a non-negative integer. Use this when the user wants the counter to go up by " +
 			"one; call counter_read first if you need the pre-increment value.",
-	}, counterIncrementToolWithTokenStore(tokens))
+	}, counterIncrementToolWithCounterAndTokenStore(c, tokens))
 	// R-GG9B-GS8T: the decrement tool accepts no arguments. When the
 	// counter is greater than zero, subtract one and return the
 	// post-decrement value. When the counter is exactly zero, return
@@ -154,7 +158,7 @@ func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
 			"non-negative integer. The counter cannot go below zero: if it is already zero, " +
 			"this tool returns an error and does not modify the counter. Use this when the " +
 			"user wants the counter to go down by one.",
-	}, counterDecrementToolWithTokenStore(tokens))
+	}, counterDecrementToolWithCounterAndTokenStore(c, tokens))
 	return s
 }
 
@@ -163,9 +167,19 @@ type counterReadOutput struct {
 }
 
 func counterReadTool(
-	_ context.Context, _ *mcp.CallToolRequest, _ struct{},
+	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterReadOutput, error) {
-	return nil, counterReadOutput{Value: theCounter.read()}, nil
+	return counterReadToolWithCounter(newCounter())(ctx, req, struct{}{})
+}
+
+func counterReadToolWithCounter(c *counter) func(
+	context.Context, *mcp.CallToolRequest, struct{},
+) (*mcp.CallToolResult, counterReadOutput, error) {
+	return func(
+		_ context.Context, _ *mcp.CallToolRequest, _ struct{},
+	) (*mcp.CallToolResult, counterReadOutput, error) {
+		return nil, counterReadOutput{Value: c.read()}, nil
+	}
 }
 
 type counterIncrementOutput struct {
@@ -175,10 +189,16 @@ type counterIncrementOutput struct {
 func counterIncrementTool(
 	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterIncrementOutput, error) {
-	return counterIncrementToolWithTokenStore(newOAuthTokenStorage())(ctx, req, struct{}{})
+	return counterIncrementToolWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())(ctx, req, struct{}{})
 }
 
 func counterIncrementToolWithTokenStore(tokens *oauthTokenStorage) func(
+	context.Context, *mcp.CallToolRequest, struct{},
+) (*mcp.CallToolResult, counterIncrementOutput, error) {
+	return counterIncrementToolWithCounterAndTokenStore(newCounter(), tokens)
+}
+
+func counterIncrementToolWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) func(
 	context.Context, *mcp.CallToolRequest, struct{},
 ) (*mcp.CallToolResult, counterIncrementOutput, error) {
 	return func(
@@ -200,7 +220,7 @@ func counterIncrementToolWithTokenStore(tokens *oauthTokenStorage) func(
 				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
 			}, counterIncrementOutput{}, nil
 		}
-		return nil, counterIncrementOutput{Value: theCounter.increment()}, nil
+		return nil, counterIncrementOutput{Value: c.increment()}, nil
 	}
 }
 
@@ -211,10 +231,16 @@ type counterDecrementOutput struct {
 func counterDecrementTool(
 	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
 ) (*mcp.CallToolResult, counterDecrementOutput, error) {
-	return counterDecrementToolWithTokenStore(newOAuthTokenStorage())(ctx, req, struct{}{})
+	return counterDecrementToolWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())(ctx, req, struct{}{})
 }
 
 func counterDecrementToolWithTokenStore(tokens *oauthTokenStorage) func(
+	context.Context, *mcp.CallToolRequest, struct{},
+) (*mcp.CallToolResult, counterDecrementOutput, error) {
+	return counterDecrementToolWithCounterAndTokenStore(newCounter(), tokens)
+}
+
+func counterDecrementToolWithCounterAndTokenStore(c *counter, tokens *oauthTokenStorage) func(
 	context.Context, *mcp.CallToolRequest, struct{},
 ) (*mcp.CallToolResult, counterDecrementOutput, error) {
 	return func(
@@ -233,7 +259,7 @@ func counterDecrementToolWithTokenStore(tokens *oauthTokenStorage) func(
 				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
 			}, counterDecrementOutput{}, nil
 		}
-		v, ok := theCounter.decrement()
+		v, ok := c.decrement()
 		if !ok {
 			return &mcp.CallToolResult{
 				IsError: true,
@@ -330,18 +356,22 @@ type counter struct {
 	bcast *counterBroadcaster
 }
 
-// R-UC3P-Z0IX: there is exactly one counter, shared by all callers. The
-// package-level singleton is the single object every transport surface
-// (the web index page, the HTTP API, the MCP tools) reads from and
-// mutates through. There is deliberately no constructor or factory that
-// hands out per-caller, per-session, or per-user counter instances —
-// callers reach this variable directly. When persistence lands (per
-// R-VNNS-W2G0 / R-30XM-G5FN), the swap is in `counter`'s internals; the
-// singleton binding itself does not multiply.
-// R-WD9O-X90L: on a fresh database the counter is zero. Today persistence
-// is not wired, so the singleton's initial state is `counter{}`'s zero
-// value — value=0 — which trivially satisfies the requirement.
-var theCounter counter
+func newCounter() *counter {
+	return &counter{}
+}
+
+type serveCounterKey struct{}
+
+func contextWithCounter(ctx context.Context, c *counter) context.Context {
+	return context.WithValue(ctx, serveCounterKey{}, c)
+}
+
+func counterFromContext(ctx context.Context) *counter {
+	if c, ok := ctx.Value(serveCounterKey{}).(*counter); ok && c != nil {
+		return c
+	}
+	return newCounter()
+}
 
 func (c *counter) broadcaster() *counterBroadcaster {
 	c.mu.Lock()
@@ -2962,13 +2992,14 @@ func runServeWithEnvAndClock(
 	servingOAuthClients := newOAuthClientStorage()
 	servingWebSessions := webSessionStoreFromContext(ctx)
 	servingOAuthTokens := oauthTokenStoreFromContext(ctx)
+	servingCounter := counterFromContext(ctx)
 	var servingGoogleIDP googleIDP
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
-	// and bind it to theCounter so every increment/decrement persists.
+	// and bind it to the serve-owned counter so every increment/decrement persists.
 	// Tests skip this step — they exercise the persistence layer directly
 	// against a temp database (see TestR_VNNS_W2G0…) and would otherwise
 	// write a stray hal.db file into the test working directory through
-	// theCounter singleton.
+	// the counter persistence binding.
 	if !testing.Testing() {
 		db, err := openCounterDB(*dbPath)
 		if err != nil {
@@ -2976,7 +3007,7 @@ func runServeWithEnvAndClock(
 			return 1
 		}
 		defer func() { _ = db.Close() }()
-		if err := theCounter.attach(db); err != nil {
+		if err := servingCounter.attach(db); err != nil {
 			fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
 			return 1
 		}
@@ -3070,7 +3101,7 @@ func runServeWithEnvAndClock(
 	// fall through to another surface or perform its action.
 	mux := newDocumentedMux()
 	mux.HandleFunc(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
-		handleIndexWithStores(servingWebSessions, servingOAuthTokens, servingOAuthClients, w, r)
+		handleIndexWithCounterAndStores(servingCounter, servingWebSessions, servingOAuthTokens, servingOAuthClients, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
 	servingOAuthStates := newOAuthStateStorage()
@@ -3121,24 +3152,25 @@ func runServeWithEnvAndClock(
 	mux.HandleFunc(http.MethodPost, "/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		handleOAuthTokenWithStores(servingOAuthAuthCodes, servingOAuthTokens, w, r)
 	})
-	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
-	servingCounter := &theCounter
+	mux.HandleFunc(http.MethodGet, "/counter", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterReadWithCounter(servingCounter, w, r)
+	})
 	_ = servingCounter.broadcaster()
 	mux.HandleFunc(http.MethodGet, "/counter/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleCounterStreamWithCounter(servingCounter, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/counter/increment", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterIncrementWithStores(servingWebSessions, servingOAuthTokens, w, r)
+		handleCounterIncrementWithCounterAndStores(servingCounter, servingWebSessions, servingOAuthTokens, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/counter/decrement", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterDecrementWithStores(servingWebSessions, servingOAuthTokens, w, r)
+		handleCounterDecrementWithCounterAndStores(servingCounter, servingWebSessions, servingOAuthTokens, w, r)
 	})
 	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
 	// (github.com/modelcontextprotocol/go-sdk). The serve entry point owns
 	// this SDK server instance and threads it to the Streamable HTTP
 	// transport below; JSON-RPC and transport framing stay owned by the SDK,
 	// not hand-rolled in this codebase.
-	mcpServer := newMCPServerWithTokenStore(servingOAuthTokens)
+	mcpServer := newMCPServerWithCounterAndTokenStore(servingCounter, servingOAuthTokens)
 	// R-UK7D-Z0IZ: the MCP server speaks the Streamable HTTP transport
 	// defined in the current Model Context Protocol specification. The
 	// SDK-provided handler owns JSON-RPC framing, session management,
@@ -3204,11 +3236,19 @@ func runServeWithEnvAndClock(
 // port is deliberately omitted from the left text — a deployment-
 // internal detail the page does not disclose.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	handleIndexWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), nil, w, r)
+	handleIndexWithCounterAndStores(counterFromContext(r.Context()),
+		webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), nil, w, r)
 }
 
 func handleIndexWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
+	w http.ResponseWriter, r *http.Request,
+) {
+	handleIndexWithCounterAndStores(counterFromContext(r.Context()), sessions, tokens, clients, w, r)
+}
+
+func handleIndexWithCounterAndStores(
+	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -3743,7 +3783,7 @@ func handleIndexWithStores(
 			`})();`+
 			`</script>`+
 			`</body></html>`+"\n",
-		htmlEscape(pickSubtitle()), bannerAuth, agentsBlock, theCounter.read(),
+		htmlEscape(pickSubtitle()), bannerAuth, agentsBlock, c.read(),
 		counterDisabled, counterDisabled, mcpInstructions, halVersion, bankJSON)
 }
 
@@ -4122,10 +4162,14 @@ func handleAgentsRevokeWithStores(
 // the current counter value as a non-negative integer. R-3R73-2TN9 /
 // R-SE5T-HP2J: this endpoint requires no authentication.
 func handleCounterRead(w http.ResponseWriter, r *http.Request) {
+	handleCounterReadWithCounter(counterFromContext(r.Context()), w, r)
+}
+
+func handleCounterReadWithCounter(c *counter, w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value uint64 `json:"value"`
-	}{Value: theCounter.read()})
+	}{Value: c.read()})
 }
 
 // R-FZC6-H2SB: GET /counter/stream is the live-update channel the index
@@ -4160,7 +4204,7 @@ func handleCounterRead(w http.ResponseWriter, r *http.Request) {
 // FIN/RST disconnects (R-T4FH-IAQQ's domain) cancel `r.Context()` and
 // return via the `<-ctx.Done()` arm.
 func handleCounterStream(w http.ResponseWriter, r *http.Request) {
-	handleCounterStreamWithCounter(&theCounter, w, r)
+	handleCounterStreamWithCounter(counterFromContext(r.Context()), w, r)
 }
 
 func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.Request) {
@@ -5206,17 +5250,24 @@ func writeSameOriginForbiddenR_R4RG_O4Y9(w http.ResponseWriter) {
 // invalid-auth request is rejected with HTTP 401 before the counter
 // is touched, so the stored value does not change.
 func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
-	handleCounterIncrementWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
+	handleCounterIncrementWithCounterAndStores(counterFromContext(r.Context()),
+		webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
 }
 
 func handleCounterIncrementWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
+	handleCounterIncrementWithCounterAndStores(counterFromContext(r.Context()), sessions, tokens, w, r)
+}
+
+func handleCounterIncrementWithCounterAndStores(
+	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
 	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
-	v := theCounter.increment()
+	v := c.increment()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Value uint64 `json:"value"`
@@ -5231,18 +5282,25 @@ func handleCounterIncrementWithStores(
 // request is rejected with HTTP 401 before the counter is touched, so
 // the stored value does not change.
 func handleCounterDecrement(w http.ResponseWriter, r *http.Request) {
-	handleCounterDecrementWithStores(webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
+	handleCounterDecrementWithCounterAndStores(counterFromContext(r.Context()),
+		webSessionStoreFromContext(r.Context()), newOAuthTokenStorage(), w, r)
 }
 
 func handleCounterDecrementWithStores(
 	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
+	handleCounterDecrementWithCounterAndStores(counterFromContext(r.Context()), sessions, tokens, w, r)
+}
+
+func handleCounterDecrementWithCounterAndStores(
+	c *counter, sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	v, ok := theCounter.decrement()
+	v, ok := c.decrement()
 	if !ok {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(struct {

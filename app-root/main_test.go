@@ -45,9 +45,13 @@ import (
 var oauthClientStore = newOAuthClientStorage()
 var oauthTokenStore = newOAuthTokenStorage()
 var webSessionStore = newWebSessionStorage()
+var theCounter = &counter{}
 
 func contextWithTestStores(ctx context.Context) context.Context {
-	return contextWithOAuthTokenStore(contextWithWebSessionStore(ctx, webSessionStore), oauthTokenStore)
+	return contextWithCounter(
+		contextWithOAuthTokenStore(contextWithWebSessionStore(ctx, webSessionStore), oauthTokenStore),
+		theCounter,
+	)
 }
 
 // R-74NI-T9CI: no subcommand prints a usage summary listing the three
@@ -5219,17 +5223,11 @@ func TestR_G47S_05R3_subtitle_bank_uniform_random_from_fixed_list(t *testing.T) 
 	}
 }
 
-// R-UC3P-Z0IX: exactly one counter, shared by all callers. The structural
-// fence: in non-test Go source, exactly one package-level var declaration
-// is typed `counter` (by value, not by pointer — a pointer var with no
-// initializer would be a nil counter, not a shared one). A second
-// declaration would create a parallel object every caller would have to
-// choose between, defeating "shared by every caller"; zero declarations
-// means there is no shared object at all. Direct mutations through a
-// caller-constructed `counter{}` literal at use-sites are also disallowed
-// — they bypass the singleton entirely — and that fence is enforced by
-// the same single-var check, since a literal would not appear as a
-// package-level var decl.
+// R-UC3P-Z0IX: exactly one counter is shared by all callers within a
+// running server. The structural fence after the singleton strangle is
+// that non-test Go source has no package-level counter var; runServe owns
+// the counter instance and threads that same pointer into the web page,
+// HTTP API, stream, and MCP tool surfaces.
 func TestR_UC3P_Z0IX_exactly_one_shared_counter(t *testing.T) {
 	var goFiles []string
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
@@ -5252,12 +5250,12 @@ func TestR_UC3P_Z0IX_exactly_one_shared_counter(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 
-	type hit struct {
+	type varHit struct {
 		file string
 		line int
 		name string
 	}
-	var hits []hit
+	var varHits []varHit
 	fset := token.NewFileSet()
 	for _, path := range goFiles {
 		file, perr := parser.ParseFile(fset, path, nil, 0)
@@ -5274,21 +5272,48 @@ func TestR_UC3P_Z0IX_exactly_one_shared_counter(t *testing.T) {
 				if !ok {
 					continue
 				}
-				ident, ok := vs.Type.(*ast.Ident)
-				if !ok || ident.Name != "counter" {
+				isCounterVar := false
+				switch typ := vs.Type.(type) {
+				case *ast.Ident:
+					isCounterVar = typ.Name == "counter"
+				case *ast.StarExpr:
+					if ident, ok := typ.X.(*ast.Ident); ok {
+						isCounterVar = ident.Name == "counter"
+					}
+				}
+				if !isCounterVar {
 					continue
 				}
 				for _, n := range vs.Names {
 					pos := fset.Position(n.Pos())
-					hits = append(hits, hit{path, pos.Line, n.Name})
+					varHits = append(varHits, varHit{path, pos.Line, n.Name})
 				}
 			}
 		}
 	}
 
-	if len(hits) != 1 {
-		t.Fatalf("expected exactly one package-level `var X counter` "+
-			"declaration (R-UC3P-Z0IX), got %d: %+v", len(hits), hits)
+	if len(varHits) != 0 {
+		t.Fatalf("expected no package-level counter var declarations "+
+			"after entry-owned injection (R-UC3P-Z0IX), got %+v", varHits)
+	}
+
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	for _, needle := range []string{
+		"servingCounter := counterFromContext(ctx)",
+		"handleIndexWithCounterAndStores(servingCounter,",
+		"handleCounterReadWithCounter(servingCounter,",
+		"handleCounterStreamWithCounter(servingCounter,",
+		"handleCounterIncrementWithCounterAndStores(servingCounter,",
+		"handleCounterDecrementWithCounterAndStores(servingCounter,",
+		"newMCPServerWithCounterAndTokenStore(servingCounter,",
+	} {
+		if !bytes.Contains(src, []byte(needle)) {
+			t.Fatalf("main.go missing %q; serve must thread one counter "+
+				"instance to every counter surface (R-UC3P-Z0IX)", needle)
+		}
 	}
 }
 
@@ -5977,9 +6002,9 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 		rr := httptest.NewRecorder()
 		switch path {
 		case "/counter/increment":
-			handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rr, req)
+			handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rr, req)
 		case "/counter/decrement":
-			handleCounterDecrementWithStores(webSessionStore, oauthTokenStore, rr, req)
+			handleCounterDecrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rr, req)
 		default:
 			t.Fatalf("unknown mutation path %q", path)
 		}
@@ -6018,14 +6043,16 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 		{
 			name: "mcp increment",
 			call: func() (*mcp.CallToolResult, error) {
-				res, _, err := counterIncrementTool(context.Background(), mcpReq, struct{}{})
+				res, _, err := counterIncrementToolWithCounterAndTokenStore(
+					theCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
 		{
 			name: "mcp decrement at zero",
 			call: func() (*mcp.CallToolResult, error) {
-				res, _, err := counterDecrementTool(context.Background(), mcpReq, struct{}{})
+				res, _, err := counterDecrementToolWithCounterAndTokenStore(
+					theCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
@@ -8215,7 +8242,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		}
 		before := theCounter.read()
 		rec, req := postWithCookie("/counter/increment", sessionPlaintext)
-		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
+		handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("cross-origin cookie increment status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8229,7 +8256,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Origin", baseOrigin)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 		rec = httptest.NewRecorder()
-		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
+		handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("same-origin cookie increment status = %d, want 200 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8300,7 +8327,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Origin", crossOrigin)
 		req.Header.Set("Authorization", "Bearer "+bearer)
 		rec := httptest.NewRecorder()
-		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
+		handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("cross-origin bearer increment status = %d, want 200 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -14028,7 +14055,9 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 
 	clientConn, serverConn := net.Pipe()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/counter/stream", handleCounterStream)
+	mux.HandleFunc("/counter/stream", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterStreamWithCounter(theCounter, w, r)
+	})
 	srv := &http.Server{Handler: mux}
 	lis := &r8we2OneShotListener{c: serverConn, done: make(chan struct{})}
 	serveDone := make(chan struct{})
@@ -14537,10 +14566,10 @@ func TestR_D56D_EBP3_access_log_authed_user_field(t *testing.T) {
 		_, _ = io.WriteString(w, "hi")
 	})
 	mux.HandleFunc("POST /counter/increment", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, w, r)
+		handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, w, r)
 	})
 	mux.HandleFunc("POST /counter/decrement", func(w http.ResponseWriter, r *http.Request) {
-		handleCounterDecrementWithStores(webSessionStore, oauthTokenStore, w, r)
+		handleCounterDecrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, w, r)
 	})
 
 	var buf bytes.Buffer
@@ -14673,7 +14702,9 @@ func TestR_DB9V_B6EK_long_stream_logs_on_close(t *testing.T) {
 	out := &r_DB9V_B6EK_syncBuf{}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /counter/stream", handleCounterStream)
+	mux.HandleFunc("GET /counter/stream", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterStreamWithCounter(theCounter, w, r)
+	})
 	srv := httptest.NewServer(accessLog(out, mux))
 	defer srv.Close()
 
@@ -20537,7 +20568,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	incReq := httptest.NewRequest(http.MethodPost, "/counter/increment", nil)
 	incReq.Header.Set("Authorization", "Bearer "+tokenDoc.AccessToken)
 	incRec := httptest.NewRecorder()
-	handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, incRec, incReq)
+	handleCounterIncrementWithCounterAndStores(theCounter, webSessionStore, oauthTokenStore, incRec, incReq)
 	if incRec.Code != http.StatusUnauthorized {
 		t.Fatalf("increment with revoked initial access status = %d, want 401; body=%q (R-2HT5-50F4)",
 			incRec.Code, incRec.Body.String())
