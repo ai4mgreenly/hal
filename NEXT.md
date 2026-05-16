@@ -112,3 +112,35 @@ Verification:
 Notes:
 - The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
   while `go` is Go 1.26.2; verification used `env -u GOROOT`.
+
+## Result — 2026-05-16
+
+Strangled singleton: `webSessionStore`.
+
+Completed:
+- Removed the production mutable package-level web session store singleton.
+- Added `newWebSessionStorage()` and explicit web-session store handler variants.
+- Constructed the serving web session store in `runServeWithEnvAndClock` and
+  threaded it through index rendering, Google callback session issuance, logout,
+  agents revoke, agents stream, and counter mutation cookie auth.
+- Updated tests that preseed or inspect web sessions to use a test-owned store.
+
+Files changed:
+- `app-root/main.go`
+- `app-root/main_test.go`
+- `NEXT.md`
+
+Verification:
+- `env -u GOROOT go test -run 'TestR_[^K]' ./...` passed.
+- `env -u GOROOT go test ./...` reached only the out-of-scope local Ralph
+  state failure: `.ralph/requirements-verified.jsonl: permission denied`.
+- `env -u GOROOT go test -race -run 'TestR_[^K]' ./...` passed.
+- `env -u GOROOT go vet ./...` passed.
+- `rg -n '^.{121,}$' main.go main_test.go` found no overlength lines.
+- `git diff --check` passed.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-test .`
+  passed.
+
+Notes:
+- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
+  while `go` is Go 1.26.2; verification used `env -u GOROOT`.

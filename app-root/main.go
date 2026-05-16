@@ -2609,7 +2609,22 @@ type webSessionStorage struct {
 	db *sql.DB
 }
 
-var webSessionStore = &webSessionStorage{m: map[string]*webSession{}}
+func newWebSessionStorage() *webSessionStorage {
+	return &webSessionStorage{m: map[string]*webSession{}}
+}
+
+type serveWebSessionStoreKey struct{}
+
+func contextWithWebSessionStore(ctx context.Context, sessions *webSessionStorage) context.Context {
+	return context.WithValue(ctx, serveWebSessionStoreKey{}, sessions)
+}
+
+func webSessionStoreFromContext(ctx context.Context) *webSessionStorage {
+	if sessions, ok := ctx.Value(serveWebSessionStoreKey{}).(*webSessionStorage); ok && sessions != nil {
+		return sessions
+	}
+	return newWebSessionStorage()
+}
 
 // webSessionNow is the clock the session store reads for issued-at /
 // expires-at stamps. Tests may replace it directly; production resolves
@@ -2906,6 +2921,7 @@ func runServeWithEnvAndClock(
 		defer testEnvLookups.Store(prev)
 	}
 	servingOAuthClients := newOAuthClientStorage()
+	servingWebSessions := webSessionStoreFromContext(ctx)
 	var servingGoogleIDP googleIDP
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to theCounter so every increment/decrement persists.
@@ -2928,7 +2944,7 @@ func runServeWithEnvAndClock(
 			fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
 			return 1
 		}
-		if err := webSessionStore.attach(db); err != nil {
+		if err := servingWebSessions.attach(db); err != nil {
 			fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
 			return 1
 		}
@@ -3014,7 +3030,7 @@ func runServeWithEnvAndClock(
 	// fall through to another surface or perform its action.
 	mux := newDocumentedMux()
 	mux.HandleFunc(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
-		handleIndexWithStores(webSessionStore, oauthTokenStore, servingOAuthClients, w, r)
+		handleIndexWithStores(servingWebSessions, oauthTokenStore, servingOAuthClients, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
 	servingOAuthStates := newOAuthStateStorage()
@@ -3024,19 +3040,23 @@ func runServeWithEnvAndClock(
 	// R-7MLK-O6I5: logout changes authenticated browser state, so it is
 	// exposed only as POST. A GET /logout is rejected by ServeMux's
 	// method-aware routing and never reaches handleLogout.
-	mux.HandleFunc(http.MethodPost, "/logout", handleLogout)
-	mux.HandleFunc(http.MethodPost, "/agents/revoke", handleAgentsRevoke)
+	mux.HandleFunc(http.MethodPost, "/logout", func(w http.ResponseWriter, r *http.Request) {
+		handleLogoutWithSessionStore(servingWebSessions, w, r)
+	})
+	mux.HandleFunc(http.MethodPost, "/agents/revoke", func(w http.ResponseWriter, r *http.Request) {
+		handleAgentsRevokeWithStores(servingWebSessions, oauthTokenStore, w, r)
+	})
 	servingAgentsBcast := &agentsBroadcaster{}
 	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(servingAgentsBcast)
 	defer oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast)
 	servingOAuthAuthCodes := newOAuthAuthCodeStorage()
 	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleAgentsStreamWithStores(
-			webSessionStore, oauthTokenStore, servingOAuthClients, servingAgentsBcast, w, r)
+			servingWebSessions, oauthTokenStore, servingOAuthClients, servingAgentsBcast, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
 		handleGoogleCallbackWithGoogleIDPStores(
-			servingGoogleIDP, servingOAuthStates, servingOAuthAuthCodes, w, r)
+			servingGoogleIDP, servingOAuthStates, servingOAuthAuthCodes, servingWebSessions, w, r)
 	})
 	// R-1KML-5J0Q: every OAuth 2.1 authorization endpoint the service
 	// exposes is mounted on the same http.ServeMux that serves the
@@ -3067,8 +3087,12 @@ func runServeWithEnvAndClock(
 	mux.HandleFunc(http.MethodGet, "/counter/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleCounterStreamWithCounter(servingCounter, w, r)
 	})
-	mux.HandleFunc(http.MethodPost, "/counter/increment", handleCounterIncrement)
-	mux.HandleFunc(http.MethodPost, "/counter/decrement", handleCounterDecrement)
+	mux.HandleFunc(http.MethodPost, "/counter/increment", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterIncrementWithStores(servingWebSessions, oauthTokenStore, w, r)
+	})
+	mux.HandleFunc(http.MethodPost, "/counter/decrement", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterDecrementWithStores(servingWebSessions, oauthTokenStore, w, r)
+	})
 	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
 	// (github.com/modelcontextprotocol/go-sdk). The serve entry point owns
 	// this SDK server instance and threads it to the Streamable HTTP
@@ -3140,7 +3164,7 @@ func runServeWithEnvAndClock(
 // port is deliberately omitted from the left text — a deployment-
 // internal detail the page does not disclose.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	handleIndexWithStores(webSessionStore, oauthTokenStore, nil, w, r)
+	handleIndexWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, nil, w, r)
 }
 
 func handleIndexWithStores(
@@ -3802,11 +3826,13 @@ func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWrit
 func handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(
 	servingIDP googleIDP, authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	handleGoogleCallbackWithGoogleIDPStores(servingIDP, newOAuthStateStorage(), authCodes, w, r)
+	handleGoogleCallbackWithGoogleIDPStores(
+		servingIDP, newOAuthStateStorage(), authCodes, newWebSessionStorage(), w, r)
 }
 
 func handleGoogleCallbackWithGoogleIDPStores(
 	servingIDP googleIDP, states *oauthStateStorage, authCodes *oauthAuthCodeStorage,
+	sessions *webSessionStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
 	state := r.URL.Query().Get("state")
@@ -3931,7 +3957,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 		// R-CXJ2-R3BN: mint a web session and set the session cookie. The
 		// plaintext identifier appears only here, in the Set-Cookie response;
 		// the store keeps a hash (R-SLGL-B5B4).
-		plaintext, err := webSessionStore.issue(identity.Email)
+		plaintext, err := sessions.issue(identity.Email)
 		if err != nil {
 			http.Error(w, "session issuance failed",
 				http.StatusInternalServerError)
@@ -3981,13 +4007,17 @@ func writeOAuthErrorRedirect(
 // written here, so revoking a web session has no effect on any MCP token
 // chain owned by the same email.
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	handleLogoutWithSessionStore(webSessionStoreFromContext(r.Context()), w, r)
+}
+
+func handleLogoutWithSessionStore(sessions *webSessionStorage, w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		if sess := webSessionStore.lookup(c.Value); sess != nil &&
+		if sess := sessions.lookup(c.Value); sess != nil &&
 			!sameOriginBrowserMutationR_R4RG_O4Y9(r) {
 			writeSameOriginForbiddenR_R4RG_O4Y9(w)
 			return
 		}
-		webSessionStore.revoke(c.Value)
+		sessions.revoke(c.Value)
 		http.SetCookie(w, &http.Cookie{
 			Name:     webSessionCookieName,
 			Value:    "",
@@ -4012,9 +4042,15 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 // unaffected (R-0XJ4-5MSL's lifetime-independence holds in this
 // direction too).
 func handleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
+	handleAgentsRevokeWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+}
+
+func handleAgentsRevokeWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
 	var session *webSession
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = webSessionStore.lookup(c.Value)
+		session = sessions.lookup(c.Value)
 	}
 	if session == nil {
 		writeMutationUnauthorized(w, "invalid_token",
@@ -4035,7 +4071,7 @@ func handleAgentsRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chainID := r.PostForm.Get("chain_id")
-	if !oauthTokenStore.revokeChainR_D0XD_1YT0(chainID, session.ownerEmail) {
+	if !tokens.revokeChainR_D0XD_1YT0(chainID, session.ownerEmail) {
 		http.Error(w, "chain not found", http.StatusNotFound)
 		return
 	}
@@ -4175,7 +4211,7 @@ func handleCounterStreamWithCounter(c *counter, w http.ResponseWriter, r *http.R
 // released within 5 seconds; idle long-lived connections do not tie
 // up a finite concurrent-request resource.
 func handleAgentsStreamWithBroadcaster(bcast *agentsBroadcaster, w http.ResponseWriter, r *http.Request) {
-	handleAgentsStreamWithStores(webSessionStore, oauthTokenStore, nil, bcast, w, r)
+	handleAgentsStreamWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, nil, bcast, w, r)
 }
 
 func handleAgentsStreamWithStores(
@@ -4858,11 +4894,17 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 // (unknown / expired / revoked) and adding the malformed-header and
 // resource-mismatch causes here.
 func checkMutationAuth(r *http.Request) (bool, int, string, string) {
+	return checkMutationAuthWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, r)
+}
+
+func checkMutationAuthWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, r *http.Request,
+) (bool, int, string, string) {
 	cookiePresented := false
 	cookieRejectedByOrigin := false
 	if c, err := r.Cookie(webSessionCookieName); err == nil {
 		cookiePresented = true
-		if sess := webSessionStore.lookup(c.Value); sess != nil {
+		if sess := sessions.lookup(c.Value); sess != nil {
 			if sameOriginBrowserMutationR_R4RG_O4Y9(r) {
 				setAuthedUserR_D56D_EBP3(r, sess.ownerEmail)
 				return true, 0, "", ""
@@ -4888,7 +4930,7 @@ func checkMutationAuth(r *http.Request) (bool, int, string, string) {
 		return false, http.StatusUnauthorized, "invalid_token",
 			"bearer authorization header malformed"
 	}
-	rec, reason := oauthTokenStore.lookupAccessReason(plaintext)
+	rec, reason := tokens.lookupAccessReason(plaintext)
 	if rec != nil {
 		if rec.resource != canonicalResourceIdentifier() {
 			return false, http.StatusUnauthorized, "invalid_token",
@@ -5100,7 +5142,13 @@ func writeSameOriginForbiddenR_R4RG_O4Y9(w http.ResponseWriter) {
 // invalid-auth request is rejected with HTTP 401 before the counter
 // is touched, so the stored value does not change.
 func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
-	if ok, status, errCode, errDesc := checkMutationAuth(r); !ok {
+	handleCounterIncrementWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+}
+
+func handleCounterIncrementWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
+	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}
@@ -5119,7 +5167,13 @@ func handleCounterIncrement(w http.ResponseWriter, r *http.Request) {
 // request is rejected with HTTP 401 before the counter is touched, so
 // the stored value does not change.
 func handleCounterDecrement(w http.ResponseWriter, r *http.Request) {
-	if ok, status, errCode, errDesc := checkMutationAuth(r); !ok {
+	handleCounterDecrementWithStores(webSessionStoreFromContext(r.Context()), oauthTokenStore, w, r)
+}
+
+func handleCounterDecrementWithStores(
+	sessions *webSessionStorage, tokens *oauthTokenStorage, w http.ResponseWriter, r *http.Request,
+) {
+	if ok, status, errCode, errDesc := checkMutationAuthWithStores(sessions, tokens, r); !ok {
 		writeMutationAuthFailure(w, status, errCode, errDesc)
 		return
 	}

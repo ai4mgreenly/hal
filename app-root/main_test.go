@@ -43,6 +43,7 @@ import (
 )
 
 var oauthClientStore = newOAuthClientStorage()
+var webSessionStore = newWebSessionStorage()
 
 // R-74NI-T9CI: no subcommand prints a usage summary listing the three
 // subcommands and exits non-zero. Same for an unknown subcommand. The
@@ -498,7 +499,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 	revokeRec := httptest.NewRecorder()
-	handleAgentsRevoke(revokeRec, revokeReq)
+	handleAgentsRevokeWithStores(webSessionStore, oauthTokenStore, revokeRec, revokeReq)
 	if revokeRec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized agents revoke status = %d, want 413", revokeRec.Code)
 	}
@@ -1194,7 +1195,7 @@ func TestR_UK7D_Z0IZ_mcp_streamable_http_transport(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1284,7 +1285,7 @@ func TestR_XS1U_B7YY_mcp_counter_read_tool(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1394,7 +1395,7 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1521,7 +1522,7 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1644,7 +1645,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1793,7 +1794,7 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -1930,7 +1931,7 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -2104,7 +2105,7 @@ func TestR_FUB4_KWWB_mcp_advertises_exactly_three_tools(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -2230,7 +2231,7 @@ func TestR_Z3LX_89W1_mcp_tool_descriptions_are_model_audience(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -2353,7 +2354,7 @@ func TestR_0CQ7_DSBQ_mcp_counter_read_is_unauthenticated(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5314,7 +5315,7 @@ func TestR_75VF_7137_serve_three_flags_and_listener(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		defer func() { onListenerReady = nil }()
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		defer cancel()
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
@@ -5365,7 +5366,7 @@ func TestR_2I2S_XB7K_get_counter_returns_json(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5430,7 +5431,7 @@ func TestR_3R73_2TN9_get_counter_requires_no_auth(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5494,7 +5495,7 @@ func TestR_SE5T_HP2J_read_does_not_require_auth(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5567,7 +5568,7 @@ func TestR_SE5T_HP2J_read_does_not_require_auth(t *testing.T) {
 // on shared CI hosts.
 func TestR_FA71_BAO6_serve_default_port_is_3000(t *testing.T) {
 	got := make(chan int, 1)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	onPortParsed = func(p int) {
 		got <- p
@@ -5728,7 +5729,7 @@ func TestR_340Z_T6K2_post_counter_increment(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5814,7 +5815,7 @@ func TestR_H3FE_QFC0_post_counter_decrement(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -5971,9 +5972,9 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 		rr := httptest.NewRecorder()
 		switch path {
 		case "/counter/increment":
-			handleCounterIncrement(rr, req)
+			handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rr, req)
 		case "/counter/decrement":
-			handleCounterDecrement(rr, req)
+			handleCounterDecrementWithStores(webSessionStore, oauthTokenStore, rr, req)
 		default:
 			t.Fatalf("unknown mutation path %q", path)
 		}
@@ -6065,7 +6066,7 @@ func TestR_53Z2_DNB1_mutation_requires_auth(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6170,7 +6171,7 @@ func TestR_4ED6_CGQG_increment_accepts_bearer_access_token(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6262,7 +6263,7 @@ func TestR_285U_FWW3_access_token_authorizes_all_counter_mutation_surfaces(t *te
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6438,7 +6439,7 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6600,7 +6601,7 @@ func TestR_OCH3_8FQ8_mutation_accepts_either_auth_mode(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6776,7 +6777,7 @@ func TestR_EV2D_QTR1_mutation_unauthorized_distinct_error_descriptions(t *testin
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -6995,7 +6996,7 @@ func TestR_T2JT_53WF_increment_requires_auth(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -7074,7 +7075,7 @@ func TestR_QY5R_PYDH_root_renders_count_as_html(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -7329,7 +7330,7 @@ func TestR_ID5L_BSJM_security_response_headers(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		t.Cleanup(func() { onListenerReady = prev })
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
@@ -7375,7 +7376,7 @@ func TestR_ID5L_BSJM_security_response_headers(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		t.Cleanup(func() { onListenerReady = prev })
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
@@ -7579,7 +7580,7 @@ func TestR_K3PV_GHB3_index_renders_footer(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -7683,7 +7684,7 @@ func TestR_WHPN_RXSK_base_url_uniform_across_clients(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -7781,7 +7782,7 @@ func TestR_MHYT_TIF7_cross_origin_posture(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -7904,7 +7905,7 @@ func TestR_9PNQ_BN2G_login_redirects_to_google(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		t.Cleanup(func() { onListenerReady = prev })
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
@@ -7989,7 +7990,7 @@ func TestR_3BKZ_L7R4_login_demands_fresh_google_authentication(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		t.Cleanup(func() { onListenerReady = prev })
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
@@ -8040,7 +8041,7 @@ func TestR_FZ10_BE37_logout_redirects_to_root(t *testing.T) {
 	t.Run("handler_direct_post_no_session", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/logout", nil)
 		rec := httptest.NewRecorder()
-		handleLogout(rec, req)
+		handleLogoutWithSessionStore(webSessionStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -8058,7 +8059,7 @@ func TestR_FZ10_BE37_logout_redirects_to_root(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		t.Cleanup(func() { onListenerReady = prev })
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		t.Cleanup(cancel)
 		var stderr bytes.Buffer
 		exit := make(chan int, 1)
@@ -8122,7 +8123,7 @@ func TestR_7MLK_O6I5_state_changing_browser_actions_reject_get(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	t.Cleanup(func() { onListenerReady = prev })
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
 	go func() {
@@ -8209,7 +8210,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		}
 		before := theCounter.read()
 		rec, req := postWithCookie("/counter/increment", sessionPlaintext)
-		handleCounterIncrement(rec, req)
+		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("cross-origin cookie increment status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8223,7 +8224,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Origin", baseOrigin)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 		rec = httptest.NewRecorder()
-		handleCounterIncrement(rec, req)
+		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("same-origin cookie increment status = %d, want 200 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8239,7 +8240,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Referer", crossOrigin+"/form")
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 		rec := httptest.NewRecorder()
-		handleLogout(rec, req)
+		handleLogoutWithSessionStore(webSessionStore, rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("cross-origin logout status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8270,7 +8271,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Origin", crossOrigin)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 		rec := httptest.NewRecorder()
-		handleAgentsRevoke(rec, req)
+		handleAgentsRevokeWithStores(webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("cross-origin agents revoke status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8294,7 +8295,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		req.Header.Set("Origin", crossOrigin)
 		req.Header.Set("Authorization", "Bearer "+bearer)
 		rec := httptest.NewRecorder()
-		handleCounterIncrement(rec, req)
+		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("cross-origin bearer increment status = %d, want 200 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
@@ -8312,7 +8313,7 @@ func TestR_8IPO_FZ7T_documented_endpoints_reject_wrong_methods(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	t.Cleanup(func() { onListenerReady = prev })
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
 	dbPath := filepath.Join(t.TempDir(), "hal.db")
@@ -8400,7 +8401,7 @@ func TestR_X0O1_BJ2H_unknown_paths_return_404_without_action(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	t.Cleanup(func() { onListenerReady = prev })
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
 	dbPath := filepath.Join(t.TempDir(), "hal.db")
@@ -8505,7 +8506,7 @@ func TestR_0XJ4_5MSL_R_FZ10_BE37_logout_revokes_only_web_session(t *testing.T) {
 		req := httptest.NewRequest("POST", "/logout", nil)
 		req.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: plaintext})
 		rec := httptest.NewRecorder()
-		handleLogout(rec, req)
+		handleLogoutWithSessionStore(webSessionStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 
@@ -8691,7 +8692,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -8854,7 +8855,7 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 	cbReq := httptest.NewRequest("GET", target, nil)
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
-	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -8899,7 +8900,7 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 	cbReq := httptest.NewRequest("GET", target, nil)
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
-	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -8956,7 +8957,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			nil)
 		req.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -9138,7 +9139,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 			mutate(cbReq)
 		}
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		return cbRec.Result()
 	}
 
@@ -9283,7 +9284,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq := httptest.NewRequest(http.MethodGet, target, nil)
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 		if cbRes.StatusCode != http.StatusSeeOther {
@@ -9357,7 +9358,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq := httptest.NewRequest(http.MethodGet, target, nil)
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 
@@ -9679,7 +9680,7 @@ func TestR_2XEK_GCOI_oauth_authorization_server_metadata(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -9805,7 +9806,7 @@ func TestR_3JCR_C810_dynamic_client_registration(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -10588,7 +10589,7 @@ func TestR_1KML_5J0Q_oauth_endpoints_share_origin(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -10698,7 +10699,7 @@ func TestR_25DN_9PUR_dcr_endpoint_has_no_auth_gate(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -10792,7 +10793,7 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -11114,7 +11115,7 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -11539,7 +11540,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake-code", nil)
 	callbackReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	callbackRec := httptest.NewRecorder()
-	handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, callbackRec, callbackReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, webSessionStore, callbackRec, callbackReq)
 	callbackRes := callbackRec.Result()
 	defer callbackRes.Body.Close()
 	if callbackRes.StatusCode != http.StatusSeeOther {
@@ -11644,7 +11645,7 @@ func TestR_VVRG_W2G2_base_url_is_sufficient_for_mcp_client_onboarding(t *testing
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -13767,7 +13768,7 @@ func TestR_FZC6_H2SB_counter_stream_live_updates(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -13798,7 +13799,7 @@ func TestR_FZC6_H2SB_counter_stream_live_updates(t *testing.T) {
 	streamURL := "http://" + addr.String() + "/counter/stream"
 	// Bare http.Get with no credentials — the channel must be open to
 	// signed-out visitors per the requirement.
-	reqCtx, reqCancel := context.WithCancel(context.Background())
+	reqCtx, reqCancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer reqCancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
 		streamURL, nil)
@@ -13905,7 +13906,7 @@ func TestR_T4FH_IAQQ_service_responsive_with_many_streams(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -14530,8 +14531,12 @@ func TestR_D56D_EBP3_access_log_authed_user_field(t *testing.T) {
 	mux.HandleFunc("GET /hello", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "hi")
 	})
-	mux.HandleFunc("POST /counter/increment", handleCounterIncrement)
-	mux.HandleFunc("POST /counter/decrement", handleCounterDecrement)
+	mux.HandleFunc("POST /counter/increment", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, w, r)
+	})
+	mux.HandleFunc("POST /counter/decrement", func(w http.ResponseWriter, r *http.Request) {
+		handleCounterDecrementWithStores(webSessionStore, oauthTokenStore, w, r)
+	})
 
 	var buf bytes.Buffer
 	h := accessLog(&buf, mux)
@@ -14667,7 +14672,7 @@ func TestR_DB9V_B6EK_long_stream_logs_on_close(t *testing.T) {
 	srv := httptest.NewServer(accessLog(out, mux))
 	defer srv.Close()
 
-	reqCtx, reqCancel := context.WithCancel(context.Background())
+	reqCtx, reqCancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer reqCancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
 		srv.URL+"/counter/stream", nil)
@@ -14766,7 +14771,7 @@ func TestR_D1IO_90H0_stdout_is_access_log_only(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	stdout := &r_DB9V_B6EK_syncBuf{}
 	var stderr bytes.Buffer
@@ -15022,7 +15027,7 @@ func TestR_NQ3G_K0CQ_startup_banner_lists_env_vars(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -16284,7 +16289,7 @@ func TestR_FFOQ_Y4JG_auth_check_runs_before_zero_floor(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -16403,7 +16408,7 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 			Value: sessionPlaintext,
 		})
 		rec := httptest.NewRecorder()
-		handleLogout(rec, req)
+		handleLogoutWithSessionStore(webSessionStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -17458,7 +17463,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 			req.AddCookie(c)
 		}
 		w := httptest.NewRecorder()
-		handleAgentsRevoke(w, req)
+		handleAgentsRevokeWithStores(webSessionStore, oauthTokenStore, w, req)
 		return w
 	}
 
@@ -17499,7 +17504,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
-		handleAgentsRevoke(w, req)
+		handleAgentsRevokeWithStores(webSessionStore, oauthTokenStore, w, req)
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("expected 401 for bearer-only revoke; got %d", w.Code)
 		}
@@ -17624,7 +17629,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /agents/stream", func(w http.ResponseWriter, r *http.Request) {
-		handleAgentsStreamWithBroadcaster(agentsBcast, w, r)
+		handleAgentsStreamWithStores(webSessionStore, oauthTokenStore, oauthClientStore, agentsBcast, w, r)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -17639,7 +17644,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 	openStream := func(t *testing.T, cookies []*http.Cookie) (
 		*http.Response, *bufio.Reader, context.CancelFunc) {
 		t.Helper()
-		reqCtx, cancel := context.WithCancel(context.Background())
+		reqCtx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
 			srv.URL+"/agents/stream", nil)
 		if err != nil {
@@ -17959,7 +17964,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		onListenerReady = func(a net.Addr) { ready <- a }
 		defer func() { onListenerReady = nil }()
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 		defer cancel()
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
@@ -18089,7 +18094,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		clientConn, serverConn := net.Pipe()
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /agents/stream", func(w http.ResponseWriter, r *http.Request) {
-			handleAgentsStreamWithBroadcaster(agentsBcast, w, r)
+			handleAgentsStreamWithStores(webSessionStore, oauthTokenStore, oauthClientStore, agentsBcast, w, r)
 		})
 		srv := &http.Server{Handler: mux}
 		lis := &r8we2OneShotListener{c: serverConn, done: make(chan struct{})}
@@ -18308,7 +18313,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -18608,7 +18613,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			Value: bindingID,
 		})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -18804,7 +18809,7 @@ func TestR_KDRI_X863_mcp_oauth_full_round_trip(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19154,7 +19159,7 @@ func TestR_7A9U_HJFF_mcp_path_is_mcp(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19385,7 +19390,7 @@ func TestR_7BHQ_VB64_www_authenticate_points_at_mcp_metadata(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19525,7 +19530,7 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19704,7 +19709,7 @@ func TestR_75E8_YGGN_canonical_resource_identifier_published_in_metadata(t *test
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19785,7 +19790,7 @@ func TestR_76M5_C87C_byte_equal_resource_match_at_presentation_time(t *testing.T
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -19882,7 +19887,7 @@ func TestR_77U1_PZY1_mcp_oauth_e2e_round_trip(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -20270,7 +20275,7 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 	onListenerReady = func(a net.Addr) { ready <- a }
 	defer func() { onListenerReady = nil }()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(contextWithWebSessionStore(context.Background(), webSessionStore))
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
@@ -20517,7 +20522,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 	revokeRec := httptest.NewRecorder()
-	handleAgentsRevoke(revokeRec, revokeReq)
+	handleAgentsRevokeWithStores(webSessionStore, oauthTokenStore, revokeRec, revokeReq)
 	if revokeRec.Code != http.StatusSeeOther {
 		t.Fatalf("revoke status = %d, want 303; body=%q (R-2HT5-50F4)",
 			revokeRec.Code, revokeRec.Body.String())
@@ -20527,7 +20532,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 	incReq := httptest.NewRequest(http.MethodPost, "/counter/increment", nil)
 	incReq.Header.Set("Authorization", "Bearer "+tokenDoc.AccessToken)
 	incRec := httptest.NewRecorder()
-	handleCounterIncrement(incRec, incReq)
+	handleCounterIncrementWithStores(webSessionStore, oauthTokenStore, incRec, incReq)
 	if incRec.Code != http.StatusUnauthorized {
 		t.Fatalf("increment with revoked initial access status = %d, want 401; body=%q (R-2HT5-50F4)",
 			incRec.Code, incRec.Body.String())
