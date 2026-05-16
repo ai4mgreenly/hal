@@ -53,32 +53,29 @@ suite passes, the race-detector run passes, gofmt and go vet are clean
 across the whole module, no source line in the module exceeds 120
 columns, and the static binary still builds.
 
-## Result — 2026-05-16 client-registration slice
+## Result — 2026-05-16 token-store slice
 
-Completed the next coherent OAuth/token extraction slice: OAuth dynamic-client
-registration records and their store now live in `app-root/oauth`, including
-client ID generation, registration lookup, collision-safe insert, replacement
-for test/setup callers, count/detach diagnostics, and SQLite persistence.
-`main` now uses the package surface for registration, authorization redirect
-matching, startup DB attach, and agents client-name lookup. Access/refresh-token
-storage and agents notification remain in `main` for later slices.
+Completed the remaining access/refresh-token store extraction into
+`app-root/oauth`. The new package surface owns token records, hashing,
+SQLite attach/persistence, access and refresh issuance, refresh rotation,
+reuse detection, chain revocation, live-agent-chain collection, and token
+store notifier hooks. `main` now keeps only constructor/context aliases and
+handler/rendering helpers; token, counter, OAuth, agents, and MCP paths call
+the exported store surface.
 
-Files changed: `app-root/oauth/client.go`, `app-root/main.go`,
+Files changed: `app-root/oauth/token.go`, `app-root/main.go`,
 `app-root/main_test.go`, `NEXT.md`.
 
 Verification from `app-root/`:
-- `gofmt -w main.go main_test.go oauth/client.go oauth/state.go oauth/authcode.go` — passed.
+- `gofmt -l $(find . -path './.ralph' -prune -o -type f -name '*.go' -print)` — no output.
 - Go source line-length awk check — no output.
-- `GOROOT=/usr/local/go go vet ./...` — passed.
-- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-check .` — passed.
-- `GOROOT=/usr/local/go go test -run 'TestR_(8OBG_7FST|19BA_4XX4|YRMT_B7LZ|JE3Z_IGI4|KCBH_CXY9|8OAK_OKFV|8PIH_2C6K)' .` — passed.
-- `GOROOT=/usr/local/go go test -race -run 'TestR_(8OBG_7FST|19BA_4XX4|YRMT_B7LZ|JE3Z_IGI4|KCBH_CXY9)' .` — passed.
-- `GOROOT=/usr/local/go go test -race ./oauth ./counter ./websession` — passed.
-- `GOROOT=/usr/local/go go test ./...` — blocked only by out-of-scope local
-  Ralph state: `.ralph/requirements-verified.jsonl` permission denied.
-- `GOROOT=/usr/local/go go test -race ./...` — blocked only by the same
-  out-of-scope local Ralph state.
+- `env -u GOROOT go vet ./...` — passed.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-static-check .` — passed.
+- `env -u GOROOT go test -run 'TestR_B78O_8X0F|TestR_8OAK_OKFV|TestR_8PIH_2C6K|TestR_WRDD_TR27|TestR_9HGE_87UG|TestR_A26O_QBG9|TestR_D0XD_1YT0|TestR_0NRX_3GV1|TestR_0TVF_0BKI' ./...` — passed.
+- `env -u GOROOT go test -race -run 'TestR_B78O_8X0F|TestR_WRDD_TR27|TestR_9HGE_87UG|TestR_A26O_QBG9|TestR_D0XD_1YT0|TestR_0NRX_3GV1|TestR_0TVF_0BKI' ./...` — passed.
+- `env -u GOROOT go test ./...` — blocked only by out-of-scope local Ralph
+  state: `.ralph/requirements-verified.jsonl` permission denied.
 
-Local toolchain note: plain `go test ./...` without `GOROOT=/usr/local/go`
-failed before project compilation because the active `go1.26.2` binary was
-reading a stale `go1.23.5` GOROOT from the environment.
+Blockers / risks: plain `go` commands inherit a stale `GOROOT` pointing at a
+Go 1.23.5 tree while `go` itself is 1.26.2, so verification used
+`env -u GOROOT`. No token-behavior follow-up remains from this slice.

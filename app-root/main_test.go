@@ -84,7 +84,7 @@ func runServeForTest(t testing.TB, ctx context.Context, args []string, stdout, s
 		v, ok := env[name]
 		return v, ok
 	}
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 	var opened *sql.DB
 	openDatabase := func(string) (*sql.DB, error) {
 		db, err := openCounterDB(dbPath)
@@ -103,11 +103,11 @@ func detachTestStoresFromDB(db *sql.DB) {
 	}
 	theCounter.DetachDBIf(db)
 	oauthClientStore.DetachDBIf(db)
-	oauthTokenStore.mu.Lock()
-	if oauthTokenStore.db == db {
-		oauthTokenStore.db = nil
+	oauthTokenStore.Mu.Lock()
+	if oauthTokenStore.DB == db {
+		oauthTokenStore.DB = nil
 	}
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Unlock()
 	webSessionStore.DetachDBIf(db)
 }
 
@@ -512,7 +512,7 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	originalTokens := oauthTokenStore
 	originalSessions := webSessionStore
 	oauthClientStore = newOAuthClientStorage()
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 	webSessionStore = newWebSessionStorage()
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
@@ -550,14 +550,14 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	if err != nil {
 		t.Fatalf("webSessionStore.issue: %v", err)
 	}
-	refreshPlaintext, err := oauthTokenStore.issueRefresh(email,
+	refreshPlaintext, err := oauthTokenStore.IssueRefresh(email,
 		"rvkzd-client", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueRefresh: %v", err)
 	}
-	oauthTokenStore.mu.Lock()
-	chainID := oauthTokenStore.m[oauthTokenHash(refreshPlaintext)].chainID
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	chainID := oauthTokenStore.M[oauthTokenHash(refreshPlaintext)].ChainID
+	oauthTokenStore.Mu.Unlock()
 
 	revokeReq := httptest.NewRequest(http.MethodPost, "/agents/revoke",
 		strings.NewReader("chain_id="+url.QueryEscape(chainID)+"&"+
@@ -569,10 +569,10 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	if revokeRec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized agents revoke status = %d, want 413", revokeRec.Code)
 	}
-	oauthTokenStore.mu.Lock()
-	refreshRec := oauthTokenStore.m[oauthTokenHash(refreshPlaintext)]
-	revoked := !refreshRec.revokedAt.IsZero()
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	refreshRec := oauthTokenStore.M[oauthTokenHash(refreshPlaintext)]
+	revoked := !refreshRec.RevokedAt.IsZero()
+	oauthTokenStore.Mu.Unlock()
 	if revoked {
 		t.Fatal("oversized agents revoke request revoked a token chain")
 	}
@@ -1493,7 +1493,7 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 	// R-ZQS0-HWZ8: counter_increment now requires a valid bearer access
 	// token issued by this service. Mint one bound to the canonical
 	// resource so the success path is observable.
-	bearer, err := oauthTokenStore.issueAccess(
+	bearer, err := oauthTokenStore.IssueAccess(
 		"alice@example.com", "client-yhnq", canonicalResourceIdentifier(),
 	)
 	if err != nil {
@@ -1659,7 +1659,7 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 	// A token bound to a non-canonical resource — the gate must reject
 	// it on the resource-binding mismatch, even though the bearer is
 	// otherwise a valid service-issued token.
-	mismatched, err := oauthTokenStore.issueAccess(
+	mismatched, err := oauthTokenStore.IssueAccess(
 		"alice@example.com", "client-zqs0", canonicalResourceIdentifier()+"x",
 	)
 	if err != nil {
@@ -1940,7 +1940,7 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 		for _, client := range clients {
 			name := owner + "/" + client
 			t.Run(name, func(t *testing.T) {
-				bearer, err := oauthTokenStore.issueAccess(owner, client, resource)
+				bearer, err := oauthTokenStore.IssueAccess(owner, client, resource)
 				if err != nil {
 					t.Fatalf("issueAccess(%q,%q): %v", owner, client, err)
 				}
@@ -2026,7 +2026,7 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	mcpURL := "http://" + addr.String() + "/mcp"
 	acceptHeader := "application/json, " + "text" + "/" + "event-stream"
 
-	bearer, err := oauthTokenStore.issueAccess(
+	bearer, err := oauthTokenStore.IssueAccess(
 		"alice@example.com", "client-gg9b", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-GG9B-GS8T)", err)
@@ -3206,11 +3206,11 @@ func TestR_27SO_F63X_service_mints_opaque_access_tokens(t *testing.T) {
 	const clientID = "client-abc"
 	resource := canonicalResourceIdentifier()
 
-	first, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+	first, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-27SO-F63X)", err)
 	}
-	second, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+	second, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 	if err != nil {
 		t.Fatalf("issueAccess (second): %v (R-27SO-F63X)", err)
 	}
@@ -3243,34 +3243,34 @@ func TestR_27SO_F63X_service_mints_opaque_access_tokens(t *testing.T) {
 	// recorded at mint time. This is the property an MCP client
 	// relies on: the token it received from this service is
 	// recognized by this service.
-	rec := oauthTokenStore.lookupAccess(first)
+	rec := oauthTokenStore.LookupAccess(first)
 	if rec == nil {
 		t.Fatalf("lookupAccess returned nil for a freshly issued " +
 			"token — store did not retain the record (R-27SO-F63X)")
 	}
-	if rec.kind != "access" {
+	if rec.Kind != "access" {
 		t.Errorf("record kind = %q, want \"access\" (R-27SO-F63X)",
-			rec.kind)
+			rec.Kind)
 	}
-	if rec.ownerEmail != owner {
+	if rec.OwnerEmail != owner {
 		t.Errorf("record ownerEmail = %q, want %q (R-27SO-F63X)",
-			rec.ownerEmail, owner)
+			rec.OwnerEmail, owner)
 	}
-	if rec.clientID != clientID {
+	if rec.ClientID != clientID {
 		t.Errorf("record clientID = %q, want %q (R-27SO-F63X)",
-			rec.clientID, clientID)
+			rec.ClientID, clientID)
 	}
-	if rec.resource != resource {
+	if rec.Resource != resource {
 		t.Errorf("record resource = %q, want %q (R-27SO-F63X)",
-			rec.resource, resource)
+			rec.Resource, resource)
 	}
 
 	// Plaintext is not stored verbatim — the keyed lookup goes
 	// through the hash, mirroring R-CUUP-REQT. A direct map probe
 	// with the plaintext key must miss.
-	oauthTokenStore.mu.Lock()
-	_, plaintextKeyed := oauthTokenStore.m[first]
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	_, plaintextKeyed := oauthTokenStore.M[first]
+	oauthTokenStore.Mu.Unlock()
 	if plaintextKeyed {
 		t.Fatalf("token record was keyed by plaintext — must be " +
 			"keyed by hash (R-CUUP-REQT, surfaced via R-27SO-F63X)")
@@ -3295,7 +3295,7 @@ func TestR_TNXJ_ZWQ0_access_token_expires_one_hour_after_issue(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	oauthTokenNow = func() time.Time { return start }
 
-	plaintext, err := oauthTokenStore.issueAccess(
+	plaintext, err := oauthTokenStore.IssueAccess(
 		"frank@example.com", "client-tnxj", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-TNXJ-ZWQ0)", err)
@@ -3309,7 +3309,7 @@ func TestR_TNXJ_ZWQ0_access_token_expires_one_hour_after_issue(t *testing.T) {
 
 	// Just before expiry: still live.
 	oauthTokenNow = func() time.Time { return start.Add(ttl - time.Second) }
-	if rec := oauthTokenStore.lookupAccess(plaintext); rec == nil {
+	if rec := oauthTokenStore.LookupAccess(plaintext); rec == nil {
 		t.Fatalf("lookupAccess returned nil 1s before expiry — token "+
 			"must remain live until issued_at + AccessTokenTTL "+
 			"(R-TNXJ-ZWQ0); ttl=%v", ttl)
@@ -3318,7 +3318,7 @@ func TestR_TNXJ_ZWQ0_access_token_expires_one_hour_after_issue(t *testing.T) {
 	// Exactly at expiry: rejected. The store uses strict Before, so
 	// the boundary instant is no longer un-expired.
 	oauthTokenNow = func() time.Time { return start.Add(ttl) }
-	if rec := oauthTokenStore.lookupAccess(plaintext); rec != nil {
+	if rec := oauthTokenStore.LookupAccess(plaintext); rec != nil {
 		t.Errorf("lookupAccess returned a record exactly at " +
 			"issued_at + AccessTokenTTL — boundary instant must be " +
 			"rejected (R-TNXJ-ZWQ0)")
@@ -3326,7 +3326,7 @@ func TestR_TNXJ_ZWQ0_access_token_expires_one_hour_after_issue(t *testing.T) {
 
 	// Just after expiry: rejected.
 	oauthTokenNow = func() time.Time { return start.Add(ttl + time.Second) }
-	if rec := oauthTokenStore.lookupAccess(plaintext); rec != nil {
+	if rec := oauthTokenStore.LookupAccess(plaintext); rec != nil {
 		t.Errorf("lookupAccess returned a record 1s past expiry — " +
 			"an access token must expire one hour after issue " +
 			"(R-TNXJ-ZWQ0)")
@@ -3358,7 +3358,7 @@ func TestR_E5GH_PN6G_access_token_issue_pins_lifetime_exactly(t *testing.T) {
 		return start.Add(time.Duration(calls-1) * time.Second)
 	}
 
-	plaintext, err := oauthTokenStore.issueAccess(
+	plaintext, err := oauthTokenStore.IssueAccess(
 		"erin@example.com", "client-e5gh", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-E5GH-PN6G)", err)
@@ -3370,34 +3370,34 @@ func TestR_E5GH_PN6G_access_token_issue_pins_lifetime_exactly(t *testing.T) {
 			"read (R-E5GH-PN6G)", calls)
 	}
 
-	oauthTokenStore.mu.Lock()
-	rec, ok := oauthTokenStore.m[oauthTokenHash(plaintext)]
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	rec, ok := oauthTokenStore.M[oauthTokenHash(plaintext)]
+	oauthTokenStore.Mu.Unlock()
 	if !ok {
 		t.Fatalf("issued access token not found in store (R-E5GH-PN6G)")
 	}
 
 	ttl := authCfg().AccessTokenTTL
-	if got := rec.expiresAt.Sub(rec.issuedAt); got != ttl {
-		t.Errorf("rec.expiresAt - rec.issuedAt = %v, want %v exactly — "+
+	if got := rec.ExpiresAt.Sub(rec.IssuedAt); got != ttl {
+		t.Errorf("rec.ExpiresAt - rec.IssuedAt = %v, want %v exactly — "+
 			"no slop allowed at the moment of issue (R-E5GH-PN6G)",
 			got, ttl)
 	}
-	if !rec.issuedAt.Equal(start) {
-		t.Errorf("rec.issuedAt = %v, want %v — first (and only) clock "+
-			"read should pin issued_at (R-E5GH-PN6G)", rec.issuedAt, start)
+	if !rec.IssuedAt.Equal(start) {
+		t.Errorf("rec.IssuedAt = %v, want %v — first (and only) clock "+
+			"read should pin issued_at (R-E5GH-PN6G)", rec.IssuedAt, start)
 	}
-	if !rec.expiresAt.Equal(start.Add(ttl)) {
-		t.Errorf("rec.expiresAt = %v, want %v — expires_at must equal "+
+	if !rec.ExpiresAt.Equal(start.Add(ttl)) {
+		t.Errorf("rec.ExpiresAt = %v, want %v — expires_at must equal "+
 			"issued_at + AccessTokenTTL exactly (R-E5GH-PN6G)",
-			rec.expiresAt, start.Add(ttl))
+			rec.ExpiresAt, start.Add(ttl))
 	}
 
 	// First-use guarantee: at the issued_at instant, the token must
 	// validate as un-expired. A token that validates as already-expired
 	// on first use is the failure mode R-E5GH-PN6G closes.
-	oauthTokenNow = func() time.Time { return rec.issuedAt }
-	if got := oauthTokenStore.lookupAccess(plaintext); got == nil {
+	oauthTokenNow = func() time.Time { return rec.IssuedAt }
+	if got := oauthTokenStore.LookupAccess(plaintext); got == nil {
 		t.Errorf("lookupAccess returned nil at issued_at — a freshly " +
 			"issued token must validate as un-expired on first use " +
 			"(R-E5GH-PN6G)")
@@ -3816,7 +3816,7 @@ func TestR_7GT3_PM1K_access_tokens_have_finite_lifetime(t *testing.T) {
 // the same starting state a never-touched checkout sees.
 func TestR_78B7_YKKL_reset_clears_db_file(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "hal.db")
+	dbPath := filepath.Join(dir, "hal.DB")
 
 	t.Run("removes existing file", func(t *testing.T) {
 		if err := os.WriteFile(dbPath, []byte("stale"), 0o600); err != nil {
@@ -3842,11 +3842,11 @@ func TestR_78B7_YKKL_reset_clears_db_file(t *testing.T) {
 		}
 	})
 
-	t.Run("default --db is ./hal.db", func(t *testing.T) {
+	t.Run("default --db is ./hal.DB", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		_ = run([]string{"reset", "--help"}, &stdout, &stderr)
-		if !bytes.Contains(stderr.Bytes(), []byte("./hal.db")) {
-			t.Fatalf("expected reset --help to mention default \"./hal.db\", got:\n%s",
+		if !bytes.Contains(stderr.Bytes(), []byte("./hal.DB")) {
+			t.Fatalf("expected reset --help to mention default \"./hal.DB\", got:\n%s",
 				stderr.String())
 		}
 	})
@@ -5376,7 +5376,7 @@ func TestR_UC3P_Z0IX_exactly_one_shared_counter(t *testing.T) {
 }
 
 // R-75VF-7137: `hal serve` accepts three flags with documented defaults
-// (--port=3000, --ip=127.0.0.1, --db=./hal.db) and, when invoked, binds a
+// (--port=3000, --ip=127.0.0.1, --db=./hal.DB) and, when invoked, binds a
 // TCP listener at ip:port. Two-part check: (1) `serve --help` surfaces each
 // flag name and default in the auto-generated usage; (2) runServe with
 // --port=0 actually opens a listener (visible through the onListenerReady
@@ -5390,7 +5390,7 @@ func TestR_75VF_7137_serve_three_flags_and_listener(t *testing.T) {
 		for _, want := range []string{
 			"-port", "3000",
 			"-ip", "127.0.0.1",
-			"-db", "./hal.db",
+			"-db", "./hal.DB",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("serve --help missing %q\nstderr:\n%s", want, out)
@@ -5719,7 +5719,7 @@ func TestR_K7DK_LSJ6_serve_exits_within_1s_on_signal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dbPath := filepath.Join(t.TempDir(), "hal.db")
+			dbPath := filepath.Join(t.TempDir(), "hal.DB")
 			cmd := exec.Command(out, "serve",
 				"--port", "0", "--db", dbPath)
 			// R-W3K0-QD0E binds the real Google IDP at serve startup
@@ -6035,7 +6035,7 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 	originalTokens := oauthTokenStore
 	originalSessions := webSessionStore
 	isolatedCounter := counterpkg.New()
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 	webSessionStore = newWebSessionStorage()
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
@@ -6271,7 +6271,7 @@ func TestR_4ED6_CGQG_increment_accepts_bearer_access_token(t *testing.T) {
 	}
 	base := "http://" + addr.String()
 
-	plaintext, err := oauthTokenStore.issueAccess(
+	plaintext, err := oauthTokenStore.IssueAccess(
 		"owner@example.com", "client-r4ed6", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-4ED6-CGQG)", err)
@@ -6363,7 +6363,7 @@ func TestR_285U_FWW3_access_token_authorizes_all_counter_mutation_surfaces(t *te
 	}
 	base := "http://" + addr.String()
 
-	bearer, err := oauthTokenStore.issueAccess(
+	bearer, err := oauthTokenStore.IssueAccess(
 		"owner@example.com", "client-r285u", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueAccess: %v (R-285U-FWW3)", err)
@@ -6599,7 +6599,7 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 					"test would not actually exercise the mismatch "+
 					"path (R-DH2I-28CK)", m.resource, canonical)
 			}
-			plaintext, err := oauthTokenStore.issueAccess(
+			plaintext, err := oauthTokenStore.IssueAccess(
 				"owner@example.com", "client-rdh2i", m.resource)
 			if err != nil {
 				t.Fatalf("issueAccess(%q): %v (R-DH2I-28CK)",
@@ -6629,7 +6629,7 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 	}
 
 	t.Run("accept_canonical_exact_match", func(t *testing.T) {
-		plaintext, err := oauthTokenStore.issueAccess(
+		plaintext, err := oauthTokenStore.IssueAccess(
 			"owner@example.com", "client-rdh2i", canonical)
 		if err != nil {
 			t.Fatalf("issueAccess(canonical): %v (R-DH2I-28CK)", err)
@@ -6724,7 +6724,7 @@ func TestR_OCH3_8FQ8_mutation_accepts_either_auth_mode(t *testing.T) {
 		return plaintext
 	}
 	issueValidBearer := func() string {
-		plaintext, err := oauthTokenStore.issueAccess(
+		plaintext, err := oauthTokenStore.IssueAccess(
 			"owner@example.com", "client-roch3",
 			canonicalResourceIdentifier())
 		if err != nil {
@@ -6910,7 +6910,7 @@ func TestR_EV2D_QTR1_mutation_unauthorized_distinct_error_descriptions(t *testin
 
 	issueValid := func(t *testing.T) string {
 		t.Helper()
-		plaintext, err := oauthTokenStore.issueAccess(
+		plaintext, err := oauthTokenStore.IssueAccess(
 			"owner@example.com", "client-ev2d",
 			canonicalResourceIdentifier())
 		if err != nil {
@@ -6969,10 +6969,10 @@ func TestR_EV2D_QTR1_mutation_unauthorized_distinct_error_descriptions(t *testin
 			name: "revoked_token",
 			authHeader: func(t *testing.T) (string, bool) {
 				plaintext := issueValid(t)
-				oauthTokenStore.mu.Lock()
-				rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
-				rec.revokedAt = oauthTokenNow()
-				oauthTokenStore.mu.Unlock()
+				oauthTokenStore.Mu.Lock()
+				rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
+				rec.RevokedAt = oauthTokenNow()
+				oauthTokenStore.Mu.Unlock()
 				return "Bearer " + plaintext, true
 			},
 			wantError: errInvalidToken,
@@ -6982,7 +6982,7 @@ func TestR_EV2D_QTR1_mutation_unauthorized_distinct_error_descriptions(t *testin
 			name: "wrong_resource_token",
 			authHeader: func(t *testing.T) (string, bool) {
 				other := canonicalResourceIdentifier() + "elsewhere/"
-				plaintext, err := oauthTokenStore.issueAccess(
+				plaintext, err := oauthTokenStore.IssueAccess(
 					"owner@example.com", "client-ev2d", other)
 				if err != nil {
 					t.Fatalf("issueAccess (other resource): %v "+
@@ -7547,7 +7547,7 @@ func TestR_ID5L_BSJM_security_response_headers(t *testing.T) {
 // tests build up on the singleton.
 func TestR_VNNS_W2G0_counter_persists_across_restart(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "hal.db")
+	path := filepath.Join(dir, "hal.DB")
 
 	t.Run("fresh_db_reads_zero", func(t *testing.T) {
 		db, err := openCounterDB(path)
@@ -8337,14 +8337,14 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 		if err != nil {
 			t.Fatalf("webSessionStore.issue: %v (R-R4RG-O4Y9)", err)
 		}
-		refresh, err := oauthTokenStore.issueRefresh(email, "client-r4rg",
+		refresh, err := oauthTokenStore.IssueRefresh(email, "client-r4rg",
 			canonicalResourceIdentifier())
 		if err != nil {
 			t.Fatalf("oauthTokenStore.issueRefresh: %v (R-R4RG-O4Y9)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		chainID := oauthTokenStore.m[oauthTokenHash(refresh)].chainID
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		chainID := oauthTokenStore.M[oauthTokenHash(refresh)].ChainID
+		oauthTokenStore.Mu.Unlock()
 
 		form := url.Values{"chain_id": {chainID}}.Encode()
 		req := httptest.NewRequest(http.MethodPost, baseOrigin+"/agents/revoke",
@@ -8358,9 +8358,9 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 			t.Fatalf("cross-origin agents revoke status = %d, want 403 "+
 				"(R-R4RG-O4Y9); body=%q", rec.Code, rec.Body.String())
 		}
-		oauthTokenStore.mu.Lock()
-		revokedAt := oauthTokenStore.m[oauthTokenHash(refresh)].revokedAt
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		revokedAt := oauthTokenStore.M[oauthTokenHash(refresh)].RevokedAt
+		oauthTokenStore.Mu.Unlock()
 		if !revokedAt.IsZero() {
 			t.Fatalf("cross-origin agents revoke revoked chain %q "+
 				"(R-R4RG-O4Y9)", chainID)
@@ -8368,7 +8368,7 @@ func TestR_R4RG_O4Y9_cookie_authenticated_browser_mutations_require_same_origin(
 	})
 
 	t.Run("bearer_mutation_ignores_browser_origin_headers", func(t *testing.T) {
-		bearer, err := oauthTokenStore.issueAccess(email, "client-r4rg-bearer",
+		bearer, err := oauthTokenStore.IssueAccess(email, "client-r4rg-bearer",
 			canonicalResourceIdentifier())
 		if err != nil {
 			t.Fatalf("oauthTokenStore.issueAccess: %v (R-R4RG-O4Y9)", err)
@@ -8398,7 +8398,7 @@ func TestR_8IPO_FZ7T_documented_endpoints_reject_wrong_methods(t *testing.T) {
 	ctx, cancel := context.WithCancel(contextWithTestStores(context.Background()))
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 	var stdout, stderr bytes.Buffer
 	go func() {
 		exit <- runServeForTest(t, ctx, []string{"--port", "0", "--db", dbPath},
@@ -8486,7 +8486,7 @@ func TestR_X0O1_BJ2H_unknown_paths_return_404_without_action(t *testing.T) {
 	ctx, cancel := context.WithCancel(contextWithTestStores(context.Background()))
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 	var stdout, stderr bytes.Buffer
 	go func() {
 		exit <- runServeForTest(t, ctx, []string{"--port", "0", "--db", dbPath},
@@ -9643,7 +9643,7 @@ func TestR_8CBQ_IKKA_web_sessions_survive_restart(t *testing.T) {
 	webSessionNow = func() time.Time { return start }
 	t.Cleanup(func() { webSessionNow = prev })
 
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 
 	db1, err := openCounterDB(dbPath)
 	if err != nil {
@@ -10260,7 +10260,7 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 		clientID    = "ryrmt-persisted-client"
 		redirectURI = "http://127.0.0.1/yrmt-callback"
 	)
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 	originalStore := oauthClientStore
 	originalGenerator := newOAuthClientID
 	t.Cleanup(func() {
@@ -10600,7 +10600,7 @@ func TestR_KX4N_DZ44_token_success_response_is_not_cacheable(t *testing.T) {
 		oauthTokenStore = originalTokens
 	})
 	authCodes := newOAuthAuthCodeStorage()
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 
 	const (
 		clientID    = "client-r-kx4n-dz44"
@@ -11051,7 +11051,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	oauthClientStore = newOAuthClientStorage()
 	states := newOAuthStateStorage()
 	authCodes := newOAuthAuthCodeStorage()
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 
 	const redirectURI = "http://127.0.0.1/cb-r-jttz"
 	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
@@ -11541,7 +11541,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
 	})
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 	authCodes := newOAuthAuthCodeStorage()
 	states := newOAuthStateStorage()
 
@@ -11653,20 +11653,20 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 	if err := json.NewDecoder(tokenRes.Body).Decode(&tokenDoc); err != nil {
 		t.Fatalf("token response not JSON: %v (R-WLUL-MZCD)", err)
 	}
-	if rec := oauthTokenStore.lookupAccess(tokenDoc.AccessToken); rec == nil ||
-		rec.resource != canonical {
+	if rec := oauthTokenStore.LookupAccess(tokenDoc.AccessToken); rec == nil ||
+		rec.Resource != canonical {
 		t.Fatalf("access token bound resource = %v, want canonical %q "+
 			"(R-WLUL-MZCD)", rec, canonical)
 	}
-	oauthTokenStore.mu.Lock()
-	refreshRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.RefreshToken)]
-	oauthTokenStore.mu.Unlock()
-	if refreshRec == nil || refreshRec.resource != canonical {
+	oauthTokenStore.Mu.Lock()
+	refreshRec := oauthTokenStore.M[oauthTokenHash(tokenDoc.RefreshToken)]
+	oauthTokenStore.Mu.Unlock()
+	if refreshRec == nil || refreshRec.Resource != canonical {
 		t.Fatalf("refresh token bound resource = %v, want canonical %q "+
 			"(R-WLUL-MZCD)", refreshRec, canonical)
 	}
 
-	refreshToken, err := oauthTokenStore.issueRefresh(
+	refreshToken, err := oauthTokenStore.IssueRefresh(
 		"r-wlul@example.com", clientID, canonical)
 	if err != nil {
 		t.Fatalf("issueRefresh: %v (R-WLUL-MZCD)", err)
@@ -11879,7 +11879,7 @@ func TestR_VVRG_W2G2_base_url_is_sufficient_for_mcp_client_onboarding(t *testing
 //     prerequisite for serving, not a deferred startup chore.
 func TestR_773B_KSTW_schema_current_before_first_request(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "hal.db")
+	path := filepath.Join(dir, "hal.DB")
 
 	readSingleton := func(t *testing.T, label string) uint64 {
 		t.Helper()
@@ -12874,7 +12874,7 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 	)
 	resource := canonicalResourceIdentifier()
 
-	rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+	rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 	if err != nil {
 		t.Fatalf("issueRefresh: %v (R-89K0-GH5G)", err)
 	}
@@ -12883,7 +12883,7 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 	}
 
 	t.Run("rotate_issues_new_access_and_refresh_bound_to_same_identity", func(t *testing.T) {
-		newAccess, newRefresh, err := oauthTokenStore.rotateRefresh(rt)
+		newAccess, newRefresh, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-89K0-GH5G)", err)
 		}
@@ -12900,22 +12900,22 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 				"consumed one — successor must be a freshly minted opaque value " +
 				"(R-89K0-GH5G)")
 		}
-		rec := oauthTokenStore.lookupAccess(newAccess)
+		rec := oauthTokenStore.LookupAccess(newAccess)
 		if rec == nil {
 			t.Fatalf("new access plaintext does not look up to a live record " +
 				"(R-89K0-GH5G)")
 		}
-		if rec.ownerEmail != owner || rec.clientID != clientID ||
-			rec.resource != resource {
+		if rec.OwnerEmail != owner || rec.ClientID != clientID ||
+			rec.Resource != resource {
 			t.Errorf("new access record identity mismatch: got owner=%q client=%q "+
 				"resource=%q, want owner=%q client=%q resource=%q (R-89K0-GH5G)",
-				rec.ownerEmail, rec.clientID, rec.resource,
+				rec.OwnerEmail, rec.ClientID, rec.Resource,
 				owner, clientID, resource)
 		}
 
 		// New refresh is itself rotatable — a well-behaved client chains
 		// rotations and stays logged in.
-		_, _, err = oauthTokenStore.rotateRefresh(newRefresh)
+		_, _, err = oauthTokenStore.RotateRefresh(newRefresh)
 		if err != nil {
 			t.Errorf("rotateRefresh(newRefresh): %v — the successor refresh must "+
 				"itself be spendable exactly once (R-89K0-GH5G)", err)
@@ -12925,7 +12925,7 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 	t.Run("consumed_refresh_cannot_be_rotated_again", func(t *testing.T) {
 		// `rt` was consumed by the first sub-test's rotateRefresh; a second
 		// presentation of it must fail.
-		_, _, err := oauthTokenStore.rotateRefresh(rt)
+		_, _, err := oauthTokenStore.RotateRefresh(rt)
 		if err == nil {
 			t.Errorf("rotateRefresh(consumed) succeeded — refresh tokens must " +
 				"be single-use (R-89K0-GH5G)")
@@ -12933,7 +12933,7 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 	})
 
 	t.Run("rotating_unknown_refresh_plaintext_is_rejected", func(t *testing.T) {
-		_, _, err := oauthTokenStore.rotateRefresh("not-a-real-refresh-token")
+		_, _, err := oauthTokenStore.RotateRefresh("not-a-real-refresh-token")
 		if err == nil {
 			t.Errorf("rotateRefresh(unknown) succeeded — store must reject " +
 				"unknown plaintexts (R-89K0-GH5G)")
@@ -12944,11 +12944,11 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 		// Issue an access token directly; rotateRefresh must reject it
 		// (kind mismatch) — the two stores share a map but kind is the
 		// gate.
-		at, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+		at, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueAccess: %v", err)
 		}
-		if _, _, err := oauthTokenStore.rotateRefresh(at); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(at); err == nil {
 			t.Errorf("rotateRefresh(access plaintext) succeeded — refresh " +
 				"rotation must require a refresh-kind record (R-89K0-GH5G)")
 		}
@@ -12961,13 +12961,13 @@ func TestR_89K0_GH5G_refresh_use_issues_new_pair_and_invalidates_consumed(t *tes
 // instances attached to the same database file, which is the restart shape
 // `hal serve` uses before accepting requests.
 func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	dbPath := filepath.Join(t.TempDir(), "hal.DB")
 	db, err := openCounterDB(dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v (R-FC5T-WWC2)", err)
 	}
-	store := &oauthTokenStorage{m: map[string]*oauthToken{}}
-	if err := store.attach(db); err != nil {
+	store := newOAuthTokenStorage()
+	if err := store.Attach(db); err != nil {
 		t.Fatalf("attach initial store: %v (R-FC5T-WWC2)", err)
 	}
 
@@ -12976,11 +12976,11 @@ func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *t
 		clientID = "client-r-fc5t"
 	)
 	resource := canonicalResourceIdentifier()
-	access, err := store.issueAccess(owner, clientID, resource)
+	access, err := store.IssueAccess(owner, clientID, resource)
 	if err != nil {
 		t.Fatalf("issue access: %v (R-FC5T-WWC2)", err)
 	}
-	refresh, err := store.issueRefresh(owner, clientID, resource)
+	refresh, err := store.IssueRefresh(owner, clientID, resource)
 	if err != nil {
 		t.Fatalf("issue refresh: %v (R-FC5T-WWC2)", err)
 	}
@@ -12992,16 +12992,16 @@ func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *t
 	if err != nil {
 		t.Fatalf("reopen db: %v (R-FC5T-WWC2)", err)
 	}
-	restarted := &oauthTokenStorage{m: map[string]*oauthToken{}}
-	if err := restarted.attach(db); err != nil {
+	restarted := newOAuthTokenStorage()
+	if err := restarted.Attach(db); err != nil {
 		t.Fatalf("attach restarted store: %v (R-FC5T-WWC2)", err)
 	}
-	if rec := restarted.lookupAccess(access); rec == nil ||
-		rec.ownerEmail != owner || rec.clientID != clientID || rec.resource != resource {
+	if rec := restarted.LookupAccess(access); rec == nil ||
+		rec.OwnerEmail != owner || rec.ClientID != clientID || rec.Resource != resource {
 		t.Fatalf("access token did not survive restart with bindings intact: %#v (R-FC5T-WWC2)",
 			rec)
 	}
-	rotatedAccess, rotatedRefresh, err := restarted.rotateRefreshForClient(refresh, clientID)
+	rotatedAccess, rotatedRefresh, err := restarted.RotateRefreshForClient(refresh, clientID)
 	if err != nil {
 		t.Fatalf("refresh token issued before restart was not rotatable after restart: %v "+
 			"(R-FC5T-WWC2)", err)
@@ -13014,20 +13014,20 @@ func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *t
 	if err != nil {
 		t.Fatalf("second reopen db: %v (R-FC5T-WWC2)", err)
 	}
-	restartedAgain := &oauthTokenStorage{m: map[string]*oauthToken{}}
-	if err := restartedAgain.attach(db); err != nil {
+	restartedAgain := newOAuthTokenStorage()
+	if err := restartedAgain.Attach(db); err != nil {
 		t.Fatalf("attach second restarted store: %v (R-FC5T-WWC2)", err)
 	}
-	if rec := restartedAgain.lookupAccess(rotatedAccess); rec == nil {
+	if rec := restartedAgain.LookupAccess(rotatedAccess); rec == nil {
 		t.Fatalf("rotated access token did not survive restart (R-FC5T-WWC2)")
 	}
-	if _, _, err := restartedAgain.rotateRefreshForClient(rotatedRefresh, clientID); err != nil {
+	if _, _, err := restartedAgain.RotateRefreshForClient(rotatedRefresh, clientID); err != nil {
 		t.Fatalf("successor refresh token did not survive restart: %v (R-FC5T-WWC2)", err)
 	}
-	if _, _, err := restartedAgain.rotateRefreshForClient(refresh, clientID); err == nil {
+	if _, _, err := restartedAgain.RotateRefreshForClient(refresh, clientID); err == nil {
 		t.Fatalf("consumed refresh became spendable again after restart (R-FC5T-WWC2)")
 	}
-	if rec := restartedAgain.lookupAccess(rotatedAccess); rec != nil {
+	if rec := restartedAgain.LookupAccess(rotatedAccess); rec != nil {
 		t.Fatalf("access token from a reused refresh chain survived revocation after restart: %#v "+
 			"(R-FC5T-WWC2)", rec)
 	}
@@ -13039,11 +13039,11 @@ func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *t
 	if err != nil {
 		t.Fatalf("third reopen db: %v (R-FC5T-WWC2)", err)
 	}
-	finalStore := &oauthTokenStorage{m: map[string]*oauthToken{}}
-	if err := finalStore.attach(db); err != nil {
+	finalStore := newOAuthTokenStorage()
+	if err := finalStore.Attach(db); err != nil {
 		t.Fatalf("attach final store: %v (R-FC5T-WWC2)", err)
 	}
-	if rec := finalStore.lookupAccess(rotatedAccess); rec != nil {
+	if rec := finalStore.LookupAccess(rotatedAccess); rec != nil {
 		t.Fatalf("revoked access token became valid after restart: %#v (R-FC5T-WWC2)", rec)
 	}
 	if err := db.Close(); err != nil {
@@ -13058,14 +13058,14 @@ func TestR_FC5T_WWC2_oauth_tokens_survive_restart_until_consumed_or_revoked(t *t
 func TestR_5P7B_KY5Z_refresh_grant_requires_original_client_id(t *testing.T) {
 	originalTokens := oauthTokenStore
 	t.Cleanup(func() { oauthTokenStore = originalTokens })
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 
 	const (
 		owner          = "r-5p7b@example.com"
 		originalClient = "client-r-5p7b-original"
 		otherClient    = "client-r-5p7b-other"
 	)
-	refreshToken, err := oauthTokenStore.issueRefresh(
+	refreshToken, err := oauthTokenStore.IssueRefresh(
 		owner, originalClient, canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueRefresh: %v (R-5P7B-KY5Z)", err)
@@ -13138,7 +13138,7 @@ func TestR_B78O_8X0F_refresh_token_grant_rotates_or_rejects(t *testing.T) {
 		oauthTokenStore = originalTokens
 		oauthTokenNow = originalNow
 	})
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 	oauthTokenNow = originalNow
 
 	const (
@@ -13166,13 +13166,13 @@ func TestR_B78O_8X0F_refresh_token_grant_rotates_or_rejects(t *testing.T) {
 		return rec
 	}
 	tokenCount := func() int {
-		oauthTokenStore.mu.Lock()
-		defer oauthTokenStore.mu.Unlock()
-		return len(oauthTokenStore.m)
+		oauthTokenStore.Mu.Lock()
+		defer oauthTokenStore.Mu.Unlock()
+		return len(oauthTokenStore.M)
 	}
 
 	t.Run("valid_refresh_returns_fresh_pair_and_consumes_presented_token", func(t *testing.T) {
-		refreshToken, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		refreshToken, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-B78O-8X0F)", err)
 		}
@@ -13202,31 +13202,31 @@ func TestR_B78O_8X0F_refresh_token_grant_rotates_or_rejects(t *testing.T) {
 			t.Fatalf("successor refresh equals consumed refresh (R-B78O-8X0F)")
 		}
 
-		oauthTokenStore.mu.Lock()
-		orig := oauthTokenStore.m[originalHash]
-		accessRec := oauthTokenStore.m[oauthTokenHash(access)]
-		refreshRec := oauthTokenStore.m[oauthTokenHash(successorRefresh)]
-		oauthTokenStore.mu.Unlock()
-		if orig == nil || orig.usedAt.IsZero() {
+		oauthTokenStore.Mu.Lock()
+		orig := oauthTokenStore.M[originalHash]
+		accessRec := oauthTokenStore.M[oauthTokenHash(access)]
+		refreshRec := oauthTokenStore.M[oauthTokenHash(successorRefresh)]
+		oauthTokenStore.Mu.Unlock()
+		if orig == nil || orig.UsedAt.IsZero() {
 			t.Fatalf("presented refresh was not consumed (R-B78O-8X0F)")
 		}
 		if accessRec == nil || refreshRec == nil {
 			t.Fatalf("new token records missing: access=%v refresh=%v (R-B78O-8X0F)",
 				accessRec != nil, refreshRec != nil)
 		}
-		if accessRec.ownerEmail != owner || accessRec.clientID != clientID ||
-			accessRec.resource != resource || accessRec.chainID != orig.chainID {
+		if accessRec.OwnerEmail != owner || accessRec.ClientID != clientID ||
+			accessRec.Resource != resource || accessRec.ChainID != orig.ChainID {
 			t.Fatalf("access binding mismatch: got owner=%q client=%q resource=%q "+
 				"chain=%q, want owner=%q client=%q resource=%q chain=%q (R-B78O-8X0F)",
-				accessRec.ownerEmail, accessRec.clientID, accessRec.resource,
-				accessRec.chainID, owner, clientID, resource, orig.chainID)
+				accessRec.OwnerEmail, accessRec.ClientID, accessRec.Resource,
+				accessRec.ChainID, owner, clientID, resource, orig.ChainID)
 		}
-		if refreshRec.ownerEmail != owner || refreshRec.clientID != clientID ||
-			refreshRec.resource != resource || refreshRec.chainID != orig.chainID {
+		if refreshRec.OwnerEmail != owner || refreshRec.ClientID != clientID ||
+			refreshRec.Resource != resource || refreshRec.ChainID != orig.ChainID {
 			t.Fatalf("refresh binding mismatch: got owner=%q client=%q resource=%q "+
 				"chain=%q, want owner=%q client=%q resource=%q chain=%q (R-B78O-8X0F)",
-				refreshRec.ownerEmail, refreshRec.clientID, refreshRec.resource,
-				refreshRec.chainID, owner, clientID, resource, orig.chainID)
+				refreshRec.OwnerEmail, refreshRec.ClientID, refreshRec.Resource,
+				refreshRec.ChainID, owner, clientID, resource, orig.ChainID)
 		}
 	})
 
@@ -13264,25 +13264,25 @@ func TestR_B78O_8X0F_refresh_token_grant_rotates_or_rejects(t *testing.T) {
 	})
 
 	t.Run("used_revoked_and_expired_refresh_tokens_are_rejected", func(t *testing.T) {
-		used, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		used, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issue used refresh: %v (R-B78O-8X0F)", err)
 		}
-		if _, _, err := oauthTokenStore.rotateRefreshForClient(used, clientID); err != nil {
+		if _, _, err := oauthTokenStore.RotateRefreshForClient(used, clientID); err != nil {
 			t.Fatalf("pre-consume refresh: %v (R-B78O-8X0F)", err)
 		}
 
-		revoked, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		revoked, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issue revoked refresh: %v (R-B78O-8X0F)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		oauthTokenStore.m[oauthTokenHash(revoked)].revokedAt = time.Now()
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		oauthTokenStore.M[oauthTokenHash(revoked)].RevokedAt = time.Now()
+		oauthTokenStore.Mu.Unlock()
 
 		base := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
 		oauthTokenNow = func() time.Time { return base }
-		expired, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		expired, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issue expired refresh: %v (R-B78O-8X0F)", err)
 		}
@@ -13340,27 +13340,27 @@ func TestR_8UAA_YKR9_refresh_token_expires_thirty_days_after_issue(t *testing.T)
 		oauthTokenNow = func() time.Time { return start }
 		t.Cleanup(func() { oauthTokenNow = prev })
 
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-8UAA-YKR9)", err)
 		}
 
-		oauthTokenStore.mu.Lock()
-		rec, ok := oauthTokenStore.m[oauthTokenHash(rt)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		rec, ok := oauthTokenStore.M[oauthTokenHash(rt)]
+		oauthTokenStore.Mu.Unlock()
 		if !ok {
 			t.Fatalf("issued refresh token not found in store (R-8UAA-YKR9)")
 		}
 
 		ttl := authCfg().RefreshTokenTTL
-		if got := rec.expiresAt.Sub(rec.issuedAt); got != ttl {
-			t.Errorf("rec.expiresAt - rec.issuedAt = %v, want %v — refresh "+
+		if got := rec.ExpiresAt.Sub(rec.IssuedAt); got != ttl {
+			t.Errorf("rec.ExpiresAt - rec.IssuedAt = %v, want %v — refresh "+
 				"lifetime must equal RefreshTokenTTL exactly (R-8UAA-YKR9)",
 				got, ttl)
 		}
-		if !rec.expiresAt.Equal(start.Add(ttl)) {
-			t.Errorf("rec.expiresAt = %v, want %v (R-8UAA-YKR9)",
-				rec.expiresAt, start.Add(ttl))
+		if !rec.ExpiresAt.Equal(start.Add(ttl)) {
+			t.Errorf("rec.ExpiresAt = %v, want %v (R-8UAA-YKR9)",
+				rec.ExpiresAt, start.Add(ttl))
 		}
 	})
 
@@ -13370,7 +13370,7 @@ func TestR_8UAA_YKR9_refresh_token_expires_thirty_days_after_issue(t *testing.T)
 		oauthTokenNow = func() time.Time { return start }
 		t.Cleanup(func() { oauthTokenNow = prev })
 
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-8UAA-YKR9)", err)
 		}
@@ -13380,7 +13380,7 @@ func TestR_8UAA_YKR9_refresh_token_expires_thirty_days_after_issue(t *testing.T)
 			return start.Add(authCfg().RefreshTokenTTL).Add(time.Nanosecond)
 		}
 
-		if _, _, err := oauthTokenStore.rotateRefresh(rt); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rt); err == nil {
 			t.Errorf("rotateRefresh(expired) succeeded — a refresh past " +
 				"its thirty-day ceiling must be rejected (R-8UAA-YKR9)")
 		}
@@ -13392,7 +13392,7 @@ func TestR_8UAA_YKR9_refresh_token_expires_thirty_days_after_issue(t *testing.T)
 		oauthTokenNow = func() time.Time { return start }
 		t.Cleanup(func() { oauthTokenNow = prev })
 
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-8UAA-YKR9)", err)
 		}
@@ -13404,29 +13404,29 @@ func TestR_8UAA_YKR9_refresh_token_expires_thirty_days_after_issue(t *testing.T)
 		rotateAt := start.Add(29 * 24 * time.Hour)
 		oauthTokenNow = func() time.Time { return rotateAt }
 
-		_, newRefresh, err := oauthTokenStore.rotateRefresh(rt)
+		_, newRefresh, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-8UAA-YKR9)", err)
 		}
 
-		oauthTokenStore.mu.Lock()
-		rec, ok := oauthTokenStore.m[oauthTokenHash(newRefresh)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		rec, ok := oauthTokenStore.M[oauthTokenHash(newRefresh)]
+		oauthTokenStore.Mu.Unlock()
 		if !ok {
 			t.Fatalf("successor refresh not found in store (R-8UAA-YKR9)")
 		}
 
 		ttl := authCfg().RefreshTokenTTL
-		if got := rec.expiresAt.Sub(rec.issuedAt); got != ttl {
+		if got := rec.ExpiresAt.Sub(rec.IssuedAt); got != ttl {
 			t.Errorf("successor expiresAt - issuedAt = %v, want %v — "+
 				"rotation must restamp a full thirty-day lifetime so an "+
 				"active client stays logged in indefinitely (R-8UAA-YKR9)",
 				got, ttl)
 		}
-		if !rec.expiresAt.Equal(rotateAt.Add(ttl)) {
+		if !rec.ExpiresAt.Equal(rotateAt.Add(ttl)) {
 			t.Errorf("successor expiresAt = %v, want %v — successor TTL "+
 				"is measured from the rotation instant (R-8UAA-YKR9)",
-				rec.expiresAt, rotateAt.Add(ttl))
+				rec.ExpiresAt, rotateAt.Add(ttl))
 		}
 	})
 }
@@ -13447,17 +13447,17 @@ func TestR_9HGE_87UG_refresh_reuse_revokes_entire_chain(t *testing.T) {
 	resource := canonicalResourceIdentifier()
 
 	t.Run("issueRefresh_stamps_a_non_empty_chainID", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-9HGE-87UG)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec, ok := oauthTokenStore.m[oauthTokenHash(rt)]
+		oauthTokenStore.Mu.Lock()
+		rec, ok := oauthTokenStore.M[oauthTokenHash(rt)]
 		chainID := ""
 		if ok {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if !ok {
 			t.Fatalf("issued refresh not found in store (R-9HGE-87UG)")
 		}
@@ -13468,76 +13468,76 @@ func TestR_9HGE_87UG_refresh_reuse_revokes_entire_chain(t *testing.T) {
 	})
 
 	t.Run("rotateRefresh_propagates_chainID_to_both_successors", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-9HGE-87UG)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		origRec := oauthTokenStore.m[oauthTokenHash(rt)]
+		oauthTokenStore.Mu.Lock()
+		origRec := oauthTokenStore.M[oauthTokenHash(rt)]
 		origChain := ""
 		if origRec != nil {
-			origChain = origRec.chainID
+			origChain = origRec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if origChain == "" {
 			t.Fatalf("predecessor refresh has empty chainID (R-9HGE-87UG)")
 		}
 
-		newAccess, newRefresh, err := oauthTokenStore.rotateRefresh(rt)
+		newAccess, newRefresh, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-9HGE-87UG)", err)
 		}
 
-		oauthTokenStore.mu.Lock()
-		accRec := oauthTokenStore.m[oauthTokenHash(newAccess)]
-		refRec := oauthTokenStore.m[oauthTokenHash(newRefresh)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		accRec := oauthTokenStore.M[oauthTokenHash(newAccess)]
+		refRec := oauthTokenStore.M[oauthTokenHash(newRefresh)]
+		oauthTokenStore.Mu.Unlock()
 		if accRec == nil || refRec == nil {
 			t.Fatalf("successor records not found (R-9HGE-87UG)")
 		}
-		if accRec.chainID != origChain {
+		if accRec.ChainID != origChain {
 			t.Errorf("successor access chainID = %q, want %q — rotation "+
 				"must propagate chainID to the new access (R-9HGE-87UG)",
-				accRec.chainID, origChain)
+				accRec.ChainID, origChain)
 		}
-		if refRec.chainID != origChain {
+		if refRec.ChainID != origChain {
 			t.Errorf("successor refresh chainID = %q, want %q — rotation "+
 				"must propagate chainID to the new refresh (R-9HGE-87UG)",
-				refRec.chainID, origChain)
+				refRec.ChainID, origChain)
 		}
 	})
 
 	t.Run("issueAccess_directly_carries_no_chain_affiliation", func(t *testing.T) {
-		at, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+		at, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueAccess: %v (R-9HGE-87UG)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(at)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(at)]
+		oauthTokenStore.Mu.Unlock()
 		if rec == nil {
 			t.Fatalf("issued access not found (R-9HGE-87UG)")
 		}
-		if rec.chainID != "" {
+		if rec.ChainID != "" {
 			t.Errorf("issueAccess stamped chainID=%q — only refresh-rooted "+
 				"chains have chainID; bare access tokens do not (R-9HGE-87UG)",
-				rec.chainID)
+				rec.ChainID)
 		}
 	})
 
 	t.Run("two_distinct_authentications_get_distinct_chainIDs", func(t *testing.T) {
-		rt1, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt1, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh #1: %v (R-9HGE-87UG)", err)
 		}
-		rt2, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt2, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh #2: %v (R-9HGE-87UG)", err)
 		}
-		oauthTokenStore.mu.Lock()
-		c1 := oauthTokenStore.m[oauthTokenHash(rt1)].chainID
-		c2 := oauthTokenStore.m[oauthTokenHash(rt2)].chainID
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		c1 := oauthTokenStore.M[oauthTokenHash(rt1)].ChainID
+		c2 := oauthTokenStore.M[oauthTokenHash(rt2)].ChainID
+		oauthTokenStore.Mu.Unlock()
 		if c1 == "" || c2 == "" {
 			t.Fatalf("chainIDs empty: c1=%q c2=%q (R-9HGE-87UG)", c1, c2)
 		}
@@ -13549,24 +13549,24 @@ func TestR_9HGE_87UG_refresh_reuse_revokes_entire_chain(t *testing.T) {
 	})
 
 	t.Run("replaying_a_consumed_refresh_revokes_the_live_successor_refresh", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-9HGE-87UG)", err)
 		}
-		_, newRefresh, err := oauthTokenStore.rotateRefresh(rt)
+		_, newRefresh, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-9HGE-87UG)", err)
 		}
 
 		// Replay the consumed refresh. The rotation must fail AND the
 		// live successor refresh must now be revoked.
-		if _, _, err := oauthTokenStore.rotateRefresh(rt); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rt); err == nil {
 			t.Errorf("rotateRefresh(consumed) succeeded — reuse must be " +
 				"rejected (R-9HGE-87UG)")
 		}
 
 		// Successor refresh is no longer rotatable — chain is dead.
-		if _, _, err := oauthTokenStore.rotateRefresh(newRefresh); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(newRefresh); err == nil {
 			t.Errorf("rotateRefresh(live successor) succeeded after chain " +
 				"compromise — every record in the chain must be revoked " +
 				"(R-9HGE-87UG)")
@@ -13574,34 +13574,34 @@ func TestR_9HGE_87UG_refresh_reuse_revokes_entire_chain(t *testing.T) {
 	})
 
 	t.Run("replaying_a_consumed_refresh_revokes_outstanding_access_tokens", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-9HGE-87UG)", err)
 		}
-		newAccess, _, err := oauthTokenStore.rotateRefresh(rt)
+		newAccess, _, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-9HGE-87UG)", err)
 		}
 
 		// New access is currently live.
-		if rec := oauthTokenStore.lookupAccess(newAccess); rec == nil {
+		if rec := oauthTokenStore.LookupAccess(newAccess); rec == nil {
 			t.Fatalf("newAccess does not lookup live before compromise " +
 				"(R-9HGE-87UG)")
 		}
 
 		// Trigger reuse detection by replaying the consumed refresh.
-		if _, _, err := oauthTokenStore.rotateRefresh(rt); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rt); err == nil {
 			t.Errorf("rotateRefresh(consumed) succeeded — reuse must be " +
 				"rejected (R-9HGE-87UG)")
 		}
 
 		// The outstanding access from the same chain must now be rejected.
-		if rec := oauthTokenStore.lookupAccess(newAccess); rec != nil {
+		if rec := oauthTokenStore.LookupAccess(newAccess); rec != nil {
 			t.Errorf("lookupAccess(newAccess) returned a live record after " +
 				"chain compromise — outstanding access tokens issued from " +
 				"the compromised chain must be revoked (R-9HGE-87UG)")
 		}
-		if _, reason := oauthTokenStore.lookupAccessReason(newAccess); reason != "revoked" {
+		if _, reason := oauthTokenStore.LookupAccessReason(newAccess); reason != "revoked" {
 			t.Errorf("lookupAccessReason = %q, want %q — chain revocation "+
 				"discriminates as revoked, not expired or unknown "+
 				"(R-9HGE-87UG)", reason, "revoked")
@@ -13610,32 +13610,32 @@ func TestR_9HGE_87UG_refresh_reuse_revokes_entire_chain(t *testing.T) {
 
 	t.Run("chain_revocation_does_not_touch_unrelated_chains", func(t *testing.T) {
 		// Chain A: will be compromised.
-		rtA, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rtA, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh A: %v (R-9HGE-87UG)", err)
 		}
-		_, _, err = oauthTokenStore.rotateRefresh(rtA)
+		_, _, err = oauthTokenStore.RotateRefresh(rtA)
 		if err != nil {
 			t.Fatalf("rotateRefresh A: %v (R-9HGE-87UG)", err)
 		}
 
 		// Chain B: independent fresh auth, must remain spendable.
-		rtB, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rtB, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh B: %v (R-9HGE-87UG)", err)
 		}
-		newAccessB, _, err := oauthTokenStore.rotateRefresh(rtB)
+		newAccessB, _, err := oauthTokenStore.RotateRefresh(rtB)
 		if err != nil {
 			t.Fatalf("rotateRefresh B: %v (R-9HGE-87UG)", err)
 		}
 
 		// Compromise chain A.
-		if _, _, err := oauthTokenStore.rotateRefresh(rtA); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rtA); err == nil {
 			t.Errorf("rotateRefresh(consumed A) succeeded (R-9HGE-87UG)")
 		}
 
 		// Chain B's access is untouched.
-		if rec := oauthTokenStore.lookupAccess(newAccessB); rec == nil {
+		if rec := oauthTokenStore.LookupAccess(newAccessB); rec == nil {
 			t.Errorf("chain B access revoked as collateral — revocation " +
 				"must be scoped to the compromised chain (R-9HGE-87UG)")
 		}
@@ -13661,23 +13661,23 @@ func TestR_A26O_QBG9_revocation_takes_effect_for_new_requests(t *testing.T) {
 	resource := canonicalResourceIdentifier()
 
 	t.Run("access_lookup_arriving_after_compromise_is_rejected", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-A26O-QBG9)", err)
 		}
-		newAccess, _, err := oauthTokenStore.rotateRefresh(rt)
+		newAccess, _, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-A26O-QBG9)", err)
 		}
 
 		// Pre-state: a request arriving now lives.
-		if rec := oauthTokenStore.lookupAccess(newAccess); rec == nil {
+		if rec := oauthTokenStore.LookupAccess(newAccess); rec == nil {
 			t.Fatalf("lookupAccess(newAccess) nil before compromise — " +
 				"pre-state must be live (R-A26O-QBG9)")
 		}
 
 		// Compromise event: reuse the consumed refresh.
-		if _, _, err := oauthTokenStore.rotateRefresh(rt); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rt); err == nil {
 			t.Fatalf("rotateRefresh(consumed) succeeded — reuse detection " +
 				"is the precondition for R-A26O-QBG9")
 		}
@@ -13686,7 +13686,7 @@ func TestR_A26O_QBG9_revocation_takes_effect_for_new_requests(t *testing.T) {
 		// compromise call returned — must be rejected immediately.
 		// "Immediately" here means the very next call: no sleep, no
 		// retry, no second event.
-		rec, reason := oauthTokenStore.lookupAccessReason(newAccess)
+		rec, reason := oauthTokenStore.LookupAccessReason(newAccess)
 		if rec != nil {
 			t.Errorf("lookupAccess after compromise returned a live " +
 				"record — revocation must take effect for the next " +
@@ -13701,17 +13701,17 @@ func TestR_A26O_QBG9_revocation_takes_effect_for_new_requests(t *testing.T) {
 	})
 
 	t.Run("rotate_arriving_after_compromise_is_rejected", func(t *testing.T) {
-		rt, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		rt, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v (R-A26O-QBG9)", err)
 		}
-		_, newRefresh, err := oauthTokenStore.rotateRefresh(rt)
+		_, newRefresh, err := oauthTokenStore.RotateRefresh(rt)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v (R-A26O-QBG9)", err)
 		}
 
 		// Compromise event: replay the consumed refresh.
-		if _, _, err := oauthTokenStore.rotateRefresh(rt); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(rt); err == nil {
 			t.Fatalf("rotateRefresh(consumed) succeeded — reuse detection " +
 				"is the precondition for R-A26O-QBG9")
 		}
@@ -13721,7 +13721,7 @@ func TestR_A26O_QBG9_revocation_takes_effect_for_new_requests(t *testing.T) {
 		// rejected. Until R-A26O-QBG9 the successor was a perfectly
 		// valid refresh; the chain walk has to retire it before this
 		// arriving request reaches the gate.
-		if _, _, err := oauthTokenStore.rotateRefresh(newRefresh); err == nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(newRefresh); err == nil {
 			t.Errorf("rotateRefresh(successor) succeeded after chain " +
 				"compromise — a request arriving after revocation must " +
 				"be rejected, not honored (R-A26O-QBG9)")
@@ -14647,7 +14647,7 @@ func TestR_D56D_EBP3_access_log_authed_user_field(t *testing.T) {
 	// owner email. R-4ED6-CGQG: tokens must be bound to the canonical
 	// resource identifier for checkMutationAuth to accept them.
 	const bearerEmail = "bob@example.com"
-	bearer, err := oauthTokenStore.issueAccess(
+	bearer, err := oauthTokenStore.IssueAccess(
 		bearerEmail, "client-r-d56d", canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("oauthTokenStore.issueAccess: %v", err)
@@ -15182,7 +15182,7 @@ func TestR_NRBC_XS3F_banner_redacts_secrets(t *testing.T) {
 	t.Setenv("HAL_RESOURCE_IDENTIFIER", "http://127.0.0.1:9876/")
 
 	var buf bytes.Buffer
-	startupBannerR_NQ3G_K0CQ(&buf, "./hal.db")
+	startupBannerR_NQ3G_K0CQ(&buf, "./hal.DB")
 	got := buf.String()
 
 	if !strings.Contains(got, "GOOGLE_CLIENT_SECRET=***XYZ\n") {
@@ -15214,7 +15214,7 @@ func TestR_NSJ9_BJU4_banner_ends_with_blank_line(t *testing.T) {
 	t.Setenv("HAL_RESOURCE_IDENTIFIER", "http://127.0.0.1:9876/")
 
 	var buf bytes.Buffer
-	startupBannerR_NQ3G_K0CQ(&buf, "./hal.db")
+	startupBannerR_NQ3G_K0CQ(&buf, "./hal.DB")
 	got := buf.String()
 
 	if !strings.HasSuffix(got, "\n\n") {
@@ -15918,7 +15918,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	dir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -16005,7 +16005,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	srcDir := t.TempDir()
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "design.css",
-		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go",
+		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -16127,7 +16127,7 @@ func TestR_PLTU_G0FD_banner_names_db_path(t *testing.T) {
 
 	t.Run("absolute_path_passes_through", func(t *testing.T) {
 		var buf bytes.Buffer
-		abs := filepath.Join(t.TempDir(), "hal.db")
+		abs := filepath.Join(t.TempDir(), "hal.DB")
 		startupBannerR_NQ3G_K0CQ(&buf, abs)
 		got := buf.String()
 		want := "db=" + abs + "\n"
@@ -16149,20 +16149,20 @@ func TestR_PLTU_G0FD_banner_names_db_path(t *testing.T) {
 
 	t.Run("relative_path_resolved_to_absolute", func(t *testing.T) {
 		var buf bytes.Buffer
-		startupBannerR_NQ3G_K0CQ(&buf, "./hal.db")
+		startupBannerR_NQ3G_K0CQ(&buf, "./hal.DB")
 		got := buf.String()
 		cwd, err := os.Getwd()
 		if err != nil {
 			t.Fatalf("os.Getwd: %v", err)
 		}
-		want := "db=" + filepath.Join(cwd, "hal.db") + "\n"
+		want := "db=" + filepath.Join(cwd, "hal.DB") + "\n"
 		if !strings.Contains(got, want) {
 			t.Errorf("banner missing resolved-absolute line %q — got:\n%s",
 				want, got)
 		}
-		// The raw "./hal.db" form must not survive into the banner —
+		// The raw "./hal.DB" form must not survive into the banner —
 		// only the resolved absolute form is correct.
-		if strings.Contains(got, "db=./hal.db\n") {
+		if strings.Contains(got, "db=./hal.DB\n") {
 			t.Errorf("banner leaked unresolved relative path — got:\n%s", got)
 		}
 	})
@@ -16466,12 +16466,12 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 			t.Fatalf("web session not found after issue (R-0XJ4-5MSL)")
 		}
 
-		bearer, err := oauthTokenStore.issueAccess(
+		bearer, err := oauthTokenStore.IssueAccess(
 			email, "client-0XJ4", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("oauthTokenStore.issueAccess: %v (R-0XJ4-5MSL)", err)
 		}
-		if rec := oauthTokenStore.lookupAccess(bearer); rec == nil {
+		if rec := oauthTokenStore.LookupAccess(bearer); rec == nil {
 			t.Fatalf("mcp access token not found after issue (R-0XJ4-5MSL)")
 		}
 
@@ -16495,7 +16495,7 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 				"(R-0XJ4-5MSL)")
 		}
 		// The MCP access token issued to the same email is untouched.
-		if rec := oauthTokenStore.lookupAccess(bearer); rec == nil {
+		if rec := oauthTokenStore.LookupAccess(bearer); rec == nil {
 			t.Fatalf("mcp access token revoked by web logout; "+
 				"web session and MCP chain are supposed to be "+
 				"independent (R-0XJ4-5MSL); bearer=%q", bearer)
@@ -16513,7 +16513,7 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 			t.Fatalf("web session not found after issue (R-0XJ4-5MSL)")
 		}
 
-		bearer, err := oauthTokenStore.issueAccess(
+		bearer, err := oauthTokenStore.IssueAccess(
 			email, "client-0XJ4-b", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("oauthTokenStore.issueAccess: %v (R-0XJ4-5MSL)", err)
@@ -16523,16 +16523,16 @@ func TestR_0XJ4_5MSL_web_session_and_mcp_chain_are_independent(t *testing.T) {
 		// Revoke the MCP access token directly in the store; the
 		// storage-level property R-0XJ4-5MSL pins independence from
 		// whichever entry point triggered the revoke.
-		oauthTokenStore.mu.Lock()
-		rec, ok := oauthTokenStore.m[oauthTokenHash(bearer)]
+		oauthTokenStore.Mu.Lock()
+		rec, ok := oauthTokenStore.M[oauthTokenHash(bearer)]
 		if !ok {
-			oauthTokenStore.mu.Unlock()
+			oauthTokenStore.Mu.Unlock()
 			t.Fatalf("mcp access token record missing (R-0XJ4-5MSL)")
 		}
-		rec.revokedAt = oauthTokenNow()
-		oauthTokenStore.mu.Unlock()
+		rec.RevokedAt = oauthTokenNow()
+		oauthTokenStore.Mu.Unlock()
 
-		if got := oauthTokenStore.lookupAccess(bearer); got != nil {
+		if got := oauthTokenStore.LookupAccess(bearer); got != nil {
 			t.Fatalf("mcp access token still validates after " +
 				"revoke (R-0XJ4-5MSL setup invariant)")
 		}
@@ -16982,11 +16982,11 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 	t.Run("signed_in_with_chains_one_row_per_chain", func(t *testing.T) {
 		email := "withchains-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		// Mint two live refresh chains under the same email.
-		if _, err := oauthTokenStore.issueRefresh(
+		if _, err := oauthTokenStore.IssueRefresh(
 			email, "client-A", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		if _, err := oauthTokenStore.issueRefresh(
+		if _, err := oauthTokenStore.IssueRefresh(
 			email, "client-B", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
@@ -17028,7 +17028,7 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 	t.Run("signed_in_other_email_chain_not_listed", func(t *testing.T) {
 		mine := "scope-mine-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		other := "scope-other-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		if _, err := oauthTokenStore.issueRefresh(
+		if _, err := oauthTokenStore.IssueRefresh(
 			other, "client-X", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh other: %v", err)
 		}
@@ -17049,28 +17049,28 @@ func TestR_0NRX_3GV1_agents_block_structure(t *testing.T) {
 	t.Run("signed_in_revoked_and_expired_not_listed", func(t *testing.T) {
 		email := "rev-exp-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		// Revoked refresh chain.
-		revoked, err := oauthTokenStore.issueRefresh(
+		revoked, err := oauthTokenStore.IssueRefresh(
 			email, "client-R", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh revoked: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		if rec, ok := oauthTokenStore.m[oauthTokenHash(revoked)]; ok {
-			rec.revokedAt = oauthTokenNow()
+		oauthTokenStore.Mu.Lock()
+		if rec, ok := oauthTokenStore.M[oauthTokenHash(revoked)]; ok {
+			rec.RevokedAt = oauthTokenNow()
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
 		// Expired refresh chain (expiresAt in the past).
-		expired, err := oauthTokenStore.issueRefresh(
+		expired, err := oauthTokenStore.IssueRefresh(
 			email, "client-E", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh expired: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		if rec, ok := oauthTokenStore.m[oauthTokenHash(expired)]; ok {
-			rec.expiresAt = oauthTokenNow().Add(-time.Minute)
+		oauthTokenStore.Mu.Lock()
+		if rec, ok := oauthTokenStore.M[oauthTokenHash(expired)]; ok {
+			rec.ExpiresAt = oauthTokenNow().Add(-time.Minute)
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
 		sess, err := webSessionStore.Issue(email)
 		if err != nil {
@@ -17132,19 +17132,19 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		email := "named-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "abcdef0123456789-tail"
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Test Agent One"}))
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
 		// Look up the chainID from the issued record.
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		chainID := ""
 		if rec != nil {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if chainID == "" {
 			t.Fatalf("issued refresh has empty chainID")
 		}
@@ -17192,18 +17192,18 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		// Use a clientID with NO entry in oauthClientStore — clientName
 		// resolves to the empty string and must render as `undefined`.
 		clientID := "ffffff9876543210-nameless-" + agentsBlockRandomEmailToken(t)
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		chainID := ""
 		if rec != nil {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if chainID == "" {
 			t.Fatalf("issued refresh has empty chainID")
 		}
@@ -17234,18 +17234,18 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 	clientID := "xssagent" + agentsBlockRandomEmailToken(t)
 	maliciousName := `<img src=x onerror="alert('owned')">&<script>bad()</script>`
 	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: maliciousName}))
-	refresh, err := oauthTokenStore.issueRefresh(
+	refresh, err := oauthTokenStore.IssueRefresh(
 		email, clientID, "http://127.0.0.1:3000/mcp")
 	if err != nil {
 		t.Fatalf("issueRefresh: %v", err)
 	}
-	oauthTokenStore.mu.Lock()
-	rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+	oauthTokenStore.Mu.Lock()
+	rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 	chainID := ""
 	if rec != nil {
-		chainID = rec.chainID
+		chainID = rec.ChainID
 	}
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Unlock()
 	if chainID == "" {
 		t.Fatalf("issued refresh has empty chainID")
 	}
@@ -17398,34 +17398,34 @@ func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 	// chainIDFor reads the chainID a fresh refresh was minted under.
 	chainIDFor := func(t *testing.T, refresh string) string {
 		t.Helper()
-		oauthTokenStore.mu.Lock()
-		defer oauthTokenStore.mu.Unlock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		defer oauthTokenStore.Mu.Unlock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		if rec == nil {
 			t.Fatalf("issued refresh missing from store")
 		}
-		if rec.chainID == "" {
+		if rec.ChainID == "" {
 			t.Fatalf("issued refresh has empty chainID")
 		}
-		return rec.chainID
+		return rec.ChainID
 	}
 	// setChainIssuedAt overrides issuedAt on every record sharing
 	// chainID under the store lock — oauthTokenNow() granularity is
 	// too coarse for back-to-back test issues, so explicit times keep
 	// ordering deterministic.
 	setChainIssuedAt := func(chainID string, ts time.Time) {
-		oauthTokenStore.mu.Lock()
-		defer oauthTokenStore.mu.Unlock()
-		for _, rec := range oauthTokenStore.m {
-			if rec.chainID == chainID {
-				rec.issuedAt = ts
+		oauthTokenStore.Mu.Lock()
+		defer oauthTokenStore.Mu.Unlock()
+		for _, rec := range oauthTokenStore.M {
+			if rec.ChainID == chainID {
+				rec.IssuedAt = ts
 			}
 		}
 	}
 	issueNamedChain := func(t *testing.T, email, clientID, clientName string) (string, string) {
 		t.Helper()
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh %s: %v", clientName, err)
@@ -17487,7 +17487,7 @@ func TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity(t *testing.T) {
 		bRefresh, bChain := issueNamedChain(t, email, "bbbb1111-client", "Bravo")
 		_, aChain := issueNamedChain(t, email, "aaaa1111-client", "Alpha")
 
-		if _, _, err := oauthTokenStore.rotateRefresh(bRefresh); err != nil {
+		if _, _, err := oauthTokenStore.RotateRefresh(bRefresh); err != nil {
 			t.Fatalf("rotateRefresh bravo: %v", err)
 		}
 
@@ -17508,21 +17508,21 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 	// helper rule clean.
 	chainIDFor := func(t *testing.T, refresh string) string {
 		t.Helper()
-		oauthTokenStore.mu.Lock()
-		defer oauthTokenStore.mu.Unlock()
-		rec, ok := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		defer oauthTokenStore.Mu.Unlock()
+		rec, ok := oauthTokenStore.M[oauthTokenHash(refresh)]
 		if !ok {
 			t.Fatalf("chainIDFor: refresh not in store")
 		}
-		return rec.chainID
+		return rec.ChainID
 	}
 	// chainHasLiveRecords reports whether any record sharing chainID is
 	// still un-revoked. Walks under the store lock.
 	chainHasLiveRecords := func(chainID string) bool {
-		oauthTokenStore.mu.Lock()
-		defer oauthTokenStore.mu.Unlock()
-		for _, rec := range oauthTokenStore.m {
-			if rec.chainID == chainID && rec.revokedAt.IsZero() {
+		oauthTokenStore.Mu.Lock()
+		defer oauthTokenStore.Mu.Unlock()
+		for _, rec := range oauthTokenStore.M {
+			if rec.ChainID == chainID && rec.RevokedAt.IsZero() {
 				return true
 			}
 		}
@@ -17542,7 +17542,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 
 	t.Run("unauthenticated_rejected", func(t *testing.T) {
 		email := "unauth-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, "client-x", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -17559,7 +17559,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 
 	t.Run("bearer_only_rejected", func(t *testing.T) {
 		email := "bearer-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, "client-x", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
@@ -17568,7 +17568,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 		// Mint an access token by rotating the refresh — gives us a
 		// bearer for `email` that, if the handler honored bearers,
 		// would authorize the revoke.
-		access, _, err := oauthTokenStore.rotateRefresh(refresh)
+		access, _, err := oauthTokenStore.RotateRefresh(refresh)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v", err)
 		}
@@ -17590,7 +17590,7 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 	t.Run("cross_email_rejected_without_disclosure", func(t *testing.T) {
 		mine := "mine-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		theirs := "theirs-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		theirRefresh, err := oauthTokenStore.issueRefresh(
+		theirRefresh, err := oauthTokenStore.IssueRefresh(
 			theirs, "client-x", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh theirs: %v", err)
@@ -17625,14 +17625,14 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 
 	t.Run("happy_path_revokes_chain", func(t *testing.T) {
 		email := "owner-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		refresh, err := oauthTokenStore.issueRefresh(
+		refresh, err := oauthTokenStore.IssueRefresh(
 			email, "client-x", "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
 		// Rotate once so the chain owns multiple records (live refresh,
 		// consumed refresh, access). The revoke must mark every member.
-		access, refresh2, err := oauthTokenStore.rotateRefresh(refresh)
+		access, refresh2, err := oauthTokenStore.RotateRefresh(refresh)
 		if err != nil {
 			t.Fatalf("rotateRefresh: %v", err)
 		}
@@ -17697,8 +17697,8 @@ func TestR_D0XD_1YT0_chain_revoke_action(t *testing.T) {
 //     using the same split-and-rejoin shape.
 func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 	agentsBcast := &agentsBroadcaster{}
-	prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(agentsBcast)
-	t.Cleanup(func() { oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast) })
+	prevAgentsBcast := setOAuthTokenAgentsBroadcaster(oauthTokenStore, agentsBcast)
+	t.Cleanup(func() { oauthTokenStore.SetNotifier(prevAgentsBcast) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /agents/stream", func(w http.ResponseWriter, r *http.Request) {
@@ -17797,7 +17797,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		// Seed one live chain so the snapshot is non-empty.
 		clientID := "cli-" + agentsBlockRandomEmailToken(t)
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "StreamCo"}))
-		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 			canonicalResourceIdentifier()); err != nil {
 			t.Fatalf("issueRefresh seed: %v", err)
 		}
@@ -17831,7 +17831,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		clientID2 := "cli-" + agentsBlockRandomEmailToken(t)
 		oauthClientStore.Put(clientID2, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "StreamCo2"}))
 		start := time.Now()
-		if _, err := oauthTokenStore.issueRefresh(email, clientID2,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID2,
 			canonicalResourceIdentifier()); err != nil {
 			t.Fatalf("issueRefresh second: %v", err)
 		}
@@ -17847,7 +17847,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 
 		// Revoke one of the chains; the live set shrinks back to one
 		// within the 1000ms budget.
-		if !oauthTokenStore.revokeChainR_D0XD_1YT0(afterIssue[0].ChainID,
+		if !oauthTokenStore.RevokeChain(afterIssue[0].ChainID,
 			email) {
 			t.Fatalf("revokeChainR_D0XD_1YT0 returned false")
 		}
@@ -17874,11 +17874,11 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		clientID := "cli-" + agentsBlockRandomEmailToken(t)
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "ScopeCo"}))
 		// Issue a chain to MINE before opening, plus a chain to OTHER.
-		if _, err := oauthTokenStore.issueRefresh(mine, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(mine, clientID,
 			canonicalResourceIdentifier()); err != nil {
 			t.Fatalf("issueRefresh mine: %v", err)
 		}
-		if _, err := oauthTokenStore.issueRefresh(other, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(other, clientID,
 			canonicalResourceIdentifier()); err != nil {
 			t.Fatalf("issueRefresh other: %v", err)
 		}
@@ -17900,7 +17900,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		}
 		// Every entry must be owned by `mine` — we cross-check by asking
 		// the canonical helper.
-		liveMine := oauthTokenStore.liveAgentChainsR_0NRX_3GV1(mine, oauthClientStore)
+		liveMine := oauthTokenStore.LiveAgentChains(mine, oauthClientStore)
 		if mineCount != len(liveMine) {
 			t.Fatalf("snapshot has %d entries, mine actually has %d — "+
 				"per-email scoping violated (R-0TVF-0BKI)",
@@ -17915,7 +17915,7 @@ func TestR_0TVF_0BKI_agents_stream_live_updates(t *testing.T) {
 		// chain. Give it generous time to catch a leak.
 		otherClient := "cli-" + agentsBlockRandomEmailToken(t)
 		oauthClientStore.Put(otherClient, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Leak"}))
-		leakChain, err := oauthTokenStore.issueRefresh(other, otherClient,
+		leakChain, err := oauthTokenStore.IssueRefresh(other, otherClient,
 			canonicalResourceIdentifier())
 		if err != nil {
 			t.Fatalf("issueRefresh other-leak: %v", err)
@@ -18160,8 +18160,8 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		}
 
 		agentsBcast := &agentsBroadcaster{}
-		prevAgentsBcast := oauthTokenStore.setAgentsBroadcaster(agentsBcast)
-		t.Cleanup(func() { oauthTokenStore.setAgentsBroadcaster(prevAgentsBcast) })
+		prevAgentsBcast := setOAuthTokenAgentsBroadcaster(oauthTokenStore, agentsBcast)
+		t.Cleanup(func() { oauthTokenStore.SetNotifier(prevAgentsBcast) })
 		baseline := agentsBcast.subscriberCount()
 
 		clientConn, serverConn := net.Pipe()
@@ -19637,28 +19637,28 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 		return resp, buf
 	}
 
-	wrongResource, err := oauthTokenStore.issueAccess(
+	wrongResource, err := oauthTokenStore.IssueAccess(
 		"r51pz@example.test", "client-r51pz-wrong-resource",
 		canonicalResourceIdentifier()+"x")
 	if err != nil {
 		t.Fatalf("issue wrong-resource token: %v (R-51PZ-MEQR)", err)
 	}
-	expired, err := oauthTokenStore.issueAccess(
+	expired, err := oauthTokenStore.IssueAccess(
 		"r51pz@example.test", "client-r51pz-expired",
 		canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issue expired token: %v (R-51PZ-MEQR)", err)
 	}
-	revoked, err := oauthTokenStore.issueAccess(
+	revoked, err := oauthTokenStore.IssueAccess(
 		"r51pz@example.test", "client-r51pz-revoked",
 		canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issue revoked token: %v (R-51PZ-MEQR)", err)
 	}
-	oauthTokenStore.mu.Lock()
-	oauthTokenStore.m[oauthTokenHash(expired)].expiresAt = oauthTokenNow().Add(-time.Minute)
-	oauthTokenStore.m[oauthTokenHash(revoked)].revokedAt = oauthTokenNow()
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	oauthTokenStore.M[oauthTokenHash(expired)].ExpiresAt = oauthTokenNow().Add(-time.Minute)
+	oauthTokenStore.M[oauthTokenHash(revoked)].RevokedAt = oauthTokenNow()
+	oauthTokenStore.Mu.Unlock()
 
 	cases := []struct {
 		name       string
@@ -19813,20 +19813,20 @@ func TestR_75E8_YGGN_canonical_resource_identifier_published_in_metadata(t *test
 	}
 
 	t.Run("token_binding_byte_equals_metadata_resource", func(t *testing.T) {
-		plaintext, err := oauthTokenStore.issueAccess(
+		plaintext, err := oauthTokenStore.IssueAccess(
 			"r75e8-ygng@example.test", "r75e8-ygng-client", canonical)
 		if err != nil {
 			t.Fatalf("issueAccess: %v (R-75E8-YGGN)", err)
 		}
-		rec := oauthTokenStore.lookupAccess(plaintext)
+		rec := oauthTokenStore.LookupAccess(plaintext)
 		if rec == nil {
 			t.Fatalf("lookupAccess returned nil for freshly issued token "+
 				"(R-75E8-YGGN); plaintext=%q", plaintext)
 		}
-		if rec.resource != advertised {
+		if rec.Resource != advertised {
 			t.Fatalf("token bound `resource` = %q, want byte-equal to "+
 				"metadata `resource` = %q (R-75E8-YGGN)",
-				rec.resource, advertised)
+				rec.Resource, advertised)
 		}
 	})
 }
@@ -19880,7 +19880,7 @@ func TestR_76M5_C87C_byte_equal_resource_match_at_presentation_time(t *testing.T
 					"not exercise the byte-inequality path (R-76M5-C87C)",
 					m.resource, canonical)
 			}
-			plaintext, err := oauthTokenStore.issueAccess(
+			plaintext, err := oauthTokenStore.IssueAccess(
 				"r76m5-c87c@example.test", "r76m5-c87c-client", m.resource)
 			if err != nil {
 				t.Fatalf("issueAccess(%q): %v (R-76M5-C87C)",
@@ -19905,7 +19905,7 @@ func TestR_76M5_C87C_byte_equal_resource_match_at_presentation_time(t *testing.T
 	}
 
 	t.Run("accept_byte_equal_canonical", func(t *testing.T) {
-		plaintext, err := oauthTokenStore.issueAccess(
+		plaintext, err := oauthTokenStore.IssueAccess(
 			"r76m5-c87c@example.test", "r76m5-c87c-client", canonical)
 		if err != nil {
 			t.Fatalf("issueAccess(canonical): %v (R-76M5-C87C)", err)
@@ -20360,22 +20360,22 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 
 	owner := "r-7e4w-k6hl-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 	clientID := "client-r7e4wk6hl-" + agentsBlockRandomEmailToken(t)
-	initialRefresh, err := oauthTokenStore.issueRefresh(owner, clientID, canonicalResourceIdentifier())
+	initialRefresh, err := oauthTokenStore.IssueRefresh(owner, clientID, canonicalResourceIdentifier())
 	if err != nil {
 		t.Fatalf("issueRefresh: %v (R-7E4W-K6HL)", err)
 	}
-	accessToken, _, err := oauthTokenStore.rotateRefreshForClient(initialRefresh, clientID)
+	accessToken, _, err := oauthTokenStore.RotateRefreshForClient(initialRefresh, clientID)
 	if err != nil {
 		t.Fatalf("rotateRefreshForClient: %v (R-7E4W-K6HL)", err)
 	}
-	oauthTokenStore.mu.Lock()
-	accessRec := oauthTokenStore.m[oauthTokenHash(accessToken)]
-	oauthTokenStore.mu.Unlock()
-	if accessRec == nil || accessRec.chainID == "" {
+	oauthTokenStore.Mu.Lock()
+	accessRec := oauthTokenStore.M[oauthTokenHash(accessToken)]
+	oauthTokenStore.Mu.Unlock()
+	if accessRec == nil || accessRec.ChainID == "" {
 		t.Fatalf("issued access token missing chainID; rec=%+v (R-7E4W-K6HL)",
 			accessRec)
 	}
-	chainID := accessRec.chainID
+	chainID := accessRec.ChainID
 	sessionPlaintext, err := webSessionStore.Issue(owner)
 	if err != nil {
 		t.Fatalf("issue web session: %v (R-7E4W-K6HL)", err)
@@ -20506,7 +20506,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 		webSessionStore = originalSessions
 	})
 	authCodes := newOAuthAuthCodeStorage()
-	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
+	oauthTokenStore = newOAuthTokenStorage()
 	webSessionStore = newWebSessionStorage()
 
 	const (
@@ -20553,17 +20553,17 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 			tokenDoc)
 	}
 
-	oauthTokenStore.mu.Lock()
-	accessRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.AccessToken)]
-	refreshRec := oauthTokenStore.m[oauthTokenHash(tokenDoc.RefreshToken)]
-	oauthTokenStore.mu.Unlock()
+	oauthTokenStore.Mu.Lock()
+	accessRec := oauthTokenStore.M[oauthTokenHash(tokenDoc.AccessToken)]
+	refreshRec := oauthTokenStore.M[oauthTokenHash(tokenDoc.RefreshToken)]
+	oauthTokenStore.Mu.Unlock()
 	if accessRec == nil || refreshRec == nil {
 		t.Fatalf("token records missing: access=%+v refresh=%+v (R-2HT5-50F4)",
 			accessRec, refreshRec)
 	}
-	if accessRec.chainID == "" || accessRec.chainID != refreshRec.chainID {
+	if accessRec.ChainID == "" || accessRec.ChainID != refreshRec.ChainID {
 		t.Fatalf("initial access chainID=%q refresh chainID=%q, want same non-empty chain (R-2HT5-50F4)",
-			accessRec.chainID, refreshRec.chainID)
+			accessRec.ChainID, refreshRec.ChainID)
 	}
 
 	sessionPlaintext, err := webSessionStore.Issue(owner)
@@ -20571,7 +20571,7 @@ func TestR_2HT5_50F4_initial_token_exchange_access_belongs_to_refresh_chain(t *t
 		t.Fatalf("issue web session: %v (R-2HT5-50F4)", err)
 	}
 	revokeReq := httptest.NewRequest(http.MethodPost, "/agents/revoke",
-		strings.NewReader(url.Values{"chain_id": {accessRec.chainID}}.Encode()))
+		strings.NewReader(url.Values{"chain_id": {accessRec.ChainID}}.Encode()))
 	revokeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	revokeReq.AddCookie(&http.Cookie{Name: webSessionCookieName, Value: sessionPlaintext})
 	revokeRec := httptest.NewRecorder()
@@ -20614,36 +20614,36 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("access_record_captures_required_fields", func(t *testing.T) {
 		// R-WRDD-TR27: access record must carry kind, owner, issuedAt, expiresAt,
 		// revokedAt (zero until revoked). usedAt is always zero on access records.
-		plaintext, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueAccess: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Unlock()
 		if rec == nil {
 			t.Fatalf("record missing after issueAccess (R-WRDD-TR27)")
 		}
-		if rec.kind != "access" {
-			t.Errorf("kind = %q, want \"access\" (R-WRDD-TR27)", rec.kind)
+		if rec.Kind != "access" {
+			t.Errorf("kind = %q, want \"access\" (R-WRDD-TR27)", rec.Kind)
 		}
-		if rec.ownerEmail != owner {
-			t.Errorf("ownerEmail = %q, want %q (R-WRDD-TR27)", rec.ownerEmail, owner)
+		if rec.OwnerEmail != owner {
+			t.Errorf("ownerEmail = %q, want %q (R-WRDD-TR27)", rec.OwnerEmail, owner)
 		}
-		if rec.issuedAt.IsZero() {
+		if rec.IssuedAt.IsZero() {
 			t.Errorf("issuedAt is zero — issued-at not recorded (R-WRDD-TR27)")
 		}
-		if rec.expiresAt.IsZero() {
+		if rec.ExpiresAt.IsZero() {
 			t.Errorf("expiresAt is zero — expires-at not recorded (R-WRDD-TR27)")
 		}
-		if !rec.expiresAt.After(rec.issuedAt) {
+		if !rec.ExpiresAt.After(rec.IssuedAt) {
 			t.Errorf("expiresAt %v not after issuedAt %v (R-WRDD-TR27)",
-				rec.expiresAt, rec.issuedAt)
+				rec.ExpiresAt, rec.IssuedAt)
 		}
-		if !rec.revokedAt.IsZero() {
+		if !rec.RevokedAt.IsZero() {
 			t.Errorf("revokedAt non-zero on fresh access record (R-WRDD-TR27)")
 		}
-		if !rec.usedAt.IsZero() {
+		if !rec.UsedAt.IsZero() {
 			t.Errorf("usedAt non-zero on fresh access record (R-WRDD-TR27)")
 		}
 	})
@@ -20651,26 +20651,26 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("refresh_record_captures_chain_and_used_at", func(t *testing.T) {
 		// R-WRDD-TR27: refresh record must carry chainID (chain membership) and
 		// usedAt (zero until consumed by rotation).
-		plaintext, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Unlock()
 		if rec == nil {
 			t.Fatalf("record missing after issueRefresh (R-WRDD-TR27)")
 		}
-		if rec.kind != "refresh" {
-			t.Errorf("kind = %q, want \"refresh\" (R-WRDD-TR27)", rec.kind)
+		if rec.Kind != "refresh" {
+			t.Errorf("kind = %q, want \"refresh\" (R-WRDD-TR27)", rec.Kind)
 		}
-		if rec.chainID == "" {
+		if rec.ChainID == "" {
 			t.Errorf("chainID empty — chain membership not recorded on refresh (R-WRDD-TR27)")
 		}
-		if !rec.usedAt.IsZero() {
+		if !rec.UsedAt.IsZero() {
 			t.Errorf("usedAt non-zero on fresh refresh record (R-WRDD-TR27)")
 		}
-		if !rec.revokedAt.IsZero() {
+		if !rec.RevokedAt.IsZero() {
 			t.Errorf("revokedAt non-zero on fresh refresh record (R-WRDD-TR27)")
 		}
 	})
@@ -20678,7 +20678,7 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("unknown_plaintext_rejected", func(t *testing.T) {
 		// R-WRDD-TR27: lookup accepts only when the record exists.
 		unknown := "0000000000000000000000000000000000000000000000000000000000000000"
-		rec, reason := oauthTokenStore.lookupAccessReason(unknown)
+		rec, reason := oauthTokenStore.LookupAccessReason(unknown)
 		if rec != nil || reason == "" {
 			t.Errorf("unknown token not rejected: reason=%q (R-WRDD-TR27)", reason)
 		}
@@ -20687,18 +20687,18 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("expired_access_token_rejected_independently", func(t *testing.T) {
 		// R-WRDD-TR27: expires-at is checked independently — a token whose
 		// expires-at is past is rejected even if revoked-at is unset.
-		plaintext, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueAccess: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
 		if rec != nil {
-			rec.expiresAt = oauthTokenNow().Add(-time.Minute)
+			rec.ExpiresAt = oauthTokenNow().Add(-time.Minute)
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
-		got, _ := oauthTokenStore.lookupAccessReason(plaintext)
+		got, _ := oauthTokenStore.LookupAccessReason(plaintext)
 		if got != nil {
 			t.Errorf("expired (un-revoked) access token was accepted (R-WRDD-TR27)")
 		}
@@ -20707,18 +20707,18 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("revoked_access_token_rejected_independently", func(t *testing.T) {
 		// R-WRDD-TR27: revoked-at is checked independently — a token with
 		// revoked-at set is rejected even if expires-at is still in the future.
-		plaintext, err := oauthTokenStore.issueAccess(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueAccess(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueAccess: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
 		if rec != nil {
-			rec.revokedAt = oauthTokenNow()
+			rec.RevokedAt = oauthTokenNow()
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
-		got, _ := oauthTokenStore.lookupAccessReason(plaintext)
+		got, _ := oauthTokenStore.LookupAccessReason(plaintext)
 		if got != nil {
 			t.Errorf("revoked (un-expired) access token was accepted (R-WRDD-TR27)")
 		}
@@ -20727,18 +20727,18 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 	t.Run("used_refresh_token_rejected_at_rotation", func(t *testing.T) {
 		// R-WRDD-TR27: for refresh tokens, used-at set is sufficient to reject
 		// rotation even when expires-at is in the future and revoked-at is unset.
-		plaintext, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
 		if rec != nil {
-			rec.usedAt = oauthTokenNow()
+			rec.UsedAt = oauthTokenNow()
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
-		_, _, err = oauthTokenStore.rotateRefresh(plaintext)
+		_, _, err = oauthTokenStore.RotateRefresh(plaintext)
 		if err == nil {
 			t.Errorf("rotateRefresh accepted a refresh token with usedAt set (R-WRDD-TR27)")
 		}
@@ -20746,18 +20746,18 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 
 	t.Run("revoked_refresh_token_rejected_at_rotation", func(t *testing.T) {
 		// R-WRDD-TR27: revoked-at also gates refresh-token rotation independently.
-		plaintext, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
 		if rec != nil {
-			rec.revokedAt = oauthTokenNow()
+			rec.RevokedAt = oauthTokenNow()
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
-		_, _, err = oauthTokenStore.rotateRefresh(plaintext)
+		_, _, err = oauthTokenStore.RotateRefresh(plaintext)
 		if err == nil {
 			t.Errorf("rotateRefresh accepted a revoked refresh token (R-WRDD-TR27)")
 		}
@@ -20765,18 +20765,18 @@ func TestR_WRDD_TR27_token_record_structure_and_validation_conditions(t *testing
 
 	t.Run("expired_refresh_token_rejected_at_rotation", func(t *testing.T) {
 		// R-WRDD-TR27: expires-at also gates refresh-token rotation independently.
-		plaintext, err := oauthTokenStore.issueRefresh(owner, clientID, resource)
+		plaintext, err := oauthTokenStore.IssueRefresh(owner, clientID, resource)
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(plaintext)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(plaintext)]
 		if rec != nil {
-			rec.expiresAt = oauthTokenNow().Add(-time.Minute)
+			rec.ExpiresAt = oauthTokenNow().Add(-time.Minute)
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 
-		_, _, err = oauthTokenStore.rotateRefresh(plaintext)
+		_, _, err = oauthTokenStore.RotateRefresh(plaintext)
 		if err == nil {
 			t.Errorf("rotateRefresh accepted an expired refresh token (R-WRDD-TR27)")
 		}
@@ -20833,7 +20833,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		// the agents block renders inside the banner card, immediately below
 		// the auth row.
 		email := "gating-live-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
-		if _, err := oauthTokenStore.issueRefresh(
+		if _, err := oauthTokenStore.IssueRefresh(
 			email, "client-G1", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
@@ -20879,7 +20879,7 @@ func TestR_VTZ5_5FF5_agents_block_gating(t *testing.T) {
 		mine := "gating-mine-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		other := "gating-other-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		// Issue a chain owned by the OTHER email.
-		if _, err := oauthTokenStore.issueRefresh(
+		if _, err := oauthTokenStore.IssueRefresh(
 			other, "client-other", "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh other: %v", err)
 		}
@@ -20934,17 +20934,17 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) string {
 		t.Helper()
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
+		refresh, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		chainID := ""
 		if rec != nil {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if chainID == "" {
 			t.Fatalf("issued refresh has empty chainID")
 		}
@@ -21008,17 +21008,17 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		email := "sig-undef-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "undef0001abcdef99-tail"
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: ""}))
-		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
+		refresh, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		chainID := ""
 		if rec != nil {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if chainID == "" {
 			t.Fatalf("chainID empty")
 		}
@@ -21076,17 +21076,17 @@ func TestR_6KK2_AAY0_agent_stack_bottom_right_geometry(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) string {
 		t.Helper()
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		refresh, err := oauthTokenStore.issueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
+		refresh, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
 		if err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.mu.Lock()
-		rec := oauthTokenStore.m[oauthTokenHash(refresh)]
+		oauthTokenStore.Mu.Lock()
+		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
 		chainID := ""
 		if rec != nil {
-			chainID = rec.chainID
+			chainID = rec.ChainID
 		}
-		oauthTokenStore.mu.Unlock()
+		oauthTokenStore.Mu.Unlock()
 		if chainID == "" {
 			t.Fatalf("issued refresh has empty chainID")
 		}
@@ -21182,7 +21182,7 @@ func TestR_2ZZH_LJYA_banner_grows_for_identity_stack(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) {
 		t.Helper()
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
@@ -21241,7 +21241,7 @@ func TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset(t *testing.T) {
 	for i, clientName := range []string{"Bottom Alpha", "Bottom Beta"} {
 		clientID := fmt.Sprintf("bottom%04d%s", i, agentsBlockRandomEmailToken(t))
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
@@ -21309,7 +21309,7 @@ func TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding(t *testing.T)
 	for i, clientName := range []string{"Within Eight Alpha", "Within Eight Beta"} {
 		clientID := fmt.Sprintf("within8%04d%s", i, agentsBlockRandomEmailToken(t))
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
@@ -21446,7 +21446,7 @@ func TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows(t *testing.T) {
 
 	clientID := "compactone" + agentsBlockRandomEmailToken(t)
 	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Compact Agent"}))
-	if _, err := oauthTokenStore.issueRefresh(email, clientID,
+	if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 		"http://127.0.0.1:3000/mcp"); err != nil {
 		t.Fatalf("issueRefresh: %v", err)
 	}
@@ -21520,7 +21520,7 @@ func TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth(t *testing.T) {
 
 	clientID := "o87hagent" + agentsBlockRandomEmailToken(t)
 	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "O87H Agent"}))
-	if _, err := oauthTokenStore.issueRefresh(email, clientID,
+	if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 		"http://127.0.0.1:3000/mcp"); err != nil {
 		t.Fatalf("issueRefresh: %v", err)
 	}
@@ -21540,7 +21540,7 @@ func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
 	for i, clientName := range []string{"Shared Alpha", "Shared Beta"} {
 		clientID := fmt.Sprintf("shared%04d%s", i, agentsBlockRandomEmailToken(t))
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		if _, err := oauthTokenStore.issueRefresh(email, clientID,
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID,
 			"http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}

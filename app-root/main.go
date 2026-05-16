@@ -5,13 +5,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1475,52 +1473,16 @@ var (
 	errOAuthAuthCodePKCEMethod       = oauthpkg.ErrAuthCodePKCEMethod
 )
 
-// R-27SO-F63X: the service mints its own access tokens — opaque
-// cryptographically-random strings issued by the service itself, not
-// values propagated from Google. Each issued token has a server-side
-// record (R-Z955-CD0I) keyed by a cryptographic hash of the plaintext
-// (R-CUUP-REQT); the plaintext is returned to the client exactly once
-// at issue time and is never persisted. oauthTokenStore is the
-// single in-process home of those records. Wire-up to the /oauth/token
-// endpoint that exchanges an authorization code for a freshly minted
-// access token lands in a follow-on iteration; this iteration
-// establishes the store and the issuance primitive so the property
-// "tokens are minted here, not by Google" is structurally true the
-// first time issuance is reached from the wire path.
-type oauthToken struct {
-	kind       string // "access" or "refresh"
-	ownerEmail string
-	clientID   string
-	// resource is the canonical resource identifier (R-3UT3-IKZG) the
-	// token is bound to at issue time. Bearer-side validation will
-	// compare this byte-for-byte (R-DH2I-28CK) when the protected
-	// endpoints land.
-	resource  string
-	issuedAt  time.Time
-	expiresAt time.Time
-	// usedAt is the consumption stamp for refresh tokens (R-89K0-GH5G's
-	// single-use property). Zero on access records; zero on a live
-	// refresh; non-zero the moment rotateRefresh consumes it.
-	usedAt    time.Time
-	revokedAt time.Time
-	// chainID groups every (access, refresh) record that descends from a
-	// single act of fresh authentication (R-9HGE-87UG). issueRefresh mints
-	// a new chainID; rotateRefresh propagates it onto both successor
-	// records so a chain is identifiable across arbitrarily many
-	// rotations. Access tokens minted by issueAccess directly (no
-	// preceding refresh) carry the zero value — they have no chain
-	// affiliation. On reuse detection the rotation primitive walks the
-	// store and stamps revokedAt on every record sharing the replayed
-	// refresh's chainID, killing the live successor refresh and any
-	// outstanding access tokens issued under the same chain.
-	chainID string
-}
+type oauthToken = oauthpkg.Token
+type oauthTokenStorage = oauthpkg.TokenStore
+type agentChainR_0NRX_3GV1 = oauthpkg.AgentChain
 
-type oauthTokenStorage struct {
-	mu          sync.Mutex
-	m           map[string]*oauthToken
-	db          *sql.DB
-	agentsBcast *agentsBroadcaster
+func newOAuthTokenStorage() *oauthTokenStorage {
+	return oauthpkg.NewTokenStore(oauthpkg.TokenOptions{
+		Now:        func() time.Time { return oauthTokenNow() },
+		AccessTTL:  func() time.Duration { return authCfg().AccessTokenTTL },
+		RefreshTTL: func() time.Duration { return authCfg().RefreshTokenTTL },
+	})
 }
 
 type serveOAuthTokenStoreKey struct{}
@@ -1536,10 +1498,6 @@ func oauthTokenStoreFromContext(ctx context.Context) *oauthTokenStorage {
 	return newOAuthTokenStorage()
 }
 
-func newOAuthTokenStorage() *oauthTokenStorage {
-	return &oauthTokenStorage{m: map[string]*oauthToken{}}
-}
-
 const oauthRefreshTokenFormField = "refresh_token"
 
 // oauthTokenNow is the clock the token store reads for issued-at /
@@ -1548,514 +1506,26 @@ const oauthRefreshTokenFormField = "refresh_token"
 var oauthTokenNow = appNow
 
 func oauthTokenHash(plaintext string) string {
-	sum := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(sum[:])
+	return oauthpkg.TokenHash(plaintext)
 }
 
-func oauthTokenUnixNano(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixNano()
-}
-
-func oauthTokenTimeFromUnixNano(v int64) time.Time {
-	if v == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, v)
-}
-
-func (s *oauthTokenStorage) setAgentsBroadcaster(b *agentsBroadcaster) *agentsBroadcaster {
-	s.mu.Lock()
-	prev := s.agentsBcast
-	s.agentsBcast = b
-	s.mu.Unlock()
-	return prev
-}
-
-func (s *oauthTokenStorage) notifyAgents(email string) {
-	s.mu.Lock()
-	b := s.agentsBcast
-	s.mu.Unlock()
+func setOAuthTokenAgentsBroadcaster(s *oauthTokenStorage, b *agentsBroadcaster) func(string) {
+	var next func(string)
 	if b != nil {
-		b.notify(email)
+		next = b.notify
 	}
-}
-
-// attach loads HAL-issued OAuth token records from SQLite and makes all
-// subsequent token lifecycle writes durable. R-FC5T-WWC2: token records
-// survive process restarts because the hash-keyed record map is rebuilt
-// from the database before the service accepts requests.
-func (s *oauthTokenStorage) attach(db *sql.DB) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows, err := db.Query(
-		`SELECT token_hash, kind, owner_email, client_id, resource, ` +
-			`issued_at, expires_at, used_at, revoked_at, chain_id FROM oauth_tokens`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	loaded := map[string]*oauthToken{}
-	for rows.Next() {
-		var hash string
-		var issuedAt, expiresAt, usedAt, revokedAt int64
-		rec := &oauthToken{}
-		if err := rows.Scan(&hash, &rec.kind, &rec.ownerEmail, &rec.clientID,
-			&rec.resource, &issuedAt, &expiresAt, &usedAt, &revokedAt,
-			&rec.chainID); err != nil {
-			return err
-		}
-		rec.issuedAt = oauthTokenTimeFromUnixNano(issuedAt)
-		rec.expiresAt = oauthTokenTimeFromUnixNano(expiresAt)
-		rec.usedAt = oauthTokenTimeFromUnixNano(usedAt)
-		rec.revokedAt = oauthTokenTimeFromUnixNano(revokedAt)
-		loaded[hash] = rec
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	s.m = loaded
-	s.db = db
-	return nil
-}
-
-func (s *oauthTokenStorage) persistTokenLocked(hash string, rec *oauthToken) error {
-	if s.db == nil {
-		return nil
-	}
-	return persistOAuthTokenLocked(s.db, hash, rec)
-}
-
-type oauthTokenPersister interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}
-
-func persistOAuthTokenLocked(p oauthTokenPersister, hash string, rec *oauthToken) error {
-	_, err := p.Exec(
-		`INSERT OR REPLACE INTO oauth_tokens (`+
-			`token_hash, kind, owner_email, client_id, resource, `+
-			`issued_at, expires_at, used_at, revoked_at, chain_id`+
-			`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		hash, rec.kind, rec.ownerEmail, rec.clientID, rec.resource,
-		oauthTokenUnixNano(rec.issuedAt), oauthTokenUnixNano(rec.expiresAt),
-		oauthTokenUnixNano(rec.usedAt), oauthTokenUnixNano(rec.revokedAt),
-		rec.chainID)
-	return err
-}
-
-// issueAccess mints an opaque access token for the given owner, client,
-// and bound resource, persists a hash-keyed record, and returns the
-// plaintext the caller writes to the token response. The expires_at
-// stamp is issued_at + AccessTokenTTL exactly, both drawn from a
-// single oauthTokenNow() read so first-use validation cannot trip on
-// borderline-clock skew (R-E5GH-PN6G's posture, recorded here so the
-// wire path inherits it). The 32 random bytes give 256 bits of
-// entropy — well clear of collision concerns and unguessable enough
-// that the plaintext alone is the credential.
-func (s *oauthTokenStorage) issueAccess(ownerEmail, clientID, resource string) (string, error) {
-	var buf [32]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	plaintext := hex.EncodeToString(buf[:])
-	now := oauthTokenNow()
-	hash := oauthTokenHash(plaintext)
-	rec := &oauthToken{
-		kind:       "access",
-		ownerEmail: ownerEmail,
-		clientID:   clientID,
-		resource:   resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().AccessTokenTTL),
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.persistTokenLocked(hash, rec); err != nil {
-		return "", err
-	}
-	s.m[hash] = rec
-	return plaintext, nil
-}
-
-func randomOAuthTokenSecret() (string, error) {
-	var buf [32]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
-}
-
-func randomOAuthChainID() (string, error) {
-	var buf [16]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
-}
-
-// issueInitialTokenPairR_2HT5_50F4 mints the access and refresh token
-// returned by one authorization-code exchange into the same MCP token
-// chain. Revoking the agents-block row for that chain therefore revokes
-// the initial access token even before the refresh token has ever rotated.
-func (s *oauthTokenStorage) issueInitialTokenPairR_2HT5_50F4(
-	ownerEmail, clientID, resource string,
-) (string, string, error) {
-	accessPlain, err := randomOAuthTokenSecret()
-	if err != nil {
-		return "", "", err
-	}
-	refreshPlain, err := randomOAuthTokenSecret()
-	if err != nil {
-		return "", "", err
-	}
-	chainID, err := randomOAuthChainID()
-	if err != nil {
-		return "", "", err
-	}
-	now := oauthTokenNow()
-	accessHash := oauthTokenHash(accessPlain)
-	refreshHash := oauthTokenHash(refreshPlain)
-	accessRec := &oauthToken{
-		kind:       "access",
-		ownerEmail: ownerEmail,
-		clientID:   clientID,
-		resource:   resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().AccessTokenTTL),
-		chainID:    chainID,
-	}
-	refreshRec := &oauthToken{
-		kind:       "refresh",
-		ownerEmail: ownerEmail,
-		clientID:   clientID,
-		resource:   resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
-		chainID:    chainID,
-	}
-
-	s.mu.Lock()
-	if s.db != nil {
-		tx, err := s.db.Begin()
-		if err != nil {
-			s.mu.Unlock()
-			return "", "", err
-		}
-		if err := persistOAuthTokenLocked(tx, accessHash, accessRec); err != nil {
-			_ = tx.Rollback()
-			s.mu.Unlock()
-			return "", "", err
-		}
-		if err := persistOAuthTokenLocked(tx, refreshHash, refreshRec); err != nil {
-			_ = tx.Rollback()
-			s.mu.Unlock()
-			return "", "", err
-		}
-		if err := tx.Commit(); err != nil {
-			s.mu.Unlock()
-			return "", "", err
-		}
-	}
-	s.m[accessHash] = accessRec
-	s.m[refreshHash] = refreshRec
-	s.mu.Unlock()
-	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
-	s.notifyAgents(ownerEmail)
-	return accessPlain, refreshPlain, nil
-}
-
-// R-89K0-GH5G: each successful refresh-token use issues a new refresh
-// token alongside the new access token, and the consumed refresh is
-// invalidated atomically with the issue. issueRefresh mints a refresh
-// record for use by the /oauth/token refresh_grant path (which lands in
-// a follow-on iteration); rotateRefresh is the single primitive that
-// performs the consume-and-issue under one critical section so the
-// "single-use" invariant cannot race. The thirty-day refresh TTL
-// (R-8UAA-YKR9) lands here too — every refresh record carries
-// expiresAt = issuedAt + RefreshTokenTTL, and rotateRefresh rejects a
-// presented refresh past that ceiling. Chain membership (R-9HGE-87UG)
-// is established here too — every fresh issueRefresh mints a new
-// chainID; rotateRefresh propagates it onto successors so the chain
-// is walkable on reuse detection.
-func (s *oauthTokenStorage) issueRefresh(ownerEmail, clientID, resource string) (string, error) {
-	plaintext, err := randomOAuthTokenSecret()
-	if err != nil {
-		return "", err
-	}
-	chainID, err := randomOAuthChainID()
-	if err != nil {
-		return "", err
-	}
-	now := oauthTokenNow()
-	hash := oauthTokenHash(plaintext)
-	rec := &oauthToken{
-		kind:       "refresh",
-		ownerEmail: ownerEmail,
-		clientID:   clientID,
-		resource:   resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
-		chainID:    chainID,
-	}
-	s.mu.Lock()
-	if err := s.persistTokenLocked(hash, rec); err != nil {
-		s.mu.Unlock()
-		return "", err
-	}
-	s.m[hash] = rec
-	s.mu.Unlock()
-	// R-0TVF-0BKI: a fresh chain just appeared in this owner's live set.
-	s.notifyAgents(ownerEmail)
-	return plaintext, nil
-}
-
-// rotateRefresh atomically consumes the presented refresh-token
-// plaintext and issues a new (access, refresh) pair bound to the same
-// owner / client / resource. The consumed record's usedAt is set in the
-// same critical section that stores the successor records — observers
-// can never see a window in which the old refresh is still spendable
-// after the new one exists, nor one in which the new pair exists
-// without the predecessor being marked used. Returns the new access
-// plaintext and the new refresh plaintext on success.
-func (s *oauthTokenStorage) rotateRefresh(plaintext string) (string, string, error) {
-	return s.rotateRefreshForClient(plaintext, "")
-}
-
-func (s *oauthTokenStorage) rotateRefreshForClient(plaintext, clientID string) (string, string, error) {
-	if plaintext == "" {
-		return "", "", errors.New("refresh token: empty")
-	}
-	var accessBuf, refreshBuf [32]byte
-	if _, err := cryptorand.Read(accessBuf[:]); err != nil {
-		return "", "", err
-	}
-	if _, err := cryptorand.Read(refreshBuf[:]); err != nil {
-		return "", "", err
-	}
-	newAccess := hex.EncodeToString(accessBuf[:])
-	newRefresh := hex.EncodeToString(refreshBuf[:])
-	now := oauthTokenNow()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	presentedHash := oauthTokenHash(plaintext)
-	rec, ok := s.m[presentedHash]
-	if !ok || rec.kind != "refresh" {
-		return "", "", errors.New("refresh token: unknown")
-	}
-	if !rec.usedAt.IsZero() {
-		// R-9HGE-87UG: a second presentation of an already-consumed
-		// refresh is evidence of compromise. Reject this request and
-		// revoke every record sharing the replayed refresh's chainID —
-		// the live successor refresh and any outstanding access tokens
-		// issued from this chain. lookupAccess already rejects records
-		// with revokedAt set, so newly arriving requests bearing any
-		// chain member are bounced (R-A26O-QBG9).
-		revokedOwner := ""
-		if rec.chainID != "" {
-			for otherHash, other := range s.m {
-				if other.chainID == rec.chainID && other.revokedAt.IsZero() {
-					other.revokedAt = now
-					_ = s.persistTokenLocked(otherHash, other)
-				}
-			}
-			revokedOwner = rec.ownerEmail
-		}
-		s.mu.Unlock()
-		// R-0TVF-0BKI: the chain just disappeared from this owner's live set.
-		if revokedOwner != "" {
-			s.notifyAgents(revokedOwner)
-		}
-		s.mu.Lock()
-		return "", "", errors.New("refresh token: already used")
-	}
-	if !rec.revokedAt.IsZero() {
-		return "", "", errors.New("refresh token: revoked")
-	}
-	// R-8UAA-YKR9: a refresh past its thirty-day ceiling is no longer
-	// rotatable. Strict Before mirrors the access-token gate's
-	// boundary discipline (R-TNXJ-ZWQ0).
-	if !now.Before(rec.expiresAt) {
-		return "", "", errors.New("refresh token: expired")
-	}
-	// R-5P7B-KY5Z: the wire refresh-token grant must identify the same
-	// OAuth client that originally received this refresh token. The
-	// store-level primitive takes an optional client binding so existing
-	// direct rotation tests can exercise token lifecycle independently,
-	// while /oauth/token passes the presented client_id and rejects a
-	// mismatch before consuming the refresh.
-	if clientID != "" && rec.clientID != clientID {
-		return "", "", errors.New("refresh token: client_id mismatch")
-	}
-	newAccessHash := oauthTokenHash(newAccess)
-	newRefreshHash := oauthTokenHash(newRefresh)
-	rec.usedAt = now
-	newAccessRec := &oauthToken{
-		kind:       "access",
-		ownerEmail: rec.ownerEmail,
-		clientID:   rec.clientID,
-		resource:   rec.resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().AccessTokenTTL),
-		chainID:    rec.chainID,
-	}
-	newRefreshRec := &oauthToken{
-		kind:       "refresh",
-		ownerEmail: rec.ownerEmail,
-		clientID:   rec.clientID,
-		resource:   rec.resource,
-		issuedAt:   now,
-		expiresAt:  now.Add(authCfg().RefreshTokenTTL),
-		chainID:    rec.chainID,
-	}
-	if err := s.persistTokenLocked(presentedHash, rec); err != nil {
-		rec.usedAt = time.Time{}
-		return "", "", err
-	}
-	if err := s.persistTokenLocked(newAccessHash, newAccessRec); err != nil {
-		rec.usedAt = time.Time{}
-		return "", "", err
-	}
-	if err := s.persistTokenLocked(newRefreshHash, newRefreshRec); err != nil {
-		rec.usedAt = time.Time{}
-		return "", "", err
-	}
-	s.m[newAccessHash] = newAccessRec
-	s.m[newRefreshHash] = newRefreshRec
-	return newAccess, newRefresh, nil
-}
-
-// revokeChainR_D0XD_1YT0 atomically marks every record sharing chainID
-// as revoked, scoped to ownerEmail. Returns true when the chain existed
-// and belonged to ownerEmail; returns false when no record matches the
-// chainID, or when at least one record with that chainID is owned by a
-// different email — the caller surfaces both cases identically so the
-// service does not disclose whether such a chain exists.
-func (s *oauthTokenStorage) revokeChainR_D0XD_1YT0(chainID, ownerEmail string) bool {
-	if chainID == "" || ownerEmail == "" {
-		return false
-	}
-	now := oauthTokenNow()
-	s.mu.Lock()
-	matched := false
-	for _, rec := range s.m {
-		if rec.chainID != chainID {
-			continue
-		}
-		if rec.ownerEmail != ownerEmail {
-			s.mu.Unlock()
-			return false
-		}
-		matched = true
-	}
-	if !matched {
-		s.mu.Unlock()
-		return false
-	}
-	for hash, rec := range s.m {
-		if rec.chainID == chainID && rec.revokedAt.IsZero() {
-			rec.revokedAt = now
-			_ = s.persistTokenLocked(hash, rec)
-		}
-	}
-	s.mu.Unlock()
-	// R-0TVF-0BKI: the chain just disappeared from this owner's live set.
-	s.notifyAgents(ownerEmail)
-	return true
-}
-
-// R-0NRX-3GV1: a single live MCP token chain owned by some email, as
-// surfaced to the agents block on the index page. The "live" filter is
-// applied at collection time (at least one un-revoked, un-expired
-// refresh record under the chainID); rows here are the per-chain
-// roll-up used for rendering. Chain initial issuance is the earliest
-// refresh record's issuedAt; refresh rotation does not change the rendered
-// row identity used for ordering.
-type agentChainR_0NRX_3GV1 struct {
-	chainID    string
-	clientID   string
-	clientName string
-	issuedAt   time.Time
-}
-
-// liveAgentChainsR_0NRX_3GV1 walks the token store under .mu.Lock(),
-// groups un-revoked un-expired refresh records owned by `email` by
-// chainID, and returns one entry per chain. Client name is resolved
-// from the supplied OAuth client store after the token-store lock is released to
-// keep the two stores' critical sections independent. Order is not pinned
-// here; the render and stream seams sort by rendered row identity.
-func (s *oauthTokenStorage) liveAgentChainsR_0NRX_3GV1(
-	email string, clients *oauthClientStorage,
-) []agentChainR_0NRX_3GV1 {
-	if email == "" {
-		return nil
-	}
-	now := oauthTokenNow()
-	type partial struct {
-		clientID string
-		issuedAt time.Time
-	}
-	byChain := map[string]*partial{}
-	s.mu.Lock()
-	for _, rec := range s.m {
-		if rec.kind != "refresh" {
-			continue
-		}
-		if rec.ownerEmail != email {
-			continue
-		}
-		if rec.chainID == "" {
-			continue
-		}
-		if !rec.revokedAt.IsZero() {
-			continue
-		}
-		if !now.Before(rec.expiresAt) {
-			continue
-		}
-		cur, ok := byChain[rec.chainID]
-		if !ok {
-			byChain[rec.chainID] = &partial{
-				clientID: rec.clientID,
-				issuedAt: rec.issuedAt,
-			}
-			continue
-		}
-		if rec.issuedAt.Before(cur.issuedAt) {
-			cur.issuedAt = rec.issuedAt
-		}
-	}
-	s.mu.Unlock()
-	if len(byChain) == 0 {
-		return nil
-	}
-	out := make([]agentChainR_0NRX_3GV1, 0, len(byChain))
-	for chainID, p := range byChain {
-		row := agentChainR_0NRX_3GV1{
-			chainID:  chainID,
-			clientID: p.clientID,
-			issuedAt: p.issuedAt,
-		}
-		if clients != nil {
-			if c := clients.Lookup(p.clientID); c != nil {
-				row.clientName = c.ClientName()
-			}
-		}
-		out = append(out, row)
-	}
-	return out
+	return s.SetNotifier(next)
 }
 
 func agentChainRenderedNameR_VWEX_WYWJ(ch agentChainR_0NRX_3GV1) string {
-	if ch.clientName == "" {
+	if ch.ClientName == "" {
 		return "undefined"
 	}
-	return ch.clientName
+	return ch.ClientName
 }
 
 func agentChainRenderedIDPrefixR_VWEX_WYWJ(ch agentChainR_0NRX_3GV1) string {
-	prefix := ch.clientID
+	prefix := ch.ClientID
 	if len(prefix) > 8 {
 		prefix = prefix[:8]
 	}
@@ -2078,49 +1548,8 @@ func sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains []agentChainR_0NRX_3GV1
 		if leftPrefix != rightPrefix {
 			return leftPrefix < rightPrefix
 		}
-		return chains[i].chainID < chains[j].chainID
+		return chains[i].ChainID < chains[j].ChainID
 	})
-}
-
-// lookupAccess returns the access-token record for the presented
-// plaintext if one exists and is currently valid (un-expired,
-// un-revoked, kind=access). Returns nil otherwise. The bearer-side
-// gates on /counter/increment, /counter/decrement, and /mcp will
-// route through this once they land.
-func (s *oauthTokenStorage) lookupAccess(plaintext string) *oauthToken {
-	rec, _ := s.lookupAccessReason(plaintext)
-	return rec
-}
-
-// lookupAccessReason is lookupAccess with an out-of-band discriminator
-// for the rejection cause, used by R-EV2D-QTR1 to surface distinct
-// `error_description` strings on the bearer-rejection 401. The reason
-// values are stable strings (not exposed verbatim in the wire body):
-// "" with a non-nil rec on accept; "unknown" for an unrecognized or
-// wrong-kind plaintext; "expired" for a recognized record past
-// expires_at; "revoked" for a recognized record with revokedAt set.
-// Resource-binding mismatch is checked by the caller against
-// canonicalResourceIdentifier(), not here.
-func (s *oauthTokenStorage) lookupAccessReason(plaintext string) (*oauthToken, string) {
-	if plaintext == "" {
-		return nil, "unknown"
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, ok := s.m[oauthTokenHash(plaintext)]
-	if !ok {
-		return nil, "unknown"
-	}
-	if rec.kind != "access" {
-		return nil, "unknown"
-	}
-	if !rec.revokedAt.IsZero() {
-		return nil, "revoked"
-	}
-	if !oauthTokenNow().Before(rec.expiresAt) {
-		return nil, "expired"
-	}
-	return rec, ""
 }
 
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
@@ -2254,7 +1683,7 @@ var onPortParsed func(int)
 const serveShutdownGrace = 500 * time.Millisecond
 
 // R-75VF-7137: `hal serve` accepts --port (default 3000), --ip (default
-// 127.0.0.1), and --db (default ./hal.db); with defaults it binds a TCP
+// 127.0.0.1), and --db (default ./hal.DB); with defaults it binds a TCP
 // listener at 127.0.0.1:3000 and serves it. Plain HTTP per R-PVA6-Q6OB —
 // no TLS termination in-process. cmdServe wires SIGINT/SIGTERM into a
 // cancellation context so the inner serve loop can be exercised from
@@ -2312,7 +1741,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 	fs.SetOutput(stderr)
 	port := fs.Int("port", 3000, "TCP port to listen on")
 	ip := fs.String("ip", "127.0.0.1", "local interface to bind to")
-	dbPath := fs.String("db", "./hal.db", "path to the SQLite database file")
+	dbPath := fs.String("db", "./hal.DB", "path to the SQLite database file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -2350,7 +1779,7 @@ func runServeWithEnvClockAndDatabaseOpener(
 		fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
 		return 1
 	}
-	if err := servingOAuthTokens.attach(db); err != nil {
+	if err := servingOAuthTokens.Attach(db); err != nil {
 		fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
 		return 1
 	}
@@ -2450,8 +1879,8 @@ func runServeWithEnvClockAndDatabaseOpener(
 		handleAgentsRevokeWithStores(servingWebSessions, servingOAuthTokens, w, r)
 	})
 	servingAgentsBcast := &agentsBroadcaster{}
-	prevAgentsBcast := servingOAuthTokens.setAgentsBroadcaster(servingAgentsBcast)
-	defer servingOAuthTokens.setAgentsBroadcaster(prevAgentsBcast)
+	prevAgentsBcast := setOAuthTokenAgentsBroadcaster(servingOAuthTokens, servingAgentsBcast)
+	defer servingOAuthTokens.SetNotifier(prevAgentsBcast)
 	servingOAuthAuthCodes := newOAuthAuthCodeStorage()
 	mux.HandleFunc(http.MethodGet, "/agents/stream", func(w http.ResponseWriter, r *http.Request) {
 		handleAgentsStreamWithStores(
@@ -2639,7 +2068,7 @@ func handleIndexWithCounterAndStores(
 	// row instead of reserving vertical space for absent agent rows.
 	var agentsBlock string
 	if session != nil {
-		chains := tokens.liveAgentChainsR_0NRX_3GV1(session.OwnerEmail(), clients)
+		chains := tokens.LiveAgentChains(session.OwnerEmail(), clients)
 		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		if len(chains) > 0 {
 			var b strings.Builder
@@ -2654,7 +2083,7 @@ func handleIndexWithCounterAndStores(
 				name := agentChainRenderedNameR_VWEX_WYWJ(ch)
 				idPrefix := agentChainRenderedIDPrefixR_VWEX_WYWJ(ch)
 				b.WriteString(`<div class="agent-row" data-chain-id="`)
-				b.WriteString(htmlEscape(ch.chainID))
+				b.WriteString(htmlEscape(ch.ChainID))
 				// R-VV71-J75U: identity label is inert text with client_name
 				// followed by parenthesised 8-char client_id prefix; Revoke
 				// button carries class="auth-btn" for matching pill chrome.
@@ -2666,7 +2095,7 @@ func handleIndexWithCounterAndStores(
 				b.WriteString(htmlEscape(idPrefix))
 				b.WriteString(`)</span><form method="post" action="/agents/revoke">`)
 				b.WriteString(`<input type="hidden" name="chain_id" value="`)
-				b.WriteString(htmlEscape(ch.chainID))
+				b.WriteString(htmlEscape(ch.ChainID))
 				b.WriteString(`"><button class="auth-btn" type="submit">Revoke</button></form></div>`)
 			}
 			b.WriteString(`</div>`)
@@ -3485,7 +2914,7 @@ func handleAgentsRevokeWithStores(
 		return
 	}
 	chainID := r.PostForm.Get("chain_id")
-	if !tokens.revokeChainR_D0XD_1YT0(chainID, session.OwnerEmail()) {
+	if !tokens.RevokeChain(chainID, session.OwnerEmail()) {
 		http.Error(w, "chain not found", http.StatusNotFound)
 		return
 	}
@@ -3626,7 +3055,7 @@ func handleAgentsStreamWithStores(
 		return nil
 	}
 	writeSnapshot := func() error {
-		chains := tokens.liveAgentChainsR_0NRX_3GV1(email, clients)
+		chains := tokens.LiveAgentChains(email, clients)
 		sortAgentChainsByRenderedIdentityR_VWEX_WYWJ(chains)
 		type item struct {
 			ChainID    string `json:"chain_id"`
@@ -3637,10 +3066,10 @@ func handleAgentsStreamWithStores(
 		out := make([]item, 0, len(chains))
 		for _, c := range chains {
 			out = append(out, item{
-				ChainID:    c.chainID,
-				ClientID:   c.clientID,
-				ClientName: c.clientName,
-				IssuedAt:   c.issuedAt.UTC().Format(time.RFC3339Nano),
+				ChainID:    c.ChainID,
+				ClientID:   c.ClientID,
+				ClientName: c.ClientName,
+				IssuedAt:   c.IssuedAt.UTC().Format(time.RFC3339Nano),
 			})
 		}
 		payload, err := json.Marshal(out)
@@ -4193,7 +3622,7 @@ func handleOAuthTokenAuthCodeWithStores(
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
 	}
-	access, refresh, err := tokens.issueInitialTokenPairR_2HT5_50F4(
+	access, refresh, err := tokens.IssueInitialTokenPair(
 		rec.OwnerEmail(), rec.ClientID(), rec.Resource())
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -4231,7 +3660,7 @@ func handleOAuthTokenRefreshWithStore(tokens *oauthTokenStorage, w http.Response
 	// R-B78O-8X0F: the refresh-token grant rotates a valid refresh
 	// token into a fresh bearer access token plus successor refresh
 	// token without any browser or Google round trip.
-	access, refresh, err := tokens.rotateRefreshForClient(refreshToken, clientID)
+	access, refresh, err := tokens.RotateRefreshForClient(refreshToken, clientID)
 	if err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
 		return
@@ -4317,13 +3746,13 @@ func checkMutationAuthWithStores(
 		return false, http.StatusUnauthorized, "invalid_token",
 			"bearer authorization header malformed"
 	}
-	rec, reason := tokens.lookupAccessReason(plaintext)
+	rec, reason := tokens.LookupAccessReason(plaintext)
 	if rec != nil {
-		if rec.resource != canonicalResourceIdentifier() {
+		if rec.Resource != canonicalResourceIdentifier() {
 			return false, http.StatusUnauthorized, "invalid_token",
 				"bearer token resource binding does not match"
 		}
-		setAuthedUserR_D56D_EBP3(r, rec.ownerEmail)
+		setAuthedUserR_D56D_EBP3(r, rec.OwnerEmail)
 		return true, 0, "", ""
 	}
 	if cookieRejectedByOrigin {
@@ -4405,9 +3834,9 @@ func checkMCPBearerWithTokenStore(tokens *oauthTokenStorage, h http.Header) (boo
 	if !parsed {
 		return false, "bearer authorization header malformed"
 	}
-	rec, reason := tokens.lookupAccessReason(plaintext)
+	rec, reason := tokens.LookupAccessReason(plaintext)
 	if rec != nil {
-		if rec.resource != canonicalResourceIdentifier() {
+		if rec.Resource != canonicalResourceIdentifier() {
 			return false, "bearer token resource binding does not match"
 		}
 		return true, ""
@@ -4606,7 +4035,7 @@ func handleCounterDecrementWithCounterAndStores(
 func cmdReset(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dbPath := fs.String("db", "./hal.db", "path to the SQLite database file")
+	dbPath := fs.String("db", "./hal.DB", "path to the SQLite database file")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
