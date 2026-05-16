@@ -1540,7 +1540,9 @@ type oauthStateStorage struct {
 	m  map[string]*oauthStateRecord
 }
 
-var oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+func newOAuthStateStorage() *oauthStateStorage {
+	return &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+}
 
 // oauthStateNow is the clock the state store reads for expiry comparisons.
 // Tests may replace it directly; production resolves through activeClock.
@@ -3006,8 +3008,9 @@ func runServeWithEnvAndClock(
 	mux := newDocumentedMux()
 	mux.HandleFunc(http.MethodGet, "/", handleIndex)
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
+	servingOAuthStates := newOAuthStateStorage()
 	mux.HandleFunc(http.MethodGet, "/login", func(w http.ResponseWriter, r *http.Request) {
-		handleLoginWithGoogleIDP(servingGoogleIDP, w, r)
+		handleLoginWithGoogleIDPAndStateStore(servingGoogleIDP, servingOAuthStates, w, r)
 	})
 	// R-7MLK-O6I5: logout changes authenticated browser state, so it is
 	// exposed only as POST. A GET /logout is rejected by ServeMux's
@@ -3022,7 +3025,8 @@ func runServeWithEnvAndClock(
 		handleAgentsStreamWithBroadcaster(servingAgentsBcast, w, r)
 	})
 	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
-		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(servingGoogleIDP, servingOAuthAuthCodes, w, r)
+		handleGoogleCallbackWithGoogleIDPStores(
+			servingGoogleIDP, servingOAuthStates, servingOAuthAuthCodes, w, r)
 	})
 	// R-1KML-5J0Q: every OAuth 2.1 authorization endpoint the service
 	// exposes is mounted on the same http.ServeMux that serves the
@@ -3039,7 +3043,7 @@ func runServeWithEnvAndClock(
 		handleOAuthProtectedResourceMetadata)
 	mux.HandleFunc(http.MethodPost, "/oauth/register", handleOAuthRegister)
 	mux.HandleFunc(http.MethodGet, "/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthAuthorizeWithGoogleIDP(servingGoogleIDP, w, r)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(servingGoogleIDP, servingOAuthStates, w, r)
 	})
 	mux.HandleFunc(http.MethodPost, "/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		handleOAuthTokenWithAuthCodeStore(servingOAuthAuthCodes, w, r)
@@ -3698,6 +3702,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLoginWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+	handleLoginWithGoogleIDPAndStateStore(servingIDP, newOAuthStateStorage(), w, r)
+}
+
+func handleLoginWithGoogleIDPAndStateStore(
+	servingIDP googleIDP, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
+) {
 	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
 		http.Error(w, "google identity provider not configured",
@@ -3724,7 +3734,7 @@ func handleLoginWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *ht
 	// R-MTRN-DL9W: record the origin discriminator ("web") so the
 	// Google callback's dispatch (R-MUZJ-RD0L) can route this record
 	// to the web-session establishment path.
-	oauthStateStore.putWeb(state, bindingID)
+	states.putWeb(state, bindingID)
 	// R-AYLJ-8SYX: the binding cookie is HttpOnly + SameSite=Lax, with
 	// `Secure` set only when the request reached the service over HTTPS
 	// (production posture detected via the forwarded-protocol signal,
@@ -3772,6 +3782,13 @@ func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWrit
 func handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(
 	servingIDP googleIDP, authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
 ) {
+	handleGoogleCallbackWithGoogleIDPStores(servingIDP, newOAuthStateStorage(), authCodes, w, r)
+}
+
+func handleGoogleCallbackWithGoogleIDPStores(
+	servingIDP googleIDP, states *oauthStateStorage, authCodes *oauthAuthCodeStorage,
+	w http.ResponseWriter, r *http.Request,
+) {
 	state := r.URL.Query().Get("state")
 	if state == "" {
 		http.Error(w, errOAuthStateMissing.Error(), http.StatusBadRequest)
@@ -3781,7 +3798,7 @@ func handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(
 	if c, err := r.Cookie(oauthStateCookieName); err == nil {
 		presentedBinding = c.Value
 	}
-	stateRec, err := oauthStateStore.consume(state, presentedBinding)
+	stateRec, err := states.consume(state, presentedBinding)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -4527,6 +4544,12 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+	handleOAuthAuthorizeWithGoogleIDPAndStateStore(servingIDP, newOAuthStateStorage(), w, r)
+}
+
+func handleOAuthAuthorizeWithGoogleIDPAndStateStore(
+	servingIDP googleIDP, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
+) {
 	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
 		http.Error(w, "google identity provider not configured",
@@ -4617,7 +4640,7 @@ func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWrit
 	// canonical, either explicitly per R-4GRA-EGBY or by the
 	// R-WLUL-MZCD omission default. PKCE values are recorded byte-for-byte
 	// from the request.
-	oauthStateStore.putMCP(state, bindingID, oauthStateMCPContext{
+	states.putMCP(state, bindingID, oauthStateMCPContext{
 		clientID:            clientID,
 		redirectURI:         requested,
 		codeChallenge:       q.Get("code_challenge"),

@@ -46,13 +46,18 @@ From app-root/, with no behavioral change versus before: the full test
 suite passes, the race-detector run passes, gofmt and go vet are clean,
 no source line exceeds 120 columns, and the static binary still builds.
 
-## Result - 2026-05-16
+## Result — 2026-05-16
 
-Completed one singleton strangle: `oauthAuthCodeStore`. The package-level
-authorization-code store variable was removed; `runServe` now constructs the
-serving `oauthAuthCodeStorage` instance and threads it into the Google callback
-code-issuance path and the OAuth token authorization-code redemption path. Tests
-that need shared auth-code state now use explicit local stores.
+Strangled singleton: `oauthStateStore`.
+
+Completed:
+- Removed the mutable package-level OAuth state store singleton.
+- Added `newOAuthStateStorage()` and explicit state-store handler variants.
+- Constructed the production OAuth state store in `runServeWithEnvAndClock`
+  and threaded it through `/login`, `/oauth/google/callback`, and
+  `/oauth/authorize`.
+- Updated tests that inspect or share OAuth state to use explicit test-owned
+  state stores.
 
 Files changed:
 - `app-root/main.go`
@@ -60,14 +65,16 @@ Files changed:
 - `NEXT.md`
 
 Verification:
-- `gofmt -w main.go main_test.go` completed.
-- `env -u GOROOT go test -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_WLUL_MZCD|TestR_KX4N_DZ44|TestR_JTTZ_CG5J|TestR_2HT5_50F4|TestR_EMW1_D8A0|TestR_KCBH_CXY9|TestR_7NWT_PODV'` passed.
-- `env -u GOROOT go test -race -run 'TestR_ZPE1_0DV8|TestR_MUZJ_RD0L|TestR_WLUL_MZCD|TestR_KX4N_DZ44|TestR_JTTZ_CG5J|TestR_2HT5_50F4|TestR_EMW1_D8A0|TestR_KCBH_CXY9|TestR_7NWT_PODV'` passed.
+- `env -u GOROOT go test -run 'TestR_ETP6_60VA|TestR_5LQM_O89D|TestR_EMW1_D8A0|TestR_CXJ2_R3BN|TestR_8GJG_64MR|TestR_BAXT_SBU9|TestR_JTTZ_CG5J|TestR_WLUL_MZCD|TestR_T37L_4J01|TestR_MTRN_DL9W|TestR_MUZJ_RD0L' ./...` passed.
+- `env -u GOROOT go test ./...` reached the out-of-scope local Ralph state
+  failure: `.ralph/requirements-verified.jsonl: permission denied`.
+- `env -u GOROOT go test -race -run 'TestR_ETP6_60VA|TestR_5LQM_O89D|TestR_EMW1_D8A0|TestR_CXJ2_R3BN|TestR_8GJG_64MR|TestR_BAXT_SBU9|TestR_JTTZ_CG5J|TestR_WLUL_MZCD|TestR_T37L_4J01|TestR_MTRN_DL9W|TestR_MUZJ_RD0L' ./...` passed.
 - `env -u GOROOT go vet ./...` passed.
-- `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(rg --files -g '*.go')` passed with no output.
-- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal ./...` passed.
+- `rg -n "^.{121,}$" main.go main_test.go` found no overlength lines.
 - `git diff --check` passed.
-- `env -u GOROOT go test ./...` and `env -u GOROOT go test -race ./...` both failed only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because local `.ralph/requirements-verified.jsonl` is permission-denied; this is out-of-scope Ralph state per `helper/REFACTOR.md`.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-refactor-build .` passed.
 
-Blockers / follow-up risks:
-- Broad full-suite and broad race commands remain blocked by local `.ralph` permission state, not by this refactor.
+Notes:
+- The shell environment has a stale `GOROOT` pointing at a Go 1.23.5 tree
+  while `go` is Go 1.26.2; verification used `env -u GOROOT` to select
+  `/usr/local/go`.

@@ -8603,6 +8603,7 @@ func TestR_0XJ4_5MSL_R_FZ10_BE37_logout_revokes_only_web_session(t *testing.T) {
 // observable cause of rejection plus the success path, exercising
 // handleLogin and handleGoogleCallback directly via httptest.
 func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
+	states := newOAuthStateStorage()
 	findBindingCookie := func(t *testing.T, header http.Header) *http.Cookie {
 		t.Helper()
 		res := http.Response{Header: header}
@@ -8620,7 +8621,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLogin(rec, req)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -8646,9 +8647,9 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 		state, bindingID := loginAndExtract(t)
 		// The recorded state must be present in the store and bound to
 		// the cookie value just written.
-		oauthStateStore.mu.Lock()
-		rec, ok := oauthStateStore.m[state]
-		oauthStateStore.mu.Unlock()
+		states.mu.Lock()
+		rec, ok := states.m[state]
+		states.mu.Unlock()
 		if !ok {
 			t.Fatalf("state %q not recorded server-side (R-ETP6-60VA)", state)
 		}
@@ -8688,7 +8689,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallback(rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), rec, req)
 		return rec.Result()
 	}
 
@@ -8719,9 +8720,9 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 				"(R-ETP6-60VA)", res.StatusCode)
 		}
 		// The state must still be unconsumed after a rejected callback.
-		oauthStateStore.mu.Lock()
-		rec := oauthStateStore.m[state]
-		oauthStateStore.mu.Unlock()
+		states.mu.Lock()
+		rec := states.m[state]
+		states.mu.Unlock()
 		if rec != nil && rec.consumed {
 			t.Fatalf("rejected callback consumed the state (R-ETP6-60VA)")
 		}
@@ -8823,10 +8824,11 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 // allow-domain of "allowed.example.org" so the check rejects.
 func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+	states := newOAuthStateStorage()
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
 	loginRec := httptest.NewRecorder()
-	handleLogin(loginRec, loginReq)
+	handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 	loginRes := loginRec.Result()
 	defer loginRes.Body.Close()
 	var bindingID string
@@ -8850,7 +8852,7 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 	cbReq := httptest.NewRequest("GET", target, nil)
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
-	handleGoogleCallback(cbRec, cbReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -8874,10 +8876,11 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 // environment plumbing.
 func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+	states := newOAuthStateStorage()
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
 	loginRec := httptest.NewRecorder()
-	handleLogin(loginRec, loginReq)
+	handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 	loginRes := loginRec.Result()
 	defer loginRes.Body.Close()
 	var bindingID string
@@ -8894,7 +8897,7 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 	cbReq := httptest.NewRequest("GET", target, nil)
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
-	handleGoogleCallback(cbRec, cbReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -8942,6 +8945,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 	webSessionStore.m = map[string]*webSession{}
 	webSessionStore.mu.Unlock()
 	authCodes := newOAuthAuthCodeStorage()
+	states := newOAuthStateStorage()
 
 	callback := func(t *testing.T, state, bindingID string) *http.Response {
 		t.Helper()
@@ -8950,14 +8954,14 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			nil)
 		req.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, rec, req)
 		return rec.Result()
 	}
 
 	t.Run("web_origin_rejects_without_session", func(t *testing.T) {
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLogin(loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 
@@ -9027,7 +9031,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 			"&state=" + url.QueryEscape(clientState)
 		authReq := httptest.NewRequest(http.MethodGet, authURL, nil)
 		authRec := httptest.NewRecorder()
-		handleOAuthAuthorize(authRec, authReq)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, authRec, authReq)
 		authRes := authRec.Result()
 		defer authRes.Body.Close()
 
@@ -9106,9 +9110,10 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 
 	runFlow := func(t *testing.T, mutate func(req *http.Request)) *http.Response {
 		t.Helper()
+		states := newOAuthStateStorage()
 		loginReq := httptest.NewRequest("GET", "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLogin(loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		var bindingID string
@@ -9131,7 +9136,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 			mutate(cbReq)
 		}
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallback(cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
 		return cbRec.Result()
 	}
 
@@ -9244,10 +9249,11 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.T) {
 	t.Run("login_callback_session_surfaces_google_email_in_index", func(t *testing.T) {
 		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "example.com")
+		states := newOAuthStateStorage()
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLogin(loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		if loginRes.StatusCode < 300 || loginRes.StatusCode >= 400 {
@@ -9275,7 +9281,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq := httptest.NewRequest(http.MethodGet, target, nil)
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallback(cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 		if cbRes.StatusCode != http.StatusSeeOther {
@@ -9328,10 +9334,11 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 
 	t.Run("off_domain_identity_is_rejected_with_no_session", func(t *testing.T) {
 		t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "allowed.example.org")
+		states := newOAuthStateStorage()
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLogin(loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		var bindingID string
@@ -9348,7 +9355,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq := httptest.NewRequest(http.MethodGet, target, nil)
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
-		handleGoogleCallback(cbRec, cbReq)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 
@@ -10859,13 +10866,11 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 
 func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 	originalClients := oauthClientStore
-	originalStates := oauthStateStore
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
-		oauthStateStore = originalStates
 	})
 	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
-	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+	states := newOAuthStateStorage()
 
 	const redirectURI = "http://127.0.0.1/cb-r-baxt"
 	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
@@ -10899,7 +10904,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorize(rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
 		return rec
 	}
 
@@ -10927,7 +10932,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := len(oauthStateStore.m)
+			before := len(states.m)
 			v := url.Values{}
 			for key, vals := range base {
 				v[key] = append([]string(nil), vals...)
@@ -10941,7 +10946,7 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 			if loc := rec.Header().Get("Location"); loc != "" {
 				t.Fatalf("Location = %q, want no redirect (R-BAXT-SBU9)", loc)
 			}
-			if after := len(oauthStateStore.m); after != before {
+			if after := len(states.m); after != before {
 				t.Fatalf("oauth state records changed from %d to %d on rejection (R-BAXT-SBU9)",
 					before, after)
 			}
@@ -10951,15 +10956,13 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 
 func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	originalClients := oauthClientStore
-	originalStates := oauthStateStore
 	originalTokens := oauthTokenStore
 	t.Cleanup(func() {
 		oauthClientStore = originalClients
-		oauthStateStore = originalStates
 		oauthTokenStore = originalTokens
 	})
 	oauthClientStore = &oauthClientStorage{m: map[string]*oauthClient{}}
-	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+	states := newOAuthStateStorage()
 	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 
@@ -10995,7 +10998,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorize(rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
 		return rec
 	}
 
@@ -11009,7 +11012,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		{"other", func(v url.Values) { v.Set("code_challenge_method", "S384") }},
 	} {
 		t.Run("authorize_rejects_"+tc.name, func(t *testing.T) {
-			before := len(oauthStateStore.m)
+			before := len(states.m)
 			v := url.Values{}
 			for key, vals := range base {
 				v[key] = append([]string(nil), vals...)
@@ -11023,7 +11026,7 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 			if loc := rec.Header().Get("Location"); loc != "" {
 				t.Fatalf("Location = %q, want no redirect (R-JTTZ-CG5J)", loc)
 			}
-			if after := len(oauthStateStore.m); after != before {
+			if after := len(states.m); after != before {
 				t.Fatalf("oauth state records changed from %d to %d on rejection (R-JTTZ-CG5J)",
 					before, after)
 			}
@@ -11445,14 +11448,12 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 	canonical := canonicalResourceIdentifier()
 
 	originalTokens := oauthTokenStore
-	originalStates := oauthStateStore
 	t.Cleanup(func() {
 		oauthTokenStore = originalTokens
-		oauthStateStore = originalStates
 	})
 	oauthTokenStore = &oauthTokenStorage{m: map[string]*oauthToken{}}
 	authCodes := newOAuthAuthCodeStorage()
-	oauthStateStore = &oauthStateStorage{m: map[string]*oauthStateRecord{}}
+	states := newOAuthStateStorage()
 
 	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
 		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
@@ -11483,7 +11484,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 
 	authReq := httptest.NewRequest(http.MethodGet, authBase, nil)
 	authRec := httptest.NewRecorder()
-	handleOAuthAuthorize(authRec, authReq)
+	handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, authRec, authReq)
 	authRes := authRec.Result()
 	defer authRes.Body.Close()
 	if authRes.StatusCode < 300 || authRes.StatusCode >= 400 {
@@ -11505,9 +11506,9 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		t.Fatalf("authorize omitted resource did not yield state/binding " +
 			"(R-WLUL-MZCD)")
 	}
-	oauthStateStore.mu.Lock()
-	stateRec := oauthStateStore.m[state]
-	oauthStateStore.mu.Unlock()
+	states.mu.Lock()
+	stateRec := states.m[state]
+	states.mu.Unlock()
 	if stateRec == nil || stateRec.mcp == nil {
 		t.Fatalf("authorize omitted resource missing MCP state context " +
 			"(R-WLUL-MZCD)")
@@ -11521,7 +11522,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake-code", nil)
 	callbackReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	callbackRec := httptest.NewRecorder()
-	handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, callbackRec, callbackReq)
+	handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, callbackRec, callbackReq)
 	callbackRes := callbackRec.Result()
 	defer callbackRes.Body.Close()
 	if callbackRes.StatusCode != http.StatusSeeOther {
@@ -18179,6 +18180,7 @@ func TestR_195O_JBGX_access_log_concurrent_writes_race_free(t *testing.T) {
 // Per the spec: a test suite that exercises only one of the two entry
 // points does not verify this requirement.
 func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T) {
+	states := newOAuthStateStorage()
 	// Register an MCP client so /oauth/authorize can exact-match a
 	// redirect_uri (R-1ERW-YD9G) and reach the redirect-to-Google step.
 	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
@@ -18211,7 +18213,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 				t.Helper()
 				req := httptest.NewRequest("GET", "/login", nil)
 				rec := httptest.NewRecorder()
-				handleLogin(rec, req)
+				handleLoginWithGoogleIDPAndStateStore(nil, states, rec, req)
 				return rec.Result()
 			},
 		},
@@ -18231,7 +18233,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 					"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 				req := httptest.NewRequest("GET", u, nil)
 				rec := httptest.NewRecorder()
-				handleOAuthAuthorize(rec, req)
+				handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
 				return rec.Result()
 			},
 		},
@@ -18263,9 +18265,9 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 			t.Fatalf("Location missing state= (R-T37L-4J01)")
 		}
 		// State must be recorded server-side bound to the cookie value.
-		oauthStateStore.mu.Lock()
-		rec, ok := oauthStateStore.m[state]
-		oauthStateStore.mu.Unlock()
+		states.mu.Lock()
+		rec, ok := states.m[state]
+		states.mu.Unlock()
 		if !ok {
 			t.Fatalf("state %q not recorded server-side (R-T37L-4J01)", state)
 		}
@@ -18289,7 +18291,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallback(rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, newOAuthAuthCodeStorage(), rec, req)
 		return rec.Result()
 	}
 
@@ -18384,9 +18386,10 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 // them.
 func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 	t.Run("web_origin_records_have_origin_web_and_nil_mcp_context", func(t *testing.T) {
+		states := newOAuthStateStorage()
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLogin(rec, req)
+		handleLoginWithGoogleIDPAndStateStore(nil, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -18401,9 +18404,9 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 		if state == "" {
 			t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
 		}
-		oauthStateStore.mu.Lock()
-		stateRec, ok := oauthStateStore.m[state]
-		oauthStateStore.mu.Unlock()
+		states.mu.Lock()
+		stateRec, ok := states.m[state]
+		states.mu.Unlock()
 		if !ok {
 			t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
 		}
@@ -18418,6 +18421,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 	})
 
 	t.Run("mcp_origin_records_carry_byte_for_byte_authorize_context", func(t *testing.T) {
+		states := newOAuthStateStorage()
 		regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
 			strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
 		regReq.Header.Set("Content-Type", "application/json")
@@ -18455,7 +18459,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 			"&resource=" + url.QueryEscape(wantResource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorize(rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -18470,9 +18474,9 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 		if state == "" {
 			t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
 		}
-		oauthStateStore.mu.Lock()
-		stateRec, ok := oauthStateStore.m[state]
-		oauthStateStore.mu.Unlock()
+		states.mu.Lock()
+		stateRec, ok := states.m[state]
+		states.mu.Unlock()
 		if !ok {
 			t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
 		}
@@ -18518,6 +18522,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 // for the web arm.
 func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 	authCodes := newOAuthAuthCodeStorage()
+	states := newOAuthStateStorage()
 	driveAuthorize := func(t *testing.T) (mcpClientID, state, bindingID,
 		redirect, challenge, alg, clientState, resource string) {
 		t.Helper()
@@ -18556,7 +18561,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			"&resource=" + url.QueryEscape(resource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorize(rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStore(nil, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -18586,7 +18591,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			Value: bindingID,
 		})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(nil, authCodes, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(nil, states, authCodes, rec, req)
 		return rec.Result()
 	}
 
@@ -18714,7 +18719,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 		func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/login", nil)
 			rec := httptest.NewRecorder()
-			handleLogin(rec, req)
+			handleLoginWithGoogleIDPAndStateStore(nil, states, rec, req)
 			res := rec.Result()
 			defer res.Body.Close()
 			var bindingID string
