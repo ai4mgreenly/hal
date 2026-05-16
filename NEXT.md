@@ -48,20 +48,23 @@ no source line exceeds 120 columns, and the static binary still builds.
 
 ## Result - 2026-05-16
 
-Completed one singleton strangle: `mcpServer`. The package-level
-`mcpServer` variable was removed, and `runServeWithEnvAndClock` now
-constructs the same `newMCPServer()` instance at serve startup and
-threads it directly into the Streamable HTTP handler mounted at `/mcp`.
-No other singleton was changed.
+Completed one singleton strangle: `configuredGoogleIDPSingleton`. The
+package-level production Google identity provider variable was removed;
+`runServeWithEnvAndClock` now constructs the real Google IDP as an owned
+serve-startup instance and threads it to the login, Google callback, and
+OAuth authorize handlers. The existing `testing.Testing()` branch and
+`testHookGoogleIDP` override remain intact.
 
 Files changed:
 - `app-root/main.go`
+- `app-root/main_test.go`
 - `NEXT.md`
 
 Verification:
 - `gofmt -w main.go main_test.go` completed.
-- `env -u GOROOT go test -run 'TestR_325I_TX6C|TestR_UK7D_Z0IZ|TestR_7A9U_HJFF|TestR_Z3LX_89W1|TestR_XS1U_B7YY|TestR_YHNQ_CEJJ|TestR_ZQS0_HWZ8'` passed.
-- `env -u GOROOT go test -race -run 'TestR_325I_TX6C|TestR_UK7D_Z0IZ|TestR_7A9U_HJFF|TestR_Z3LX_89W1|TestR_XS1U_B7YY|TestR_YHNQ_CEJJ|TestR_ZQS0_HWZ8'` passed.
+- `env -u GOROOT go test -run 'TestR_VF61_2Y6I|TestR_W3K0_QD0E|TestR_EMW1_D8A0|TestR_ETP6_60VA|TestR_T37L_4J01|TestR_126C_AM1E|TestR_4SH1_HQGP'` passed.
+- `env -u GOROOT go test -race -run 'TestR_VF61_2Y6I|TestR_W3K0_QD0E|TestR_EMW1_D8A0|TestR_ETP6_60VA|TestR_T37L_4J01|TestR_126C_AM1E|TestR_4SH1_HQGP'` passed.
+- `env -u GOROOT go test -run '^$'` passed.
 - `env -u GOROOT go vet ./...` passed.
 - `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(rg --files -g '*.go')` passed with no output.
 - `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal ./...` passed.

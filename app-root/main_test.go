@@ -4802,7 +4802,7 @@ func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
 // pin the real-Google code path to any "not yet implemented" sentinel —
 // that coupling would itself be a defect, by the requirement's own text.
 func TestR_VF61_2Y6I_test_env_uses_google_double(t *testing.T) {
-	idp := configuredGoogleIDP()
+	idp := configuredGoogleIDP(nil)
 	if idp == nil {
 		t.Fatalf("configuredGoogleIDP returned nil in the test env; the " +
 			"test double must be wired (R-VF61-2Y6I)")

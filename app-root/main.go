@@ -2746,31 +2746,25 @@ func (s *webSessionStorage) upsertLocked(hash string, rec *webSession) error {
 	return err
 }
 
-// configuredGoogleIDPSingleton holds the Google identity provider bound
-// at serve startup outside the test environment. Tests never read it —
-// configuredGoogleIDP short-circuits to the fake under testing.Testing()
-// per R-VF61-2Y6I.
-var configuredGoogleIDPSingleton googleIDP
-
 // testHookGoogleIDP, when non-nil under testing, overrides the fake
 // provider so callback tests can drive identity-claim rejection branches.
 var testHookGoogleIDP googleIDP
 
 // configuredGoogleIDP returns the Google identity provider wired for the
-// current process. R-VF61-2Y6I pins the test-environment choice to the
+// current request. R-VF61-2Y6I pins the test-environment choice to the
 // double. Outside tests, R-W3K0-QD0E pins it to the real
 // golang.org/x/oauth2-backed implementation, constructed once at startup
 // by runServe from GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET via
 // requireEnv — startup fails loudly if either is missing
 // (R-LWCN-ZBXO / R-68WP-XVCK).
-func configuredGoogleIDP() googleIDP {
+func configuredGoogleIDP(servingIDP googleIDP) googleIDP {
 	if testing.Testing() {
 		if testHookGoogleIDP != nil {
 			return testHookGoogleIDP
 		}
 		return googleFakeIDP{}
 	}
-	return configuredGoogleIDPSingleton
+	return servingIDP
 }
 
 func main() {
@@ -2878,6 +2872,7 @@ func runServeWithEnvAndClock(
 		prev := testEnvLookups.Swap(false)
 		defer testEnvLookups.Store(prev)
 	}
+	var servingGoogleIDP googleIDP
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to theCounter so every increment/decrement persists.
 	// Tests skip this step — they exercise the persistence layer directly
@@ -2934,7 +2929,7 @@ func runServeWithEnvAndClock(
 			fmt.Fprintf(stderr, "serve: %v\n", err)
 			return 1
 		}
-		configuredGoogleIDPSingleton = newGoogleRealIDP(
+		servingGoogleIDP = newGoogleRealIDP(
 			clientID, clientSecret, workspaceDomain)
 		// R-791Y-3ROQ: HAL_RESOURCE_IDENTIFIER is a required env var
 		// (no default), and its value must include the path component
@@ -2986,14 +2981,18 @@ func runServeWithEnvAndClock(
 	mux := newDocumentedMux()
 	mux.HandleFunc(http.MethodGet, "/", handleIndex)
 	mux.HandleFunc(http.MethodGet, "/design.css", handleDesignCSS)
-	mux.HandleFunc(http.MethodGet, "/login", handleLogin)
+	mux.HandleFunc(http.MethodGet, "/login", func(w http.ResponseWriter, r *http.Request) {
+		handleLoginWithGoogleIDP(servingGoogleIDP, w, r)
+	})
 	// R-7MLK-O6I5: logout changes authenticated browser state, so it is
 	// exposed only as POST. A GET /logout is rejected by ServeMux's
 	// method-aware routing and never reaches handleLogout.
 	mux.HandleFunc(http.MethodPost, "/logout", handleLogout)
 	mux.HandleFunc(http.MethodPost, "/agents/revoke", handleAgentsRevoke)
 	mux.HandleFunc(http.MethodGet, "/agents/stream", handleAgentsStream)
-	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", handleGoogleCallback)
+	mux.HandleFunc(http.MethodGet, "/oauth/google/callback", func(w http.ResponseWriter, r *http.Request) {
+		handleGoogleCallbackWithGoogleIDP(servingGoogleIDP, w, r)
+	})
 	// R-1KML-5J0Q: every OAuth 2.1 authorization endpoint the service
 	// exposes is mounted on the same http.ServeMux that serves the
 	// rest of the application, so every endpoint shares a single
@@ -3008,7 +3007,9 @@ func runServeWithEnvAndClock(
 	mux.HandleFunc(http.MethodGet, "/.well-known/oauth-protected-resource/mcp",
 		handleOAuthProtectedResourceMetadata)
 	mux.HandleFunc(http.MethodPost, "/oauth/register", handleOAuthRegister)
-	mux.HandleFunc(http.MethodGet, "/oauth/authorize", handleOAuthAuthorize)
+	mux.HandleFunc(http.MethodGet, "/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
+		handleOAuthAuthorizeWithGoogleIDP(servingGoogleIDP, w, r)
+	})
 	mux.HandleFunc(http.MethodPost, "/oauth/token", handleOAuthToken)
 	mux.HandleFunc(http.MethodGet, "/counter", handleCounterRead)
 	mux.HandleFunc(http.MethodGet, "/counter/stream", handleCounterStream)
@@ -3656,7 +3657,11 @@ func handleDesignCSS(w http.ResponseWriter, r *http.Request) {
 // requirements; this handler implements only the observable
 // redirect-to-Google contract.
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-	idp := configuredGoogleIDP()
+	handleLoginWithGoogleIDP(nil, w, r)
+}
+
+func handleLoginWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
 		http.Error(w, "google identity provider not configured",
 			http.StatusServiceUnavailable)
@@ -3720,6 +3725,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 // (HttpOnly + SameSite=Lax + Secure-when-https per R-AYLJ-8SYX), and
 // redirects the user-agent to /.
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
+	handleGoogleCallbackWithGoogleIDP(nil, w, r)
+}
+
+func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	if state == "" {
 		http.Error(w, errOAuthStateMissing.Error(), http.StatusBadRequest)
@@ -3749,7 +3758,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	// reject any identity whose Google-asserted hosted domain is not
 	// the single configured Workspace domain. No token / web session is
 	// issued on rejection. The error message clearly names the cause.
-	idp := configuredGoogleIDP()
+	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
 		http.Error(w, "google identity provider not configured",
 			http.StatusServiceUnavailable)
@@ -4466,7 +4475,11 @@ func supportedAuthorizeCodeChallengeMethod(method string) bool {
 // Adjacent constraints land in their own iterations: client_id /
 // redirect_uri binding on the issued code (R-ZPE1-0DV8).
 func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
-	idp := configuredGoogleIDP()
+	handleOAuthAuthorizeWithGoogleIDP(nil, w, r)
+}
+
+func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
 		http.Error(w, "google identity provider not configured",
 			http.StatusServiceUnavailable)
