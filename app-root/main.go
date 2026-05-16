@@ -31,7 +31,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1145,6 +1144,10 @@ func requireEnv(name string) (string, error) {
 	envLookupMu.RLock()
 	lookup := activeEnvLookup
 	envLookupMu.RUnlock()
+	return requireEnvFromLookup(lookup, name)
+}
+
+func requireEnvFromLookup(lookup envLookup, name string) (string, error) {
 	v, ok := lookup(name)
 	if !ok || v == "" {
 		return "", fmt.Errorf("required environment variable %s is not set", name)
@@ -3021,45 +3024,41 @@ func runServeWithEnvClockAndDatabaseOpener(
 	servingGoogleIDP := googleIDPFromContext(ctx)
 	// R-VNNS-W2G0: open the SQLite database the operator named with --db
 	// and bind it to the serve-owned counter so every increment/decrement persists.
-	// Tests skip this step — they exercise the persistence layer directly
-	// against a temp database (see TestR_VNNS_W2G0…) and would otherwise
-	// write a stray hal.db file into the test working directory through
-	// the counter persistence binding.
-	if !testing.Testing() {
-		db, err := openDatabase(*dbPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "serve: open db %q: %v\n", *dbPath, err)
-			return 1
-		}
-		defer func() { _ = db.Close() }()
-		if err := servingCounter.attach(db); err != nil {
-			fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
-			return 1
-		}
-		if err := servingOAuthClients.attach(db); err != nil {
-			fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
-			return 1
-		}
-		if err := servingWebSessions.attach(db); err != nil {
-			fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
-			return 1
-		}
-		if err := servingOAuthTokens.attach(db); err != nil {
-			fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
-			return 1
-		}
+	db, err := openDatabase(*dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "serve: open db %q: %v\n", *dbPath, err)
+		return 1
+	}
+	defer func() { _ = db.Close() }()
+	if err := servingCounter.attach(db); err != nil {
+		fmt.Fprintf(stderr, "serve: load counter: %v\n", err)
+		return 1
+	}
+	if err := servingOAuthClients.attach(db); err != nil {
+		fmt.Fprintf(stderr, "serve: load oauth clients: %v\n", err)
+		return 1
+	}
+	if err := servingWebSessions.attach(db); err != nil {
+		fmt.Fprintf(stderr, "serve: load web sessions: %v\n", err)
+		return 1
+	}
+	if err := servingOAuthTokens.attach(db); err != nil {
+		fmt.Fprintf(stderr, "serve: load oauth tokens: %v\n", err)
+		return 1
+	}
+	if servingGoogleIDP == nil {
 		// R-W3K0-QD0E / R-LWCN-ZBXO: bind the real Google identity
 		// provider once at startup, sourcing client credentials from
 		// the environment via requireEnv. Missing or empty values
 		// fail the process before it accepts traffic — operators see
 		// the misconfiguration immediately rather than receiving a
 		// 503 on the first /login.
-		clientID, err := requireEnv("GOOGLE_CLIENT_ID")
+		clientID, err := requireEnvFromLookup(lookup, "GOOGLE_CLIENT_ID")
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: %v\n", err)
 			return 1
 		}
-		clientSecret, err := requireEnv("GOOGLE_CLIENT_SECRET")
+		clientSecret, err := requireEnvFromLookup(lookup, "GOOGLE_CLIENT_SECRET")
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: %v\n", err)
 			return 1
@@ -3070,27 +3069,27 @@ func runServeWithEnvClockAndDatabaseOpener(
 		// required configuration. The same value flows to both
 		// consumers: the `hd` auth-URL parameter (R-W3K0-QD0E) and
 		// the hosted_domain claim check (R-5LQM-O89D).
-		workspaceDomain, err := requireEnv("GOOGLE_WORKSPACE_DOMAIN")
+		workspaceDomain, err := requireEnvFromLookup(lookup, "GOOGLE_WORKSPACE_DOMAIN")
 		if err != nil {
 			fmt.Fprintf(stderr, "serve: %v\n", err)
 			return 1
 		}
 		servingGoogleIDP = newGoogleRealIDP(
 			clientID, clientSecret, workspaceDomain)
-		// R-791Y-3ROQ: HAL_RESOURCE_IDENTIFIER is a required env var
-		// (no default), and its value must include the path component
-		// `/mcp` R-7A9U-HJFF pins. Missing, empty, or wrong-path values
-		// fail the process before the listener accepts traffic per the
-		// R-LWCN-ZBXO fail-loudly contract.
-		resID, err := requireEnv("HAL_RESOURCE_IDENTIFIER")
-		if err != nil {
-			fmt.Fprintf(stderr, "serve: %v\n", err)
-			return 1
-		}
-		if err := validateHALResourceIdentifier(resID); err != nil {
-			fmt.Fprintf(stderr, "serve: %v\n", err)
-			return 1
-		}
+	}
+	// R-791Y-3ROQ: HAL_RESOURCE_IDENTIFIER is a required env var
+	// (no default), and its value must include the path component
+	// `/mcp` R-7A9U-HJFF pins. Missing, empty, or wrong-path values
+	// fail the process before the listener accepts traffic per the
+	// R-LWCN-ZBXO fail-loudly contract.
+	resID, err := requireEnvFromLookup(lookup, "HAL_RESOURCE_IDENTIFIER")
+	if err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 1
+	}
+	if err := validateHALResourceIdentifier(resID); err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 1
 	}
 	if onPortParsed != nil {
 		onPortParsed(*port)

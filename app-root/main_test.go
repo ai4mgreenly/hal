@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"debug/elf"
 	"encoding/base64"
 	"encoding/hex"
@@ -67,6 +68,57 @@ func contextWithTestStores(ctx context.Context) context.Context {
 		),
 		googleFakeIDP{},
 	)
+}
+
+func runServeForTest(t testing.TB, ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	t.Helper()
+	env := map[string]string{
+		"HAL_RESOURCE_IDENTIFIER": "http://127.0.0.1:3000/mcp",
+	}
+	lookup := func(name string) (string, bool) {
+		if v, ok := os.LookupEnv(name); ok && v != "" {
+			return v, true
+		}
+		v, ok := env[name]
+		return v, ok
+	}
+	dbPath := filepath.Join(t.TempDir(), "hal.db")
+	var opened *sql.DB
+	openDatabase := func(string) (*sql.DB, error) {
+		db, err := openCounterDB(dbPath)
+		opened = db
+		return db, err
+	}
+	code := runServeWithEnvClockAndDatabaseOpener(
+		ctx, args, stdout, stderr, lookup, realAppClock{}, openDatabase)
+	detachTestStoresFromDB(opened)
+	return code
+}
+
+func detachTestStoresFromDB(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	theCounter.mu.Lock()
+	if theCounter.db == db {
+		theCounter.db = nil
+	}
+	theCounter.mu.Unlock()
+	oauthClientStore.mu.Lock()
+	if oauthClientStore.db == db {
+		oauthClientStore.db = nil
+	}
+	oauthClientStore.mu.Unlock()
+	oauthTokenStore.mu.Lock()
+	if oauthTokenStore.db == db {
+		oauthTokenStore.db = nil
+	}
+	oauthTokenStore.mu.Unlock()
+	webSessionStore.mu.Lock()
+	if webSessionStore.db == db {
+		webSessionStore.db = nil
+	}
+	webSessionStore.mu.Unlock()
 }
 
 // R-74NI-T9CI: no subcommand prints a usage summary listing the three
@@ -1224,7 +1276,7 @@ func TestR_UK7D_Z0IZ_mcp_streamable_http_transport(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1314,7 +1366,7 @@ func TestR_XS1U_B7YY_mcp_counter_read_tool(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1424,7 +1476,7 @@ func TestR_YHNQ_CEJJ_mcp_counter_increment_tool(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1551,7 +1603,7 @@ func TestR_ZQS0_HWZ8_mcp_increment_requires_bearer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1674,7 +1726,7 @@ func TestR_0YOE_9NO8_mcp_no_credentials_prompt_signal(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1823,7 +1875,7 @@ func TestR_6UUW_TQP2_AccessTokenGrantsIncrement(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -1960,7 +2012,7 @@ func TestR_GG9B_GS8T_mcp_counter_decrement_tool(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -2134,7 +2186,7 @@ func TestR_FUB4_KWWB_mcp_advertises_exactly_three_tools(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -2260,7 +2312,7 @@ func TestR_Z3LX_89W1_mcp_tool_descriptions_are_model_audience(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -2383,7 +2435,7 @@ func TestR_0CQ7_DSBQ_mcp_counter_read_is_unauthenticated(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -5365,7 +5417,7 @@ func TestR_75VF_7137_serve_three_flags_and_listener(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+			done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 		}()
 
 		var addr net.Addr
@@ -5416,7 +5468,7 @@ func TestR_2I2S_XB7K_get_counter_returns_json(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -5481,7 +5533,7 @@ func TestR_3R73_2TN9_get_counter_requires_no_auth(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -5545,7 +5597,7 @@ func TestR_SE5T_HP2J_read_does_not_require_auth(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -5624,7 +5676,7 @@ func TestR_FA71_BAO6_serve_default_port_is_3000(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, nil, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, nil, &stdout, &stderr)
 	}()
 
 	select {
@@ -5779,7 +5831,7 @@ func TestR_340Z_T6K2_post_counter_increment(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -5865,7 +5917,7 @@ func TestR_H3FE_QFC0_post_counter_decrement(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6118,7 +6170,7 @@ func TestR_53Z2_DNB1_mutation_requires_auth(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6223,7 +6275,7 @@ func TestR_4ED6_CGQG_increment_accepts_bearer_access_token(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6315,7 +6367,7 @@ func TestR_285U_FWW3_access_token_authorizes_all_counter_mutation_surfaces(t *te
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6491,7 +6543,7 @@ func TestR_DH2I_28CK_bearer_resource_binding_byte_for_byte(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6653,7 +6705,7 @@ func TestR_OCH3_8FQ8_mutation_accepts_either_auth_mode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -6829,7 +6881,7 @@ func TestR_EV2D_QTR1_mutation_unauthorized_distinct_error_descriptions(t *testin
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7048,7 +7100,7 @@ func TestR_T2JT_53WF_increment_requires_auth(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7127,7 +7179,7 @@ func TestR_QY5R_PYDH_root_renders_count_as_html(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7382,7 +7434,7 @@ func TestR_ID5L_BSJM_security_response_headers(t *testing.T) {
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+			exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, io.Discard)
 		}()
 		var addr net.Addr
 		select {
@@ -7428,7 +7480,7 @@ func TestR_ID5L_BSJM_security_response_headers(t *testing.T) {
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+			exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, io.Discard)
 		}()
 		var addr net.Addr
 		select {
@@ -7633,7 +7685,7 @@ func TestR_K3PV_GHB3_index_renders_footer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7737,7 +7789,7 @@ func TestR_WHPN_RXSK_base_url_uniform_across_clients(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7835,7 +7887,7 @@ func TestR_MHYT_TIF7_cross_origin_posture(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -7957,7 +8009,7 @@ func TestR_9PNQ_BN2G_login_redirects_to_google(t *testing.T) {
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+			exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, io.Discard)
 		}()
 		var addr net.Addr
 		select {
@@ -8042,7 +8094,7 @@ func TestR_3BKZ_L7R4_login_demands_fresh_google_authentication(t *testing.T) {
 		t.Cleanup(cancel)
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+			exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, io.Discard)
 		}()
 		var addr net.Addr
 		select {
@@ -8112,7 +8164,7 @@ func TestR_FZ10_BE37_logout_redirects_to_root(t *testing.T) {
 		var stderr bytes.Buffer
 		exit := make(chan int, 1)
 		go func() {
-			exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, &stderr)
+			exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, &stderr)
 		}()
 		var addr net.Addr
 		select {
@@ -8175,7 +8227,7 @@ func TestR_7MLK_O6I5_state_changing_browser_actions_reject_get(t *testing.T) {
 	t.Cleanup(cancel)
 	exit := make(chan int, 1)
 	go func() {
-		exit <- runServe(ctx, []string{"--port", "0"}, io.Discard, io.Discard)
+		exit <- runServeForTest(t, ctx, []string{"--port", "0"}, io.Discard, io.Discard)
 	}()
 	var addr net.Addr
 	select {
@@ -8367,7 +8419,7 @@ func TestR_8IPO_FZ7T_documented_endpoints_reject_wrong_methods(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hal.db")
 	var stdout, stderr bytes.Buffer
 	go func() {
-		exit <- runServe(ctx, []string{"--port", "0", "--db", dbPath},
+		exit <- runServeForTest(t, ctx, []string{"--port", "0", "--db", dbPath},
 			&stdout, &stderr)
 	}()
 	var addr net.Addr
@@ -8455,7 +8507,7 @@ func TestR_X0O1_BJ2H_unknown_paths_return_404_without_action(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "hal.db")
 	var stdout, stderr bytes.Buffer
 	go func() {
-		exit <- runServe(ctx, []string{"--port", "0", "--db", dbPath},
+		exit <- runServeForTest(t, ctx, []string{"--port", "0", "--db", dbPath},
 			&stdout, &stderr)
 	}()
 	var addr net.Addr
@@ -9738,7 +9790,7 @@ func TestR_2XEK_GCOI_oauth_authorization_server_metadata(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -9864,7 +9916,7 @@ func TestR_3JCR_C810_dynamic_client_registration(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -10647,7 +10699,7 @@ func TestR_1KML_5J0Q_oauth_endpoints_share_origin(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -10757,7 +10809,7 @@ func TestR_25DN_9PUR_dcr_endpoint_has_no_auth_gate(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -10851,7 +10903,7 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -11173,7 +11225,7 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -11704,7 +11756,7 @@ func TestR_VVRG_W2G2_base_url_is_sufficient_for_mcp_client_onboarding(t *testing
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -13830,7 +13882,7 @@ func TestR_FZC6_H2SB_counter_stream_live_updates(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -13968,7 +14020,7 @@ func TestR_T4FH_IAQQ_service_responsive_with_many_streams(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -14838,7 +14890,7 @@ func TestR_D1IO_90H0_stdout_is_access_log_only(t *testing.T) {
 	var stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -14919,12 +14971,12 @@ func TestR_D1IO_90H0_stdout_is_access_log_only(t *testing.T) {
 // Google authorization URL (R-W3K0-QD0E) and the hosted_domain claim
 // check the callback applies (R-5LQM-O89D).
 //
-// This test is structural: it scans main.go for a requireEnv call
+// This test is structural: it scans main.go for a requireEnvFromLookup call
 // against the literal "GOOGLE_WORKSPACE_DOMAIN", asserts no
-// HAL_-prefixed variant exists, and asserts the value the requireEnv
-// call returns is passed to newGoogleRealIDP (R-W3K0-QD0E) rather
-// than discarded. The requireEnv helper's fail-loudly mechanics are
-// pinned by R-LWCN-ZBXO; in-process consumer wiring of
+// HAL_-prefixed variant exists, and asserts the value the required-env call
+// returns is passed to newGoogleRealIDP (R-W3K0-QD0E) rather than discarded.
+// The requireEnv helper's fail-loudly mechanics are pinned by R-LWCN-ZBXO;
+// in-process consumer wiring of
 // authCfg().WorkspaceDomain to the hosted_domain check is pinned by
 // the R-5LQM-O89D tests, which exercise the override by installing
 // config through this same env var name.
@@ -14938,7 +14990,7 @@ func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 	const wantVar = "GOOGLE_WORKSPACE_DOMAIN"
 	const halVar = "HAL_GOOGLE_WORKSPACE_DOMAIN"
 
-	t.Run("requireEnv_call_in_main_uses_bare_name", func(t *testing.T) {
+	t.Run("requireEnvFromLookup_call_in_main_uses_bare_name", func(t *testing.T) {
 		var found bool
 		var idents []*ast.Ident
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -14947,10 +14999,10 @@ func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 				return true
 			}
 			id, ok := call.Fun.(*ast.Ident)
-			if !ok || id.Name != "requireEnv" || len(call.Args) != 1 {
+			if !ok || id.Name != "requireEnvFromLookup" || len(call.Args) != 2 {
 				return true
 			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
+			lit, ok := call.Args[1].(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
 				return true
 			}
@@ -14970,19 +15022,19 @@ func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 				}
 			}
 			if s == halVar {
-				t.Errorf("main.go calls requireEnv(%q) — R-ANRQ-04PK "+
+				t.Errorf("main.go calls requireEnvFromLookup(..., %q) — R-ANRQ-04PK "+
 					"requires the bare env var %q, not a HAL_-prefixed "+
 					"variant", halVar, wantVar)
 			}
 			return true
 		})
 		if !found {
-			t.Fatalf("main.go has no requireEnv(%q) call — R-ANRQ-04PK "+
+			t.Fatalf("main.go has no requireEnvFromLookup(..., %q) call — R-ANRQ-04PK "+
 				"requires runServe to fail loudly when the workspace "+
 				"domain env var is unset", wantVar)
 		}
 		if len(idents) == 0 {
-			t.Fatalf("requireEnv(%q) result is not bound to a named "+
+			t.Fatalf("requireEnvFromLookup(..., %q) result is not bound to a named "+
 				"variable — R-ANRQ-04PK needs the value to flow to "+
 				"the real Google IDP (R-W3K0-QD0E)", wantVar)
 		}
@@ -15012,7 +15064,7 @@ func TestR_ANRQ_04PK_workspace_domain_required_env(t *testing.T) {
 			return true
 		})
 		if !flows {
-			t.Errorf("requireEnv(%q) result is not passed to "+
+			t.Errorf("requireEnvFromLookup(..., %q) result is not passed to "+
 				"newGoogleRealIDP — R-ANRQ-04PK requires the value to "+
 				"flow to the `hd` auth-URL parameter (R-W3K0-QD0E)",
 				wantVar)
@@ -15079,9 +15131,7 @@ func TestR_NQ3G_K0CQ_startup_banner_lists_env_vars(t *testing.T) {
 	t.Setenv("GOOGLE_CLIENT_ID", "test-cid-nq3g")
 	t.Setenv("GOOGLE_CLIENT_SECRET", "test-csec-nq3g")
 	t.Setenv("GOOGLE_WORKSPACE_DOMAIN", "nq3g.example.org")
-	// HAL_RESOURCE_IDENTIFIER unset — the banner must show the
-	// built-in default value followed by " (default)".
-	os.Unsetenv("HAL_RESOURCE_IDENTIFIER")
+	t.Setenv("HAL_RESOURCE_IDENTIFIER", "http://127.0.0.1:3000/mcp")
 
 	ready := make(chan net.Addr, 1)
 	onListenerReady = func(a net.Addr) { ready <- a }
@@ -15092,7 +15142,7 @@ func TestR_NQ3G_K0CQ_startup_banner_lists_env_vars(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	select {
@@ -15114,7 +15164,7 @@ func TestR_NQ3G_K0CQ_startup_banner_lists_env_vars(t *testing.T) {
 	wants := []string{
 		"GOOGLE_CLIENT_ID=test-cid-nq3g\n",
 		"GOOGLE_WORKSPACE_DOMAIN=nq3g.example.org\n",
-		"HAL_RESOURCE_IDENTIFIER=http://127.0.0.1:3000/mcp (default)\n",
+		"HAL_RESOURCE_IDENTIFIER=http://127.0.0.1:3000/mcp\n",
 	}
 	for _, w := range wants {
 		if !strings.Contains(got, w) {
@@ -16354,7 +16404,7 @@ func TestR_FFOQ_Y4JG_auth_check_runs_before_zero_floor(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -18029,7 +18079,7 @@ func TestR_T6VA_9U84_agents_stream_resource_budget(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+			done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 		}()
 
 		var addr net.Addr
@@ -18874,7 +18924,7 @@ func TestR_KDRI_X863_mcp_oauth_full_round_trip(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19224,7 +19274,7 @@ func TestR_7A9U_HJFF_mcp_path_is_mcp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19325,14 +19375,11 @@ func TestR_7A9U_HJFF_mcp_path_is_mcp(t *testing.T) {
 // is absent or differs from `/mcp` is rejected at startup with a clear
 // error per the fail-loudly contract R-LWCN-ZBXO names.
 //
-// Because the actual fail-loudly gate sits inside runServe behind the
-// !testing.Testing() guard (the same guard that lets the wide existing
-// test surface call runServe without exercising the production
-// requireEnv chain for GOOGLE_*), this test exercises the validation
-// helper validateHALResourceIdentifier directly — the same helper
-// runServe invokes after requireEnv("HAL_RESOURCE_IDENTIFIER"). The
-// helper is the single source of truth for the path-component rule;
-// runServe wires it into the startup path.
+// This test exercises the validation helper validateHALResourceIdentifier
+// directly — the same helper runServe invokes after
+// requireEnvFromLookup(lookup, "HAL_RESOURCE_IDENTIFIER"). The helper is the
+// single source of truth for the path-component rule; runServe wires it into
+// the startup path.
 func TestR_791Y_3ROQ_resource_identifier_required_and_path_mcp(t *testing.T) {
 	t.Run("empty_value_rejected", func(t *testing.T) {
 		err := validateHALResourceIdentifier("")
@@ -19417,9 +19464,9 @@ func TestR_791Y_3ROQ_resource_identifier_required_and_path_mcp(t *testing.T) {
 
 	t.Run("runServe_wires_validator_into_startup", func(t *testing.T) {
 		// The R-LWCN-ZBXO fail-loudly contract requires that runServe
-		// pull HAL_RESOURCE_IDENTIFIER through requireEnv at startup
+		// pull HAL_RESOURCE_IDENTIFIER through the injected env lookup at startup
 		// alongside the GOOGLE_* secrets. Source-level smoke: the
-		// runServe body must reference both `requireEnv(
+		// runServe body must reference both `requireEnvFromLookup(
 		// "HAL_RESOURCE_IDENTIFIER")` and `validateHALResource
 		// Identifier`, so the path-component rule cannot be silently
 		// dropped from the startup path in a future refactor.
@@ -19427,8 +19474,8 @@ func TestR_791Y_3ROQ_resource_identifier_required_and_path_mcp(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read main.go: %v", err)
 		}
-		if !strings.Contains(string(src), `requireEnv("HAL_RESOURCE_IDENTIFIER")`) {
-			t.Errorf("main.go does not call requireEnv(" +
+		if !strings.Contains(string(src), `requireEnvFromLookup(lookup, "HAL_RESOURCE_IDENTIFIER")`) {
+			t.Errorf("main.go does not call requireEnvFromLookup(lookup, " +
 				"\"HAL_RESOURCE_IDENTIFIER\") — the fail-loudly gate " +
 				"is missing from the startup path (R-791Y-3ROQ)")
 		}
@@ -19455,7 +19502,7 @@ func TestR_7BHQ_VB64_www_authenticate_points_at_mcp_metadata(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19595,7 +19642,7 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19774,7 +19821,7 @@ func TestR_75E8_YGGN_canonical_resource_identifier_published_in_metadata(t *test
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19855,7 +19902,7 @@ func TestR_76M5_C87C_byte_equal_resource_match_at_presentation_time(t *testing.T
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -19952,7 +19999,7 @@ func TestR_77U1_PZY1_mcp_oauth_e2e_round_trip(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
@@ -20340,7 +20387,7 @@ func TestR_7E4W_K6HL_revoked_chain_blocks_connected_mcp_mutation(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- runServe(ctx, []string{"--port", "0"}, &stdout, &stderr)
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
 	}()
 
 	var addr net.Addr
