@@ -60,6 +60,24 @@ func agentsBlockRandomEmailToken(t *testing.T) string {
 	return hex.EncodeToString(buf[:])
 }
 
+func agentsBlockChainIDFromLiveView(t *testing.T, ownerEmail, clientID string) string {
+	t.Helper()
+	var chainID string
+	for _, ch := range testOAuthTokenStore.LiveAgentChains(ownerEmail, testOAuthClientStore) {
+		if ch.ClientID != clientID {
+			continue
+		}
+		if chainID != "" {
+			t.Fatalf("multiple live chains for owner %q client %q", ownerEmail, clientID)
+		}
+		chainID = ch.ChainID
+	}
+	if chainID == "" {
+		t.Fatalf("live chain for owner %q client %q missing", ownerEmail, clientID)
+	}
+	return chainID
+}
+
 // R-8KKV-TDWF: the index page presents a banner card with the chrome
 // the design reference pins — lens dot (decorative, aria-hidden), tag
 // "MCP Demo", title "HAL", subtitle row carrying one entry from the
@@ -2806,6 +2824,311 @@ func TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack(t *testing.T) {
 			"(R-3RL1-IUP6): email=%d signOut=%d block=%d firstAgent=%d stack=%q",
 			emailIdx, signOutIdx, blockIdx, firstAgentIdx, authStack)
 	}
+}
+
+// TestR_0OZT_H8LQ_agent_row_three_elements pins the per-row content of
+// the agents block: exactly three visible elements left-to-right —
+// client_name (literal `undefined` for unset), client_id truncated to
+// 8-char bare prefix (no ellipsis), and a Revoke button.
+func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
+	const rowOpen = `<div class="agent-row"`
+
+	rowFor := func(t *testing.T, body, chainID string) string {
+		t.Helper()
+		marker := `data-chain-id="` + chainID + `"`
+		idx := strings.Index(body, marker)
+		if idx < 0 {
+			t.Fatalf("row for chain %s not found (R-0OZT-H8LQ): %q", chainID, body)
+		}
+		// Walk back to row open.
+		start := strings.LastIndex(body[:idx], rowOpen)
+		if start < 0 {
+			t.Fatalf("row open before chain %s missing (R-0OZT-H8LQ)", chainID)
+		}
+		rest := body[start:]
+		end := strings.Index(rest, `</div></form></div>`)
+		if end < 0 {
+			// Fall back to next </div> outside form.
+			end = strings.Index(rest, `</form></div>`)
+			if end < 0 {
+				t.Fatalf("row close missing for chain %s (R-0OZT-H8LQ)", chainID)
+			}
+			return rest[:end+len(`</form></div>`)]
+		}
+		return rest[:end+len(`</div></form></div>`)]
+	}
+
+	t.Run("named_client_id_truncated_and_revoke_button", func(t *testing.T) {
+		email := "named-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		clientID := "abcdef0123456789-tail"
+		testOAuthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Test Agent One"}))
+		if _, err := testOAuthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		body := w.Body.String()
+
+		row := rowFor(t, body, chainID)
+		if !strings.Contains(row, "Test Agent One") {
+			t.Errorf("row missing client_name (R-0OZT-H8LQ): %q", row)
+		}
+		if !strings.Contains(row, "abcdef01") {
+			t.Errorf("row missing 8-char client_id prefix (R-0OZT-H8LQ): %q", row)
+		}
+		// Must NOT show the full client_id past 8 chars or any ellipsis.
+		if strings.Contains(row, "abcdef012") {
+			t.Errorf("row shows client_id past 8 chars (R-0OZT-H8LQ): %q", row)
+		}
+		if strings.Contains(row, "…") || strings.Contains(row, "...") {
+			t.Errorf("row contains ellipsis on client_id prefix (R-0OZT-H8LQ): %q",
+				row)
+		}
+		if !strings.Contains(row, ">Revoke<") {
+			t.Errorf("row missing literal Revoke control (R-0OZT-H8LQ): %q", row)
+		}
+		// Order: name before id-prefix before Revoke.
+		nameIdx := strings.Index(row, "Test Agent One")
+		idIdx := strings.Index(row, "abcdef01")
+		revIdx := strings.Index(row, ">Revoke<")
+		if !(nameIdx < idIdx && idIdx < revIdx) {
+			t.Errorf("row element order wrong (R-0OZT-H8LQ): name=%d id=%d revoke=%d",
+				nameIdx, idIdx, revIdx)
+		}
+	})
+
+	t.Run("unset_client_name_renders_literal_undefined", func(t *testing.T) {
+		email := "unset-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		// Use a clientID with NO entry in oauthClientStore — clientName
+		// resolves to the empty string and must render as `undefined`.
+		clientID := "ffffff9876543210-nameless-" + agentsBlockRandomEmailToken(t)
+		if _, err := testOAuthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		body := w.Body.String()
+
+		row := rowFor(t, body, chainID)
+		if !strings.Contains(row, "undefined") {
+			t.Errorf("unset client_name did not render literal `undefined` "+
+				"(R-0OZT-H8LQ): %q", row)
+		}
+	})
+}
+
+// TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text pins that
+// Dynamic Client Registration metadata shown in the web UI is escaped text,
+// not interpreted as markup or script-capable HTML.
+func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
+	email := "xss-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+	clientID := "xssagent" + agentsBlockRandomEmailToken(t)
+	maliciousName := `<img src=x onerror="alert('owned')">&<script>bad()</script>`
+	testOAuthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: maliciousName}))
+	if _, err := testOAuthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
+		t.Fatalf("issueRefresh: %v", err)
+	}
+	chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
+
+	sess, err := testWebSessionStore.Issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleTestIndex(w, req)
+	body := w.Body.String()
+
+	marker := `data-chain-id="` + chainID + `"`
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatalf("agent row missing for chain %s (R-10ZV-8OFH): %q",
+			chainID, body)
+	}
+	start := strings.LastIndex(body[:idx], `<div class="agent-row"`)
+	if start < 0 {
+		t.Fatalf("agent row open missing (R-10ZV-8OFH)")
+	}
+	rest := body[start:]
+	end := strings.Index(rest, `</form></div>`)
+	if end < 0 {
+		t.Fatalf("agent row close missing (R-10ZV-8OFH): %q", rest)
+	}
+	row := rest[:end+len(`</form></div>`)]
+
+	for _, raw := range []string{"<img", "<script>", "</script>"} {
+		if strings.Contains(row, raw) {
+			t.Fatalf("client_name rendered as raw markup %q in row "+
+				"(R-10ZV-8OFH): %q", raw, row)
+		}
+	}
+	for _, escaped := range []string{
+		"&lt;img src=x onerror=&quot;alert(&#39;owned&#39;)&quot;&gt;",
+		"&amp;",
+		"&lt;script&gt;bad()&lt;/script&gt;",
+	} {
+		if !strings.Contains(row, escaped) {
+			t.Errorf("escaped client_name fragment %q missing "+
+				"(R-10ZV-8OFH): %q", escaped, row)
+		}
+	}
+}
+
+// TestR_VV71_J75U_agent_row_visual_signature pins the visual signature of each
+// agent row: an inert identity label (client_name followed by 8-char client_id
+// prefix in parentheses, no ellipsis) paired with a Revoke pill that carries
+// class="auth-btn" matching the Sign-out pill chrome.
+func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
+	// rowFor extracts the HTML of the agent-row div for a given chainID.
+	rowFor := func(t *testing.T, body, chainID string) string {
+		t.Helper()
+		marker := `data-chain-id="` + chainID + `"`
+		idx := strings.Index(body, marker)
+		if idx < 0 {
+			t.Fatalf("row for chain %s not found (R-VV71-J75U)", chainID)
+		}
+		start := strings.LastIndex(body[:idx], `<div class="agent-row"`)
+		if start < 0 {
+			t.Fatalf("agent-row open before chain %s missing (R-VV71-J75U)", chainID)
+		}
+		rest := body[start:]
+		end := strings.Index(rest, `</form></div>`)
+		if end < 0 {
+			t.Fatalf("agent-row close missing for chain %s (R-VV71-J75U)", chainID)
+		}
+		return rest[:end+len(`</form></div>`)]
+	}
+
+	issueChain := func(t *testing.T, email, clientID, clientName string) string {
+		t.Helper()
+		testOAuthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
+		if _, err := testOAuthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+		return agentsBlockChainIDFromLiveView(t, email, clientID)
+	}
+
+	t.Run("identity_label_is_span_not_link_or_button", func(t *testing.T) {
+		// R-VV71-J75U: the identity label must be inert — not <a>, not <button>.
+		email := "sig-inert-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		clientID := "inert0001" + agentsBlockRandomEmailToken(t)
+		chainID := issueChain(t, email, clientID, "Inert Agent")
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		row := rowFor(t, w.Body.String(), chainID)
+
+		if !strings.Contains(row, `<span class="agent-name">`) {
+			t.Errorf("identity label is not a <span> (R-VV71-J75U): %q", row)
+		}
+		if strings.Contains(row, `class="agent-id"`) {
+			t.Errorf("identity label split client_id into a separate visible element "+
+				"(R-VV71-J75U): %q", row)
+		}
+	})
+
+	t.Run("id8_enclosed_in_parentheses_no_ellipsis", func(t *testing.T) {
+		// R-VV71-J75U: 8-char client_id prefix is wrapped in parentheses; no ellipsis.
+		email := "sig-parens-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		clientID := "parens99abcdef12-tail"
+		chainID := issueChain(t, email, clientID, "Parens Agent")
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		row := rowFor(t, w.Body.String(), chainID)
+
+		if !strings.Contains(row, "(parens99)") {
+			t.Errorf("8-char prefix not in parentheses (R-VV71-J75U): %q", row)
+		}
+		if strings.Contains(row, "parens99a") {
+			t.Errorf("client_id shown beyond 8 chars (R-VV71-J75U): %q", row)
+		}
+		if strings.Contains(row, "…") || strings.Contains(row, "...") {
+			t.Errorf("ellipsis present in row (R-VV71-J75U): %q", row)
+		}
+	})
+
+	t.Run("undefined_label_parenthesised_id8", func(t *testing.T) {
+		// R-VV71-J75U: when client_name is unset, row reads `undefined (id8)`.
+		email := "sig-undef-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		clientID := "undef0001abcdef99-tail"
+		testOAuthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: ""}))
+		if _, err := testOAuthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
+			t.Fatalf("issueRefresh: %v", err)
+		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		row := rowFor(t, w.Body.String(), chainID)
+
+		if !strings.Contains(row, "undefined") {
+			t.Errorf("unset name did not render literal `undefined` (R-VV71-J75U): %q", row)
+		}
+		if !strings.Contains(row, "(undef000)") {
+			t.Errorf("8-char prefix not parenthesised for undefined case (R-VV71-J75U): %q", row)
+		}
+	})
+
+	t.Run("revoke_button_has_auth_btn_class", func(t *testing.T) {
+		// R-VV71-J75U: Revoke pill carries class="auth-btn" for matching pill chrome.
+		email := "sig-pill-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
+		clientID := "pill0001" + agentsBlockRandomEmailToken(t)
+		chainID := issueChain(t, email, clientID, "Pill Agent")
+
+		sess, err := testWebSessionStore.Issue(email)
+		if err != nil {
+			t.Fatalf("webSessionStore.issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+		w := httptest.NewRecorder()
+		handleTestIndex(w, req)
+		row := rowFor(t, w.Body.String(), chainID)
+
+		if !strings.Contains(row, `class="auth-btn"`) {
+			t.Errorf("Revoke button missing class=\"auth-btn\" (R-VV71-J75U): %q", row)
+		}
+		btnIdx := strings.Index(row, `<button class="auth-btn"`)
+		if btnIdx < 0 {
+			t.Errorf("no <button class=\"auth-btn\"> found in row (R-VV71-J75U): %q", row)
+		}
+	})
 }
 
 // TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update pins the
