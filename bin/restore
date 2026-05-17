@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# bin/restore — replace hal's live SQLite state from a backups-bucket
+# snapshot. Symmetric with bin/backup (stop / replace / start).
+#
+#   bin/restore [host] [snapshot]
+#
+#   snapshot (optional):
+#     omitted          -> the newest snapshot (via <node>/latest)
+#     a bare UTC stamp  -> <node>/hal.DB.<stamp>.tar.gz
+#     a full object key -> used as-is (e.g. hal/hal.DB.<stamp>.tar.gz)
+#
+# This is the only script that destroys production state. Safeguards:
+#   * interactive confirmation, ALWAYS — there is no --yes bypass;
+#     restoring prod is always a deliberate human act. The prompt runs
+#     on the WORKSTATION (the box can only be reached over ssh whose
+#     stdin is this script's heredoc, so a remote /dev/tty read cannot
+#     see the operator's keyboard — confirmation must be local).
+#   * a pre-restore snapshot of the CURRENT db is pushed to
+#     <node>/pre-restore/ first (kept: last 10, separate from the
+#     rolling-30 retention) so a wrong-snapshot mistake is recoverable.
+#
+# Three phases: (A) resolve+validate on the box, read-only;
+# (B) confirm locally; (C) execute the destructive restore on the box.
+set -euo pipefail
+
+HOST="${1:-hal.prod.metaspot.org}"
+REQ="${2:-}"
+SSH_USER="ec2-user"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_ai4mgreenly}"
+SSH=(ssh -i "$SSH_KEY" "$SSH_USER@$HOST")
+
+# ---- Phase A: resolve the target key (read-only; nothing changes) ----
+RESOLVED="$("${SSH[@]}" sudo bash -s -- "$REQ" <<'REMOTE'
+set -euo pipefail
+REQ="${1:-}"
+ENV_FILE=/etc/metaspot/env
+[ -r "$ENV_FILE" ] || { echo "restore: $ENV_FILE missing/unreadable" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+: "${METASPOT_BACKUP_BUCKET:?restore: METASPOT_BACKUP_BUCKET unset}"
+: "${METASPOT_NODE:?restore: METASPOT_NODE unset}"
+: "${METASPOT_AWS_REGION:?restore: METASPOT_AWS_REGION unset}"
+B="$METASPOT_BACKUP_BUCKET"; N="$METASPOT_NODE"; R="$METASPOT_AWS_REGION"
+
+if [ -z "$REQ" ]; then
+  KEY="$(aws s3 cp --region "$R" "s3://$B/$N/latest" - 2>/dev/null | tr -d '[:space:]')" || true
+  [ -n "$KEY" ] || { echo "restore: no $N/latest pointer; pass an explicit snapshot" >&2; exit 1; }
+elif [[ "$REQ" == */* ]]; then
+  KEY="$REQ"
+else
+  KEY="$N/hal.DB.$REQ.tar.gz"
+fi
+aws s3api head-object --region "$R" --bucket "$B" --key "$KEY" >/dev/null 2>&1 \
+  || { echo "restore: snapshot s3://$B/$KEY not found" >&2; exit 1; }
+
+# Emit the facts the workstation needs for the confirmation prompt.
+echo "BUCKET=$B"
+echo "KEY=$KEY"
+echo "HOSTNAME=$(hostname)"
+REMOTE
+)"
+
+eval "$(printf '%s\n' "$RESOLVED" | grep -E '^(BUCKET|KEY|HOSTNAME)=')"
+
+# ---- Phase B: confirm on the workstation (operator's real tty) ----
+echo
+echo "  RESTORE — this overwrites live production state."
+echo "    source : s3://$BUCKET/$KEY"
+echo "    target : $HOSTNAME:/opt/hal/data/hal.DB  (via $HOST)"
+echo "    effect : hal stopped, DB replaced, hal restarted."
+echo "    safety : a pre-restore snapshot of the current DB is taken first."
+echo
+printf '  Type "yes" to proceed: '
+read -r ANS
+if [ "$ANS" != "yes" ]; then
+  echo "restore: aborted (no changes made)."
+  exit 1
+fi
+
+# ---- Phase C: execute the destructive restore on the box ----
+"${SSH[@]}" sudo bash -s -- "$KEY" <<'REMOTE'
+set -euo pipefail
+KEY="$1"
+ENV_FILE=/etc/metaspot/env
+DATA_DIR=/opt/hal/data
+DB_BASENAME=hal.DB
+PRE_KEEP=10
+
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+BUCKET="$METASPOT_BACKUP_BUCKET"
+NODE="$METASPOT_NODE"
+REGION="$METASPOT_AWS_REGION"
+
+WORK="$(mktemp -d)"
+HAL_WAS_STOPPED=0
+cleanup() {
+  if [ "$HAL_WAS_STOPPED" = 1 ]; then
+    systemctl is-active --quiet hal || systemctl start hal || true
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+echo "==> stopping hal"
+systemctl stop hal
+HAL_WAS_STOPPED=1
+
+# Pre-restore safety snapshot of the CURRENT db (if any), then prune
+# pre-restore/ to the last $PRE_KEEP.
+if [ -e "$DATA_DIR/$DB_BASENAME" ]; then
+  PKEY="$NODE/pre-restore/hal.DB.$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  tar -czf "$WORK/pre.tar.gz" -C "$DATA_DIR" \
+    $(cd "$DATA_DIR" && ls "$DB_BASENAME"*)
+  echo "==> pre-restore snapshot -> s3://$BUCKET/$PKEY"
+  aws s3 cp --region "$REGION" "$WORK/pre.tar.gz" "s3://$BUCKET/$PKEY"
+  mapfile -t PKEYS < <(
+    aws s3api list-objects-v2 --region "$REGION" \
+      --bucket "$BUCKET" --prefix "$NODE/pre-restore/hal.DB." \
+      --query 'sort_by(Contents,&Key)[].Key' --output text 2>/dev/null \
+      | tr '\t' '\n' | sed '/^$/d' | grep -v '^None$' || true
+  )
+  if [ "${#PKEYS[@]}" -gt "$PRE_KEEP" ]; then
+    for ((i = 0; i < ${#PKEYS[@]} - PRE_KEEP; i++)); do
+      aws s3 rm --region "$REGION" "s3://$BUCKET/${PKEYS[$i]}"
+    done
+  fi
+else
+  echo "==> no current DB on box; skipping pre-restore snapshot"
+fi
+
+echo "==> downloading s3://$BUCKET/$KEY"
+aws s3 cp --region "$REGION" "s3://$BUCKET/$KEY" "$WORK/restore.tar.gz"
+rm -f "$DATA_DIR/$DB_BASENAME" "$DATA_DIR/$DB_BASENAME"-*
+tar -xzf "$WORK/restore.tar.gz" -C "$DATA_DIR"
+chown -R hal:hal "$DATA_DIR"
+chmod 0640 "$DATA_DIR/$DB_BASENAME"
+
+echo "==> starting hal"
+systemctl start hal
+HAL_WAS_STOPPED=0
+sleep 2
+systemctl status hal --no-pager --lines=20
+echo "restore complete: s3://$BUCKET/$KEY -> $DATA_DIR/$DB_BASENAME"
+REMOTE

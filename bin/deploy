@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# bin/deploy — build hal off-box, ship ONLY the binary, restart.
+#
+#   bin/deploy [host]
+#
+# hal is a self-contained Go binary: design.css is //go:embed-ed and
+# HTML is generated in code, so nothing else ships. The box never
+# compiles anything.
+#
+# This script deliberately has no code path that names a *.DB file.
+# Production state (/opt/hal/data/hal.DB) is created by the app itself
+# on first start and owned by bin/backup / bin/restore — deploy never
+# touches it.
+set -euo pipefail
+
+HOST="${1:-hal.prod.metaspot.org}"
+SSH_USER="ec2-user"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_ai4mgreenly}"
+APP_DIR="/opt/hal"
+BIN_NAME="hal"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+APP_ROOT="$REPO_ROOT/app-root"
+
+# 1. Build the prod artifact (the Makefile pins CGO_ENABLED=0
+#    GOOS=linux GOARCH=amd64 -> a fully static linux/amd64 binary).
+echo "==> building $BIN_NAME (linux/amd64, static) in app-root"
+make -C "$APP_ROOT" build
+
+# 2. Ship the binary only. rsync's temp-rename makes the swap atomic
+#    from the kernel's POV; --rsync-path lets the unprivileged ssh
+#    user write into root-owned /opt/hal.
+echo "==> pushing binary to $HOST:$APP_DIR/$BIN_NAME"
+rsync -av \
+  -e "ssh -i $SSH_KEY" \
+  --rsync-path="sudo rsync" \
+  "$APP_ROOT/$BIN_NAME" "$SSH_USER@$HOST:$APP_DIR/$BIN_NAME"
+
+# 3. Fix ownership, ensure executable, restart, show status.
+echo "==> restarting hal"
+ssh -i "$SSH_KEY" "$SSH_USER@$HOST" sudo bash -s <<'REMOTE'
+set -euo pipefail
+chown hal:hal /opt/hal/hal
+chmod 0755 /opt/hal/hal
+systemctl restart hal
+sleep 2
+systemctl status hal --no-pager --lines=20
+REMOTE

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# bin/backup — snapshot hal's SQLite state to the shared backups bucket.
+#
+#   bin/backup [host]
+#
+# Consistency strategy: stop / copy / start. hal is low-traffic; a
+# few-seconds restart eliminates the entire torn-snapshot / WAL class
+# rather than reasoning about it. The DB plus any -wal/-shm sidecar are
+# captured together (tar) so the snapshot is correct whether or not the
+# app closed the DB cleanly on SIGTERM — SQLite recovers from the pair.
+#
+# Layout under the node's own prefix (the only prefix the instance
+# role's backups-rw grant permits):
+#   <node>/hal.DB.<UTC>.tar.gz   one immutable snapshot per run
+#   <node>/latest                pointer: the newest snapshot's key
+# Retention: keep the most recent 30 snapshots (count-based — immune to
+# the "long gap then one backup wipes history" footgun). The `latest`
+# pointer and the pre-restore/ sub-prefix are never pruned here.
+set -euo pipefail
+
+HOST="${1:-hal.prod.metaspot.org}"
+SSH_USER="ec2-user"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_ai4mgreenly}"
+
+ssh -i "$SSH_KEY" "$SSH_USER@$HOST" sudo bash -s <<'REMOTE'
+set -euo pipefail
+
+ENV_FILE=/etc/metaspot/env
+DATA_DIR=/opt/hal/data
+DB_BASENAME=hal.DB
+KEEP=30
+
+[ -r "$ENV_FILE" ] || { echo "backup: $ENV_FILE missing/unreadable" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+: "${METASPOT_BACKUP_BUCKET:?backup: METASPOT_BACKUP_BUCKET unset in $ENV_FILE}"
+: "${METASPOT_NODE:?backup: METASPOT_NODE unset in $ENV_FILE}"
+: "${METASPOT_AWS_REGION:?backup: METASPOT_AWS_REGION unset in $ENV_FILE}"
+
+BUCKET="$METASPOT_BACKUP_BUCKET"
+NODE="$METASPOT_NODE"
+REGION="$METASPOT_AWS_REGION"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+KEY="$NODE/hal.DB.$STAMP.tar.gz"
+
+if [ ! -e "$DATA_DIR/$DB_BASENAME" ]; then
+  echo "backup: $DATA_DIR/$DB_BASENAME does not exist yet — nothing to back up." >&2
+  echo "backup: (has hal been deployed and started at least once?)" >&2
+  exit 1
+fi
+
+WORK="$(mktemp -d)"
+HAL_WAS_STOPPED=0
+cleanup() {
+  # Never leave the service down because backup failed.
+  if [ "$HAL_WAS_STOPPED" = 1 ]; then
+    systemctl is-active --quiet hal || systemctl start hal || true
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+# 1. Stop, copy the DB + any sidecars, start again ASAP. Compression
+#    and upload happen AFTER the service is back up.
+echo "==> stopping hal for a consistent copy"
+systemctl stop hal
+HAL_WAS_STOPPED=1
+cp -p "$DATA_DIR/$DB_BASENAME"* "$WORK/"
+echo "==> restarting hal"
+systemctl start hal
+HAL_WAS_STOPPED=0
+
+# 2. Archive + compress the snapshot off the critical path.
+tar -czf "$WORK/snapshot.tar.gz" -C "$WORK" \
+  $(cd "$WORK" && ls "$DB_BASENAME"*)
+
+# 3. Upload the immutable snapshot, then bump the latest pointer.
+echo "==> uploading s3://$BUCKET/$KEY"
+aws s3 cp --region "$REGION" "$WORK/snapshot.tar.gz" "s3://$BUCKET/$KEY"
+printf '%s\n' "$KEY" > "$WORK/latest"
+aws s3 cp --region "$REGION" "$WORK/latest" "s3://$BUCKET/$NODE/latest"
+
+# 4. Retention: keep the most recent $KEEP snapshots. Scoped to the
+#    rolling snapshot name pattern only — the prefix excludes
+#    <node>/latest and the <node>/pre-restore/ sub-prefix.
+mapfile -t KEYS < <(
+  aws s3api list-objects-v2 --region "$REGION" \
+    --bucket "$BUCKET" --prefix "$NODE/hal.DB." \
+    --query 'sort_by(Contents,&Key)[].Key' --output text 2>/dev/null \
+    | tr '\t' '\n' | sed '/^$/d' | grep -v '^None$' || true
+)
+COUNT="${#KEYS[@]}"
+if [ "$COUNT" -gt "$KEEP" ]; then
+  PRUNE=$((COUNT - KEEP))
+  echo "==> pruning $PRUNE old snapshot(s) (keeping newest $KEEP of $COUNT)"
+  for ((i = 0; i < PRUNE; i++)); do
+    aws s3 rm --region "$REGION" "s3://$BUCKET/${KEYS[$i]}"
+  done
+fi
+
+echo "backup complete: s3://$BUCKET/$KEY ($COUNT snapshot(s) retained, cap $KEEP)"
+REMOTE

@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# bin/setup — one-time, idempotent prep of the hal prod box.
+#
+# Re-running is safe: it only re-applies changed config. Run from a
+# workstation; it ssh-es in and does the privileged work as root.
+#
+#   bin/setup [host]
+#
+# Standard per metaspot/AGENTS.md "Service layer": app user + dirs, the
+# launcher, the systemd unit, the nginx vhost, Let's Encrypt issuance +
+# auto-renew. It `systemctl enable`s but DOES NOT start hal — code lands
+# via bin/deploy.
+#
+# /etc/metaspot/env is a *read-only precondition* here: Terraform's
+# user_data owns it (first-boot baseline; reconciled out-of-band, never
+# by this script). setup verifies it and fails loudly if it is missing
+# or incomplete.
+set -euo pipefail
+
+HOST="${1:-hal.prod.metaspot.org}"
+SSH_USER="ec2-user"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_ai4mgreenly}"
+
+ssh -t -i "$SSH_KEY" "$SSH_USER@$HOST" sudo bash -s <<'REMOTE'
+set -euo pipefail
+
+APP=hal
+APP_USER=hal
+APP_DIR=/opt/hal
+DATA_DIR=/opt/hal/data
+DB_PATH=/opt/hal/data/hal.DB
+ENV_FILE=/etc/metaspot/env
+SSM_PARAM=/metaspot/prod/app-config
+LE_EMAIL=mgreenly@gmail.com
+
+# 0. Precondition: /etc/metaspot/env exists and carries the identity
+#    keys the app tooling depends on. We never write or repair it —
+#    Terraform user_data / out-of-band provisioning owns it.
+if [ ! -r "$ENV_FILE" ]; then
+  echo "setup: $ENV_FILE missing or unreadable." >&2
+  echo "setup: it is provisioned by Terraform user_data / out-of-band," >&2
+  echo "setup: not by this script. Aborting." >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+missing=()
+for k in METASPOT_ENV METASPOT_NODE METASPOT_FQDN METASPOT_AWS_REGION \
+         METASPOT_BACKUP_BUCKET; do
+  [ -n "${!k:-}" ] || missing+=("$k")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "setup: $ENV_FILE is incomplete; missing: ${missing[*]}" >&2
+  echo "setup: it is owned by Terraform/out-of-band, not this script. Aborting." >&2
+  exit 1
+fi
+if [ "$METASPOT_NODE" != "$APP" ]; then
+  echo "setup: refusing to run — $ENV_FILE says METASPOT_NODE=$METASPOT_NODE," >&2
+  echo "setup: but this is the '$APP' setup script. Wrong box? Aborting." >&2
+  exit 1
+fi
+
+DOMAIN="$METASPOT_FQDN"
+ALT_DOMAINS=()
+[ -n "${METASPOT_ALIAS_FQDN:-}" ] && ALT_DOMAINS=("$METASPOT_ALIAS_FQDN")
+ALL_NAMES=("$DOMAIN" "${ALT_DOMAINS[@]}")
+NGINX_SERVER_NAMES="${ALL_NAMES[*]}"
+CERTBOT_D_FLAGS=()
+for n in "${ALL_NAMES[@]}"; do CERTBOT_D_FLAGS+=(-d "$n"); done
+
+# 1. Packages. dnf is idempotent. hal is a self-contained Go binary —
+#    no nodejs/npm/claude (that was ralph-scoops-specific).
+dnf install -y nginx certbot python3-certbot-nginx jq
+
+# AL2023 ships AWS CLI v2 preinstalled. Only install if truly absent;
+# fail loudly if we still cannot find it (the launcher needs it).
+if ! command -v aws >/dev/null 2>&1; then
+  dnf install -y awscli-2 || dnf install -y aws-cli || true
+fi
+if ! command -v aws >/dev/null 2>&1; then
+  echo "setup: aws CLI not present and could not be installed. Aborting." >&2
+  exit 1
+fi
+
+# 2. App user: system, no login shell, home is the app dir, never shared.
+id "$APP_USER" >/dev/null 2>&1 || \
+  useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
+
+# 3. App + data dirs, owned by the app user. Data is segregated from the
+#    deployed artifact so deploy/backup/restore never conflate them.
+install -d -o "$APP_USER" -g "$APP_USER" -m 0755 "$APP_DIR"
+install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$DATA_DIR"
+
+# 4. Launcher. Runs as the app user (via the unit's User=). On EVERY
+#    start it pulls the shared app-config blob via the instance role,
+#    jq's out this node's own key, validates it (fail-fast — no live
+#    Google credential probe is feasible for an OAuth client), checks
+#    Google IdP reachability, sets the non-secret resource identifier,
+#    then execs the binary. The secret lives only in the launched
+#    process env — never on disk, never an EnvironmentFile. Rotation is
+#    "update the blob (bin/secrets), systemctl restart".
+cat > /usr/local/bin/hal-launch <<LAUNCH
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=$ENV_FILE
+SSM_PARAM=$SSM_PARAM
+
+# Identity/topology (also injected via the unit's EnvironmentFile;
+# sourced here too so the launcher is self-contained).
+# shellcheck disable=SC1090
+. "\$ENV_FILE"
+
+blob=\$(aws ssm get-parameter --region "\$METASPOT_AWS_REGION" \\
+  --name "\$SSM_PARAM" --with-decryption \\
+  --query Parameter.Value --output text)
+
+# This node's own object out of the shared blob, keyed by node name —
+# nothing hardcoded.
+node_obj=\$(printf '%s' "\$blob" | jq -e -c --arg n "\$METASPOT_NODE" \\
+  '.[\$n] // empty') || {
+  echo "hal-launch: \$SSM_PARAM has no \"\$METASPOT_NODE\" key (run bin/secrets)" >&2
+  exit 1
+}
+
+# Export every KEY=value the object carries (generic — the launcher
+# does not enumerate secret names).
+while IFS=\$'\t' read -r k v; do
+  [ -n "\$k" ] || continue
+  export "\$k=\$v"
+done < <(printf '%s' "\$node_obj" | jq -r 'to_entries[] | [.key, .value] | @tsv')
+
+# Fail-fast presence + light shape check on the keys hal must have.
+: "\${GOOGLE_CLIENT_ID:?hal-launch: GOOGLE_CLIENT_ID missing/empty in app-config (run bin/secrets)}"
+: "\${GOOGLE_CLIENT_SECRET:?hal-launch: GOOGLE_CLIENT_SECRET missing/empty in app-config (run bin/secrets)}"
+: "\${GOOGLE_WORKSPACE_DOMAIN:?hal-launch: GOOGLE_WORKSPACE_DOMAIN missing/empty in app-config (run bin/secrets)}"
+case "\$GOOGLE_CLIENT_ID" in
+  *.apps.googleusercontent.com) ;;
+  *) echo "hal-launch: GOOGLE_CLIENT_ID does not look like a Google OAuth client id" >&2; exit 1 ;;
+esac
+case "\$GOOGLE_WORKSPACE_DOMAIN" in
+  *.*) ;;
+  *) echo "hal-launch: GOOGLE_WORKSPACE_DOMAIN does not look like a domain" >&2; exit 1 ;;
+esac
+
+# Reachability of the Google IdP (catches no-egress / broken DNS early;
+# does NOT validate the credentials — that is not possible for an OAuth
+# client without a real user authorization).
+if ! curl -fsS --max-time 10 \\
+    https://accounts.google.com/.well-known/openid-configuration >/dev/null; then
+  echo "hal-launch: cannot reach Google OIDC discovery endpoint; bailing" >&2
+  exit 1
+fi
+
+# Non-secret operator knob: the external URL clients target. Derived
+# from the canonical FQDN so the launcher stays node-agnostic.
+export HAL_RESOURCE_IDENTIFIER="https://\${METASPOT_FQDN}/mcp"
+
+exec $APP_DIR/$APP serve --ip 127.0.0.1 --port 3000 --db $DB_PATH
+LAUNCH
+chmod 0755 /usr/local/bin/hal-launch
+
+# 5. systemd unit. EnvironmentFile has NO leading '-': a missing
+#    identity file must fail the unit, not let it run misidentified.
+#    Logs go to stdout/stderr -> journald; no app-managed log files.
+cat > /etc/systemd/system/hal.service <<UNIT
+[Unit]
+Description=hal — MCP service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=/usr/local/bin/hal-launch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+
+# 6. nginx vhost. HTTP only here; certbot's --nginx plugin owns the
+#    HTTPS server block + the 80->443 redirect on first issuance.
+#    Upstream is the app's loopback-only listener (127.0.0.1:3000).
+cat > /etc/nginx/conf.d/hal.conf <<NGINX
+server {
+    listen 80;
+    server_name $NGINX_SERVER_NAMES;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+
+# AL2023 nginx ships a default `server { listen 80 default_server; }`
+# in nginx.conf. Our vhost wins for our names by server_name match;
+# leave the default alone.
+nginx -t
+systemctl enable --now nginx
+systemctl reload nginx
+
+# 7. Let's Encrypt. First run issues a cert covering every name and
+#    rewrites the vhost for HTTPS + redirect. Re-runs: if the cert
+#    already covers every requested name certbot re-attaches it without
+#    contacting LE (rate-limit safe); --expand picks up a newly added
+#    SAN.
+if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
+  certbot --nginx "${CERTBOT_D_FLAGS[@]}" --non-interactive --agree-tos \
+    -m "$LE_EMAIL" --redirect
+else
+  certbot --nginx "${CERTBOT_D_FLAGS[@]}" --non-interactive --agree-tos \
+    -m "$LE_EMAIL" --redirect --expand --cert-name "$DOMAIN"
+fi
+systemctl reload nginx
+systemctl enable --now certbot-renew.timer 2>/dev/null || \
+  systemctl enable --now certbot.timer
+
+# 8. Enable but do NOT start hal — the binary arrives via bin/deploy.
+systemctl enable hal
+REMOTE
+
+echo
+echo "setup complete on $HOST. next: bin/secrets (seed app-config), then bin/deploy"
