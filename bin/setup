@@ -45,8 +45,8 @@ fi
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 missing=()
-for k in METASPOT_ENV METASPOT_NODE METASPOT_FQDN METASPOT_AWS_REGION \
-         METASPOT_BACKUP_BUCKET; do
+for k in METASPOT_ENV METASPOT_NODE METASPOT_FQDN METASPOT_ALIAS_FQDN \
+         METASPOT_AWS_REGION METASPOT_BACKUP_BUCKET; do
   [ -n "${!k:-}" ] || missing+=("$k")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -152,9 +152,13 @@ if ! curl -fsS --max-time 10 \\
   exit 1
 fi
 
-# Non-secret operator knob: the external URL clients target. Derived
-# from the canonical FQDN so the launcher stays node-agnostic.
-export HAL_RESOURCE_IDENTIFIER="https://\${METASPOT_FQDN}/mcp"
+# Non-secret operator knob: the external URL clients target. MUST equal
+# the protected-resource URL the external OAuth/SDK side is configured
+# with — that is hal.ai.metaspot.org (the alias), NOT the canonical
+# prod FQDN. Derived from METASPOT_ALIAS_FQDN so the launcher stays
+# node-agnostic. (Reverses the earlier Q3 choice: the Google/SDK
+# config is the binding constraint, not the canonical zone record.)
+export HAL_RESOURCE_IDENTIFIER="https://\${METASPOT_ALIAS_FQDN}/mcp"
 
 exec $APP_DIR/$APP serve --ip 127.0.0.1 --port 3000 --db $DB_PATH
 LAUNCH
