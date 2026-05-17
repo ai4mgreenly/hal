@@ -48,7 +48,17 @@ func (s Surface) Handler() http.Handler {
 	server := s.NewServer()
 	return s.PromptSignal(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{JSONResponse: true},
+		&mcp.StreamableHTTPOptions{
+			JSONResponse: true,
+			// R-QGEN-MURV: the production posture places a TLS-terminating
+			// proxy in front of this service; requests arrive at the loopback
+			// listener with a public Host header (e.g. hal.ai.metaspot.org).
+			// The SDK's DNS-rebinding protection would reject those requests
+			// with 403 Forbidden, defeating any client that completed the
+			// OAuth flow against the public host. Trust boundary is the
+			// bearer-token gate in PromptSignal, not the Host header.
+			DisableLocalhostProtection: true,
+		},
 	))
 }
 

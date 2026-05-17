@@ -104,3 +104,30 @@ can read and increment the counter as MCP tools.
   only text such as "bearer token resource binding does not match";
   the counter is not read for mutation, validated for mutation, or
   modified after bearer rejection.
+- R-QGEN-MURV: a request to the MCP transport endpoint (R-UK7D-Z0IZ
+  / R-7A9U-HJFF) that carries a valid bearer access token issued by
+  this service is accepted and dispatched to the requested tool when
+  it reaches the service through the production TLS-terminating proxy
+  (R-PVA6-Q6OB) under the service's public host — the same
+  `https://hal.ai.metaspot.org/mcp` URL a client configured per
+  R-VVRG-W2G2 uses. The transport must not refuse such a request on
+  the basis of how it reached the process. In production the
+  application speaks plain HTTP on a loopback address while the
+  externally-presented host is the public FQDN (R-PVA6-Q6OB); the
+  transport must treat that proxied shape as the normal production
+  topology, not as an attack to be blocked. The trust boundary the
+  spec relies on at the transport is the bearer-token and
+  resource-binding check R-51PZ-MEQR and R-75E8-YGGN already pin —
+  not the listener's bind address, nor the relationship between that
+  address and the request's `Host` header. The observable failure
+  this requirement fences: a client configured with only the
+  production base URL (R-VVRG-W2G2) completes the OAuth flow, the
+  token endpoint issues a token, and the client's immediate
+  authenticated reconnect to `/mcp` is rejected by the transport
+  before any tool handler runs — solely because the request arrived
+  under the public host through the proxy rather than directly on
+  the loopback listener — so the client reports that the server
+  rejected freshly-issued credentials, while the identical client
+  and flow succeed against `http://localhost:3000/mcp`. Re-running
+  the OAuth flow does not change the outcome, because the rejection
+  does not depend on the credentials presented.

@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -795,6 +797,142 @@ func TestR_T5ND_W2HF_dead_stream_released_within_5s(t *testing.T) {
 	t.Fatalf("subscriber not released within 5s of client going silent; "+
 		"count=%d, want %d (R-T5ND-W2HF)",
 		counterBcast.SubscriberCount(), baseline)
+}
+
+// R-QHMK-0MIK: the live-update stream works through the production proxy.
+// The response must carry X-Accel-Buffering: no so nginx does not buffer the
+// SSE body. Events must arrive incrementally (not withheld until the
+// connection closes), and the heartbeat must keep the channel alive through
+// proxy idle-cap enforcement. This test uses httputil.ReverseProxy as the
+// simulated proxy intermediary and verifies all three observable properties
+// against the real StreamHTTP handler.
+func TestR_QHMK_0MIK_stream_works_through_production_proxy(t *testing.T) {
+	c := New()
+
+	// Backend: real StreamHTTP with a short heartbeat for test speed.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		StreamHTTP(c, time.Now, newRealTicker, 150*time.Millisecond, 5*time.Second, w, r)
+	}))
+	defer backend.Close()
+
+	// Proxy layer: simulates the production nginx reverse proxy.
+	backendURL, _ := url.Parse(backend.URL)
+	rp := httputil.NewSingleHostReverseProxy(backendURL)
+	proxyServer := httptest.NewServer(rp)
+	defer proxyServer.Close()
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+		proxyServer.URL+"/counter/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET via proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		buf, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%q", resp.StatusCode, buf)
+	}
+
+	// X-Accel-Buffering: no disables nginx response buffering for this
+	// response; without it the proxy accumulates SSE events and the browser
+	// sees nothing until the connection closes (R-QHMK-0MIK).
+	if got := resp.Header.Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want \"no\" (R-QHMK-0MIK)", got)
+	}
+
+	type proxyEvent struct {
+		value uint64
+		isHB  bool
+	}
+	events := make(chan proxyEvent, 8)
+	readErr := make(chan error, 1)
+	go func() {
+		sc := bufio.NewReader(resp.Body)
+		for {
+			line, err := sc.ReadString('\n')
+			if err != nil {
+				readErr <- err
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(line, ":") {
+				events <- proxyEvent{isHB: true}
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			var ev struct {
+				Value uint64 `json:"value"`
+			}
+			if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+				readErr <- err
+				return
+			}
+			events <- proxyEvent{value: ev.Value}
+		}
+	}()
+
+	// 1. Snapshot arrives through the proxy before any mutation.
+	baseValue := c.Read()
+	select {
+	case ev := <-events:
+		if ev.isHB {
+			t.Fatal("got heartbeat before snapshot data event (R-QHMK-0MIK)")
+		}
+		if ev.value != baseValue {
+			t.Fatalf("snapshot.value = %d, want %d (R-QHMK-0MIK)", ev.value, baseValue)
+		}
+	case err := <-readErr:
+		t.Fatalf("read snapshot through proxy: %v (R-QHMK-0MIK)", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("no snapshot within 2s through proxy — body buffered? (R-QHMK-0MIK)")
+	}
+
+	// 2. Post-mutation event arrives incrementally (under 1s) through the proxy.
+	wantNext := c.Increment()
+	start := time.Now()
+	deadline := time.After(1500 * time.Millisecond)
+	gotMutation := false
+	for !gotMutation {
+		select {
+		case ev := <-events:
+			if ev.isHB {
+				continue
+			}
+			if ev.value != wantNext {
+				t.Fatalf("post-mutation event.value = %d, want %d (R-QHMK-0MIK)",
+					ev.value, wantNext)
+			}
+			if elapsed := time.Since(start); elapsed >= 1000*time.Millisecond {
+				t.Fatalf("post-mutation event took %v through proxy, want < 1s "+
+					"(R-QHMK-0MIK: event withheld by proxy buffering)", elapsed)
+			}
+			gotMutation = true
+		case err := <-readErr:
+			t.Fatalf("read mutation event through proxy: %v (R-QHMK-0MIK)", err)
+		case <-deadline:
+			t.Fatal("no post-mutation event within 1500ms through proxy (R-QHMK-0MIK)")
+		}
+	}
+
+	// 3. Heartbeat arrives while the connection is idle — prevents proxy idle-cap.
+	// Backend is configured with 150ms heartbeat; allow generous margin.
+	select {
+	case <-events:
+		// Any event arriving while idle confirms incremental delivery through proxy.
+	case err := <-readErr:
+		t.Fatalf("read through proxy after mutation: %v (R-QHMK-0MIK)", err)
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("no heartbeat within 700ms of idle — idle-cap not prevented (R-QHMK-0MIK)")
+	}
 }
 
 type realTicker struct {

@@ -179,6 +179,7 @@ func StreamHTTP(
 	w.Header().Set("Content-Type", "text/event-"+"stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // R-QHMK-0MIK: disables nginx proxy response buffering
 	w.WriteHeader(http.StatusOK)
 
 	rc := http.NewResponseController(w)

@@ -650,6 +650,47 @@ deliberately differs from the reference.
   or session-specific data. On update receipt, the page updates the
   rendered count in place and runs the visual transition R-EJAP-XUSB
   describes, modulo reduced-motion suppression per R-G0K2-UUJ0.
+- R-QHMK-0MIK: the live-update guarantee R-FZC6-H2SB makes holds
+  when the service is reached through the production TLS-terminating
+  proxy (R-PVA6-Q6OB), not only when a browser connects to the
+  service's listener directly. "It works against a directly-connected
+  listener" is not evidence the contract holds in production: the
+  production posture R-PVA6-Q6OB makes a front proxy mandatory, and a
+  front proxy that buffers a response body or caps an otherwise-idle
+  connection turns a working stream into one that delivers nothing
+  until it closes or silently stops mid-session. The acceptance
+  criteria are:
+
+  - A counter change produced after a browser's live-update stream
+    is established reaches that browser within the cadence
+    R-FZC6-H2SB pins (strictly under one second) with the connection
+    path traversing the production proxy topology — that is, the
+    event is delivered incrementally while the connection stays
+    open, not withheld until the connection closes.
+  - The snapshot-on-connect property R-FZC6-H2SB pins is observable
+    through the production proxy: a browser that connects, including
+    one that auto-reconnected after a blip, sees the server's
+    current value without waiting for the next mutation.
+  - A normally-open page session does not have its live-update
+    channel silently severed by a fixed duration cap shorter than an
+    ordinary viewing session such that updates simply stop arriving
+    with no event the browser-side client reacts to. If the channel
+    is broken, the auto-reconnect and snapshot-on-connect path
+    R-FZC6-H2SB pins restores the current value within its 5-second
+    post-disruption bound.
+
+  The observable failure this requirement fences: the live-update
+  behavior R-FZC6-H2SB pins is demonstrable against a
+  directly-connected listener but, in the deployed environment
+  behind the proxy, the page never updates until the visitor reloads
+  (the streamed body was buffered before any byte reached the
+  browser) or the page stops updating after a fixed interval while
+  it is still open and its JavaScript still running (an idle or read
+  cap on the proxied connection) — so R-FZC6-H2SB's "without the
+  visitor having to reload" property silently does not hold in
+  production. The same concern applies to every long-lived streamed
+  response the service serves under R-FZC6-H2SB through the
+  production topology, not to one stream path in isolation.
 - R-T4FH-IAQQ: the service remains responsive to unrelated requests
   indefinitely while live-update connections (R-FZC6-H2SB) are open.
   Concretely: with one or more browsers holding open live-update

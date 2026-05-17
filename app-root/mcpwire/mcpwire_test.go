@@ -1616,3 +1616,131 @@ func TestR_51PZ_MEQR_mcp_invalid_bearer_rejected_at_http_boundary(t *testing.T) 
 		})
 	}
 }
+
+// R-QGEN-MURV: a valid bearer token presented to the MCP transport is
+// accepted even when the request arrives with a public Host header, as
+// it does in the production proxy topology (the service listens on
+// loopback while the proxy forwards requests under the external FQDN).
+// The SDK's DNS-rebinding protection (which rejects loopback-listener
+// requests whose Host header is not loopback) must be disabled so it
+// does not preempt the service's own bearer-token trust boundary.
+// Observable failure without the fix: POST /mcp with Host: hal.ai.metaspot.org
+// returns 403 Forbidden before PromptSignal or any tool handler runs,
+// so a client that completed the OAuth flow against the public host
+// cannot use its freshly-issued credentials.
+func TestR_QGEN_MURV_mcp_transport_accepts_proxy_host_header(t *testing.T) {
+	ready := make(chan net.Addr, 1)
+	onListenerReady = func(a net.Addr) { ready <- a }
+	defer func() { onListenerReady = nil }()
+
+	ctx, cancel := context.WithCancel(contextWithTestStores(context.Background()))
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- runServeForTest(t, ctx, []string{"--port", "0"}, &stdout, &stderr)
+	}()
+
+	var addr net.Addr
+	select {
+	case addr = <-ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("listener never ready within 2s; stderr=%q (R-QGEN-MURV)", stderr.String())
+	}
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("runServe did not exit within 2s (R-QGEN-MURV)")
+		}
+	}()
+
+	// publicHost simulates the Host header that a production proxy forwards;
+	// it is non-loopback, which previously triggered the SDK's 403 rejection.
+	const publicHost = "hal.ai.metaspot.org"
+
+	bearer, err := oauthTokenStore.IssueAccess(
+		"alice@example.com", "client-qgen", canonicalResourceIdentifier(),
+	)
+	if err != nil {
+		t.Fatalf("issueAccess: %v (R-QGEN-MURV)", err)
+	}
+
+	postViaProxy := func(payload, sessionID, bearerToken string) (*http.Response, []byte) {
+		t.Helper()
+		target := "http://" + addr.String() + "/mcp"
+		req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("new request: %v (R-QGEN-MURV)", err)
+		}
+		req.Host = publicHost
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, "+"text"+"/"+"event-stream")
+		if sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", sessionID)
+		}
+		if bearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+bearerToken)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s (host=%s): %v (R-QGEN-MURV)", target, publicHost, err)
+		}
+		buf, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read body: %v (R-QGEN-MURV)", err)
+		}
+		return resp, buf
+	}
+
+	// initialize — no bearer required; must not be rejected by DNS-rebinding
+	// protection simply because Host is the public FQDN.
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize",` +
+		`"params":{"protocolVersion":"2025-11-25","capabilities":{},` +
+		`"clientInfo":{"name":"hal-test-proxy","version":"0.0.1"}}}`
+	resp, buf := postViaProxy(initBody, "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize via proxy host status = %d, want 200 (R-QGEN-MURV); body=%q",
+			resp.StatusCode, buf)
+	}
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatalf("initialize via proxy host did not return Mcp-Session-Id (R-QGEN-MURV); body=%q", buf)
+	}
+
+	// counter_increment with a valid bearer — the production success path.
+	// A 403 here (rather than 200) is the exact symptom R-QGEN-MURV pins.
+	before := theCounter.Read()
+	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call",` +
+		`"params":{"name":"counter_increment","arguments":{}}}`
+	resp, buf = postViaProxy(callBody, sessionID, bearer)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("counter_increment via proxy host status = %d, want 200 "+
+			"(R-QGEN-MURV); body=%q", resp.StatusCode, buf)
+	}
+	var rpc struct {
+		Result struct {
+			IsError           bool `json:"isError"`
+			StructuredContent struct {
+				Value uint64 `json:"value"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if err := json.Unmarshal(buf, &rpc); err != nil {
+		t.Fatalf("decode response: %v (R-QGEN-MURV); body=%q", err, buf)
+	}
+	if rpc.Error != nil {
+		t.Fatalf("JSON-RPC error via proxy host: %v (R-QGEN-MURV); body=%q", rpc.Error, buf)
+	}
+	if rpc.Result.IsError {
+		t.Fatalf("counter_increment via proxy host result.isError=true (R-QGEN-MURV); body=%q", buf)
+	}
+	if got := theCounter.Read(); got != before+1 {
+		t.Fatalf("counter did not advance: before=%d after=%d (R-QGEN-MURV)", before, got)
+	}
+}
