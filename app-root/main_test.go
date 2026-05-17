@@ -13225,39 +13225,6 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 // reads these values; this test pins that the producers record
 // them.
 func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
-	t.Run("web_origin_records_have_origin_web_and_nil_mcp_context", func(t *testing.T) {
-		states := newOAuthStateStorage()
-		req := httptest.NewRequest("GET", "/login", nil)
-		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, rec, req)
-		res := rec.Result()
-		defer res.Body.Close()
-		if res.StatusCode < 300 || res.StatusCode >= 400 {
-			t.Fatalf("login status = %d, want 3xx (R-MTRN-DL9W setup)",
-				res.StatusCode)
-		}
-		loc, err := url.Parse(res.Header.Get("Location"))
-		if err != nil {
-			t.Fatalf("parse Location: %v (R-MTRN-DL9W)", err)
-		}
-		state := loc.Query().Get("state")
-		if state == "" {
-			t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
-		}
-		stateRec, ok := states.Snapshot(state)
-		if !ok {
-			t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
-		}
-		if stateRec.Origin() != "web" {
-			t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.Origin(), "web")
-		}
-		if mcpCtx := stateRec.MCPContext(); mcpCtx != nil {
-			t.Fatalf("web-origin record carries non-nil mcp context = %+v "+
-				"(R-MTRN-DL9W: web records require no extra context)",
-				*mcpCtx)
-		}
-	})
-
 	t.Run("mcp_origin_records_carry_byte_for_byte_authorize_context", func(t *testing.T) {
 		states := newOAuthStateStorage()
 		regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",

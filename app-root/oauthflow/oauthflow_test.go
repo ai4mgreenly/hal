@@ -148,6 +148,39 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 	}
 }
 
+func TestR_MTRN_DL9W_web_origin_records_have_origin_web_and_nil_mcp_context(t *testing.T) {
+	f := newAuthorizeFixture(t, testClientID, testRedirect)
+	req := httptest.NewRequest("GET", "/login", nil)
+	rec := httptest.NewRecorder()
+	f.surface.HandleLogin(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode < 300 || res.StatusCode >= 400 {
+		t.Fatalf("login status = %d, want 3xx (R-MTRN-DL9W setup)",
+			res.StatusCode)
+	}
+	loc, err := url.Parse(res.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v (R-MTRN-DL9W)", err)
+	}
+	state := loc.Query().Get("state")
+	if state == "" {
+		t.Fatalf("Location missing state= (R-MTRN-DL9W setup)")
+	}
+	stateRec, ok := f.states.Snapshot(state)
+	if !ok {
+		t.Fatalf("state %q not recorded (R-MTRN-DL9W)", state)
+	}
+	if stateRec.Origin() != "web" {
+		t.Fatalf("origin = %q, want %q (R-MTRN-DL9W)", stateRec.Origin(), "web")
+	}
+	if mcpCtx := stateRec.MCPContext(); mcpCtx != nil {
+		t.Fatalf("web-origin record carries non-nil mcp context = %+v "+
+			"(R-MTRN-DL9W: web records require no extra context)",
+			*mcpCtx)
+	}
+}
+
 func TestR_4GRA_EGBY_authorize_rejects_mismatched_resource_at_issue_time(t *testing.T) {
 	f := newAuthorizeFixture(t, testClientID, testRedirect)
 	mismatched := testResource + "extra"

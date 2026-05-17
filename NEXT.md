@@ -1,65 +1,64 @@
 # NEXT — one transformation
 
-## Relocate the callback workspace-domain tests to live with the federation-flow capability
+## Split the origin/MCP-context state-record test: relocate its web-origin scenario to the federation-flow capability
 
-**Outcome.** The federation-flow behavior tests that pin how the
-Google-callback step enforces the configured workspace domain — that a
-Google identity outside the allowed workspace domain is rejected at the
-callback with a forbidden response whose body names the cause, and that
-an in-domain identity is accepted and a browser session is established
-— are relocated out of the entry-point test monolith into the test
-file already co-located with the federation-flow capability, driven
-through that capability's existing public injected-input surface,
-exactly as the authorize-validation tests were. They move whole — every
-assertion travels with them — and assert byte-for-byte the same
-observable properties. No production source change and no behavior
-change.
+**Outcome.** One federation-flow test today verifies, in a single
+function spanning two scenarios, that the OAuth state record persists
+the originating request's origin discriminator and its MCP
+authorize-context. Its web-origin scenario — a sign-in request arriving
+from the web origin records an OAuth state whose origin discriminator
+is the web value and which carries no MCP authorize-context — is split
+out and relocated into the test file co-located with the
+federation-flow capability, driven through that capability's existing
+public injected-input surface and asserted against the capability's
+public dependency APIs on the test's own injected stores. The
+MCP-origin scenario, which additionally spans dynamic client
+registration and the authorize endpoint, stays where it is, coherent
+and self-contained. Every assertion is preserved byte-for-byte across
+the split. No production source change and no behavior change.
 
 **Why.** The federation-flow test relocation is underway; the
-authorize-validation cluster already moved. The callback
-workspace-domain tests are the next coherent slice and, unlike most of
-the remaining callback tests, they are wholly self-contained at the
-request/response boundary — they exercise only the
-login-then-callback path with the public identity-provider test double
-and an in-process web-session store, touching no token endpoint, no
-fully wired server, and no test-only reset seam. Moving them whole
-keeps this a single, low-risk, independently-verifiable claim and
-continues emptying the entry-point test monolith toward retiring its
-compatibility wrappers.
+whole-movable callback and authorize tests have already moved. The
+remaining callback/state tests each bundle more than one concern, so
+they are untangled by within-test splitting — moving the portion that
+is self-contained at the request boundary and leaving the portion that
+depends on other capabilities. This test is the lowest-risk first such
+split: its web-origin scenario is fully self-contained at the sign-in
+boundary, while its MCP-origin scenario depends on client registration
+and the authorize endpoint. Splitting cleanly separates two
+independently-verifiable claims, continues emptying the entry-point
+test monolith toward retiring its compatibility wrappers, and proves
+the within-test-split pattern under explicit, checkable acceptance
+properties.
 
 ## Scope
 
-- Relocate exactly the federation-flow behavior tests that pin callback
-  workspace-domain enforcement — out-of-domain identity rejected at the
-  callback with a forbidden response naming the cause; in-domain
-  identity accepted with a browser session established — moving each
-  test whole into the test file already co-located with the
-  federation-flow capability. Assert byte-for-byte the same observable
-  properties (the status, the error body's named cause, the
-  established-session signal). Do not weaken, rename, skip, or delete
-  any assertion; this is a whole move, not a split.
-- Construct and drive the capability through its existing public
-  injected-input surface only — the same seam the authorize-validation
-  tests already use — built from the capability's already-public
-  dependency constructors (including a public in-process web-session
-  store), the already-public identity-provider test double, and
-  test-local configuration values. Introduce no new production symbol,
-  no test-only seam, and no new cross-capability test double; the
-  surface being driven already exists and must not be altered or
-  extended.
-- NOT part of this slice, left unchanged where they are: the callback
-  and state-binding tests that additionally span client registration,
-  the authorize endpoint, the token-issuance endpoint, or another
-  capability's internal state; the tests that drive the fully wired
-  server or use a test-only reset or record seam; the login-redirect
-  tests; and any multi-capability or full round-trip test. Name in the
-  result note exactly which tests moved and which remain.
-- The entry-point compatibility wrappers that the not-yet-moved
-  federation-flow tests still use stay in place this round; their
-  deletion is a later round, gated on the remaining callers being
-  resolved; do not delete them now.
-- Acceptance properties that must hold (they apply to this whole move
-  defensively, and always thereafter):
+- Split exactly the federation-flow test that verifies the OAuth state
+  record persists the originating request's origin discriminator and
+  its MCP authorize-context. Relocate its web-origin scenario — a
+  sign-in request arriving from the web origin records a state whose
+  origin discriminator is the web value and which carries no MCP
+  authorize-context — into the test file co-located with the
+  federation-flow capability. Leave its MCP-origin scenario unchanged
+  where it is; that scenario additionally exercises dynamic client
+  registration and the authorize endpoint and must remain coherent and
+  non-vacuous on its own setup and assertions.
+- Drive the relocated scenario through the capability's existing public
+  injected-input surface only — the same seam the already-relocated
+  federation-flow tests use — and assert the recorded state against the
+  capability's public dependency APIs on the test's own injected
+  stores. Introduce no new production symbol and no test-only seam. The
+  relocated scenario must not reach a test-only reset or record seam, a
+  process clock reachable only as an entry-point global, the fully
+  wired server, or another capability's internal (unexported) storage.
+  (Inspecting a public dependency store's public API on the test's own
+  injected instance is ordinary permitted use, not a violation.)
+- This round is a within-test split governed by the acceptance
+  properties below: the two scenarios are independently-verifiable
+  claims. Relocate the web-origin scenario as the coherent green slice
+  and keep the residual coherent and non-vacuous; do not attempt to
+  also move the MCP-origin scenario.
+- Acceptance properties that must hold:
   - Assertion preservation. Across the suite, the complete set of
     assertions and their expected values is unchanged: every assertion
     that existed before still runs somewhere afterward, byte-identical
@@ -69,68 +68,60 @@ compatibility wrappers.
     must be an inert fixture, not a re-executed assertion.
   - Requirement-name traceability. Every requirement whose verified
     record names a specific test must continue to have a test of
-    exactly that name in the suite. When a test is relocated or split,
+    exactly that name in the suite. When a test is split or relocated,
     the function carrying the recorded name must continue to exist and
     remain a coherent, non-vacuous test; any new companion test takes a
     new name and never displaces the recorded one.
-- This is one coherent behavioral slice and is expected to move whole.
-  Move the largest coherent set that keeps the whole suite green; if it
-  must nonetheless be split, move the largest coherent green slice,
-  preserve every assertion across the split per the property above,
-  keep the recorded-name function intact, and name precisely what moved
-  and what remains.
-- This is a test-location change only: do not modify production source,
-  reqs/ (the behavioral contract), or helper/.
+- NOT part of this slice, left unchanged where they are: the other
+  callback/state tests whose movable portion would first require
+  decoupling a test-only reset or record seam, or a process clock
+  reachable only as an entry-point global, or that drive the fully
+  wired server, or that bundle large multi-path fixtures; and the
+  login-redirect tests (which require a separate decouple-rewrite off
+  the fully wired server first). Name in the result note exactly which
+  test was split, which scenario moved, and what remained.
+- The entry-point compatibility wrappers that the not-yet-moved
+  federation-flow tests still use stay in place this round; their
+  deletion is a later round, gated on the remaining callers being
+  resolved; do not delete them now.
+- This is a test-location and test-structure change only: do not modify
+  production source, reqs/ (the behavioral contract), or helper/.
 
 ## Done when
 
 From app-root/, with no behavioral change versus before: the full test
-suite passes — the relocated callback workspace-domain tests asserting
-the same observable properties from their new home, every other test
+suite passes — the relocated web-origin scenario asserting the same
+observable properties from its new home, the residual MCP-origin
+scenario unchanged in place and still coherent, every other test
 unchanged — the race-detector run passes, gofmt and go vet are clean
 across the whole module, no source line in the module exceeds 120
-columns, and the static binary still builds; the relocated tests drive
-the capability solely through its existing public injected-input
-surface with no new production symbol or seam and no other capability's
-internal storage accessed; and both acceptance properties above hold.
+columns, and the static binary still builds; the relocated scenario
+drives the capability solely through its existing public injected-input
+surface and public dependency APIs, with no new production symbol or
+seam and no test-only seam, entry-point global, fully wired server, or
+other-capability internal storage reached; and both acceptance
+properties above hold.
 
 ## Result note — 2026-05-17
 
-Completed the callback workspace-domain relocation into
-`app-root/oauthflow/oauthflow_test.go`. The moved tests are
-`TestR_5LQM_O89D_callback_rejects_off_domain_identity` and
-`TestR_5LQM_O89D_callback_accepts_in_domain_identity`; both kept their
-recorded names and still drive the login-then-callback path through
-`oauthflow.Surface.HandleLogin` and `oauthflow.Surface.HandleGoogleCallback`
-using public `oauth`, `websession`, and `googleidp` constructors. No production
-source changed, no new production symbol or seam was introduced, and the
-entry-point compatibility wrappers remain in place.
-
-Left in `app-root/main_test.go`: callback/state-binding tests that also span
-client registration, OAuth authorize, token issuance, fully wired server paths,
-test-only reset/record seams, login redirects, origin dispatch, unverified
-email rejection, web-session establishment, and multi-capability full
-round-trips.
-
-Files changed: `app-root/main_test.go`,
-`app-root/oauthflow/oauthflow_test.go`, and `NEXT.md`.
-
-Verification: `GOROOT=/usr/local/go /usr/local/go/bin/go test ./oauthflow -run
-'TestR_5LQM_O89D_callback_(rejects_off_domain_identity|accepts_in_domain_identity)'`
-passed; an adjacent focused root-package command covering `TestR_ETP6_60VA`,
-`TestR_EMW1_D8A0`, `TestR_CXJ2_R3BN`, and `TestR_MUZJ_RD0L` passed; the same
-two focused commands with `-race` passed; `GOROOT=/usr/local/go
-/usr/local/go/bin/go vet ./...` passed; gofmt was clean; the Go source
-line-length scan produced no output; and `GOROOT=/usr/local/go CGO_ENABLED=0
-/usr/local/go/bin/go build -o /tmp/hal-static .` passed. `GOROOT=/usr/local/go
-/usr/local/go/bin/go test ./...` failed only at
-`TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
-`.ralph/requirements-verified.jsonl` is permission denied, which the refactor
-prompt identifies as out-of-scope local Ralph state; all non-root packages
-passed, and `GOROOT=/usr/local/go /usr/local/go/bin/go test -race` across
-non-root packages passed.
-
-Blockers/follow-up risks: broad root-package full-suite verification remains
-locally blocked by unreadable `.ralph/requirements-verified.jsonl`; focused
-federation-flow relocation checks and adjacent callback behavior checks are
-green.
+- Completed one split of `TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context`.
+  Moved the `web_origin_records_have_origin_web_and_nil_mcp_context` scenario to
+  `oauthflow` as
+  `TestR_MTRN_DL9W_web_origin_records_have_origin_web_and_nil_mcp_context`.
+  The original named test remains in `main_test.go` with the
+  `mcp_origin_records_carry_byte_for_byte_authorize_context` scenario.
+- Files changed: `app-root/oauthflow/oauthflow_test.go`,
+  `app-root/main_test.go`, `NEXT.md`.
+- Verification from `app-root/` used `GOROOT=/usr/local/go` because the shell
+  had `GOROOT` set to an older Go tree while `go` itself is 1.26.2.
+  `go test ./oauthflow -run TestR_MTRN_DL9W_web_origin_records_have_origin_web_and_nil_mcp_context`
+  passed. `go test . -run TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context`
+  passed. `gofmt`/`go vet ./...` passed. Tracked Go-source line-length scan
+  found no lines over 120 columns. `CGO_ENABLED=0 go build -o bin/hal .`
+  passed; the generated `bin/` artifact was removed afterward.
+- `go test ./...` and `go test -race ./...` passed for non-root packages but
+  the root package run stopped at
+  `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+  `.ralph/requirements-verified.jsonl` is permission denied. Per the refactor
+  prompt, that is out-of-scope local Ralph state rather than a refactor
+  failure.
