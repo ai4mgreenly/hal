@@ -1518,3 +1518,771 @@ func TestR_A2L2_1NA1_signed_in_sign_out_is_post_form_without_href(t *testing.T) 
 		}
 	}
 }
+
+// R-FY4A-3B1M: when a visitor with an active web session activates the
+// index page's `+` or `−` button, the click drives an actual POST to
+// /counter/increment or /counter/decrement, and every observed change
+// to the displayed counter value runs the visual transition (red flash
+// >=600ms plus a +N/-N delta indicator inserted adjacent to the value
+// and visible for >=600ms). The live-update channel is opened via the
+// SSE feed at /counter/stream (R-FZC6-H2SB) regardless of session.
+// This test inspects the rendered index HTML for the load-bearing wiring:
+// the script must reference both mutation endpoints, must subscribe to
+// the SSE stream, and must add the .flash class plus build a .delta
+// .show element on each observed value change. The end-to-end SSE
+// transport is exercised separately by R-FZC6-H2SB; this assertion is
+// the structural promise that the page actually plumbs clicks through
+// to the server and renders the visual cue on every observed update.
+func TestR_FY4A_3B1M_index_wires_counter_mutations(t *testing.T) {
+	t.Run("signed_in_index_wires_buttons_and_stream", func(t *testing.T) {
+		plaintext, err := testWebSessionStore.Issue("dave@discovery.one")
+		if err != nil {
+			t.Fatalf("issue: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: plaintext})
+		rec := httptest.NewRecorder()
+		handleTestIndex(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (R-FY4A-3B1M)", rec.Code)
+		}
+		body := rec.Body.String()
+
+		// Buttons are not HTML-disabled for the signed-in visitor — without
+		// this the click wiring below is unreachable.
+		decDisabled := regexp.MustCompile(
+			`<button[^>]*aria-label="Decrement"[^>]*disabled`)
+		incDisabled := regexp.MustCompile(
+			`<button[^>]*aria-label="Increment"[^>]*disabled`)
+		if decDisabled.MatchString(body) || incDisabled.MatchString(body) {
+			t.Fatalf("signed-in counter buttons still HTML-disabled "+
+				"(R-FY4A-3B1M): %q", body)
+		}
+
+		for _, needle := range []string{
+			`'/counter/increment'`,
+			`'/counter/decrement'`,
+			`'/counter/stream'`,
+			`new EventSource(`,
+			`method:'POST'`,
+			`classList.add('flash')`,
+			`'delta show'`,
+		} {
+			if !strings.Contains(body, needle) {
+				t.Errorf("inline script missing %q — clicks must reach the "+
+					"mutation endpoints and live updates must drive the "+
+					"flash+delta cue (R-FY4A-3B1M): %q", needle, body)
+			}
+		}
+	})
+
+	t.Run("signed_out_index_still_subscribes_to_stream", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		handleTestIndex(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (R-FY4A-3B1M)", rec.Code)
+		}
+		body := rec.Body.String()
+		// The live channel requires no authentication (R-FZC6-H2SB), so
+		// even the signed-out page subscribes — the delta cue is visible
+		// to every observer regardless of who produced the mutation.
+		for _, needle := range []string{
+			`'/counter/stream'`,
+			`new EventSource(`,
+		} {
+			if !strings.Contains(body, needle) {
+				t.Errorf("signed-out page missing %q (R-FY4A-3B1M): %q",
+					needle, body)
+			}
+		}
+	})
+}
+
+// R-WOEN-ND69: every named block in the index page's layout —
+// banner, counter card, counter hint, instructions head, client
+// tabs, footer — is a child of <main class="page"> rendered in
+// that order. The footer in particular must precede </main>; a
+// rendering that closes </main> before <footer> stretches the
+// footer to the full viewport width instead of matching the 880px
+// column. Block detection is class-based today; the hint and
+// instructions section are likely to be renamed under R-MCHV-YEO4,
+// at which point this test will move with them.
+func TestR_WOEN_ND69_named_blocks_are_children_of_page(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-WOEN-ND69)", rr.Code)
+	}
+	body := rr.Body.String()
+	openIdx := strings.Index(body, `<main class="page">`)
+	closeIdx := strings.Index(body, `</main>`)
+	if openIdx < 0 || closeIdx < 0 || closeIdx < openIdx {
+		t.Fatalf("could not locate <main class=\"page\"> … </main> "+
+			"in body (R-WOEN-ND69): %q", body)
+	}
+	inside := body[openIdx:closeIdx]
+	blocks := []struct {
+		name   string
+		marker string
+	}{
+		{"banner", `<section class="banner"`},
+		{"counter card", `<section class="counter-card"`},
+		{"counter hint", `<p class="locked-hint"`},
+		{"instructions head", `<div class="instructions-head"`},
+		{"client tabs", `<div class="client-tabs"`},
+		{"footer", `<footer>`},
+	}
+	prev := -1
+	var prevName string
+	for _, b := range blocks {
+		off := strings.Index(inside, b.marker)
+		if off < 0 {
+			t.Fatalf("named block %q (%s) not a child of <main "+
+				"class=\"page\"> (R-WOEN-ND69)", b.name, b.marker)
+		}
+		if off <= prev {
+			t.Errorf("named block %q appears before %q under .page; "+
+				"required order is banner, counter card, counter "+
+				"hint, instructions head, client tabs, footer "+
+				"(R-WOEN-ND69)", b.name, prevName)
+		}
+		prev = off
+		prevName = b.name
+	}
+	// Footer must precede </main>; a sibling-of-.page footer
+	// violates the requirement even if every other block is inside.
+	if strings.Contains(body[closeIdx:], `<footer`) {
+		t.Errorf("<footer> appears after </main>; footer must be "+
+			"the last child of <main class=\"page\"> "+
+			"(R-WOEN-ND69): %q", body)
+	}
+}
+
+// R-9TPL-HQBV: every named block in the index page's layout
+// (reqs/design.md §1) — banner, counter card, instructions head,
+// client tabs, and footer — is a separate child of <main
+// class="page">, rendered in that order. The two MCP-instructions
+// blocks (head and tabs) are siblings, NOT nested under one shared
+// wrapper: closing the head's article BEFORE the tabs' article
+// open is the load-bearing structural property. A rendering that
+// wraps both inside a single <article class="section"> does not
+// satisfy this requirement.
+func TestR_9TPL_HQBV_named_blocks_separate_children_of_page(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-9TPL-HQBV)", rr.Code)
+	}
+	body := rr.Body.String()
+	openIdx := strings.Index(body, `<main class="page">`)
+	closeIdx := strings.Index(body, `</main>`)
+	if openIdx < 0 || closeIdx < 0 || closeIdx < openIdx {
+		t.Fatalf("could not locate <main class=\"page\"> … </main> "+
+			"in body (R-9TPL-HQBV): %q", body)
+	}
+	inside := body[openIdx:closeIdx]
+
+	headMarker := `<div class="instructions-head" aria-label="Connect an MCP client"`
+	tabsMarker := `<article class="section" aria-label="MCP client connect snippets"`
+
+	headOff := strings.Index(inside, headMarker)
+	if headOff < 0 {
+		t.Fatalf("instructions-head article (%s) not found under "+
+			"<main class=\"page\"> (R-9TPL-HQBV): %q", headMarker, inside)
+	}
+	tabsOff := strings.Index(inside, tabsMarker)
+	if tabsOff < 0 {
+		t.Fatalf("client-tabs article (%s) not found under "+
+			"<main class=\"page\"> (R-9TPL-HQBV): %q", tabsMarker, inside)
+	}
+	if !(headOff < tabsOff) {
+		t.Errorf("instructions head appears at offset %d, tabs at %d; "+
+			"required order is head before tabs (R-9TPL-HQBV)",
+			headOff, tabsOff)
+	}
+
+	// The instructions head's article must be closed BEFORE the
+	// tabs article opens — i.e. they are SIBLINGS under .page, not
+	// the same wrapper. Between the head article's opening tag and
+	// the tabs article's opening tag there must be an </article>
+	// close that ends the head, and that </article> must precede
+	// any <div class="client-tabs"> opening.
+	between := inside[headOff:tabsOff]
+	if !strings.Contains(between, `</div>`) {
+		t.Errorf("instructions-head <div> is not closed before the "+
+			"client-tabs <article> opens; both blocks must be SEPARATE "+
+			"children of <main class=\"page\">, not nested under a "+
+			"single wrapper (R-9TPL-HQBV): %q", between)
+	}
+	if strings.Contains(between, `<div class="client-tabs"`) {
+		t.Errorf("<div class=\"client-tabs\"> appears INSIDE the "+
+			"instructions-head article; the client tabs must live in "+
+			"a separate sibling article under <main class=\"page\"> "+
+			"(R-9TPL-HQBV): %q", between)
+	}
+
+	// Each of the five named blocks must appear as its own marker
+	// under .page, in the spec'd order; none nested inside another.
+	blocks := []struct {
+		name   string
+		marker string
+	}{
+		{"banner", `<section class="banner"`},
+		{"counter card", `<section class="counter-card"`},
+		{"instructions head", headMarker},
+		{"client tabs", tabsMarker},
+		{"footer", `<footer>`},
+	}
+	prev := -1
+	var prevName string
+	for _, b := range blocks {
+		off := strings.Index(inside, b.marker)
+		if off < 0 {
+			t.Fatalf("named block %q (%s) not a child of <main "+
+				"class=\"page\"> (R-9TPL-HQBV)", b.name, b.marker)
+		}
+		if off <= prev {
+			t.Errorf("named block %q appears before %q under .page; "+
+				"required order is banner, counter card, instructions "+
+				"head, client tabs, footer (R-9TPL-HQBV)",
+				b.name, prevName)
+		}
+		prev = off
+		prevName = b.name
+	}
+}
+
+// R-GTPJ-Z8EL: the page's three top-level content sections — banner
+// card, counter card, and MCP client instructions area (whose head
+// article is the third section per R-9TPL-HQBV) — are separated by
+// the SAME vertical gap. The specific gap value, custom property, or
+// mechanism is HOW and is governed by reqs/design.css (operator-owned;
+// drift-guarded by R-8MP8-6B77). The property the build agent owes
+// is the markup posture the canonical CSS expects to deliver uniform
+// gaps from: the three sections sit as direct children of
+// <main class="page"> in order with NO interposing wrapper element
+// between them, and none of the three carries an inline style=
+// attribute that would inject extra margin. The "MCP client
+// instructions area" is treated as one visual section for this
+// requirement; the gap between its head and tabs articles is
+// INTERNAL spacing, not an inter-section gap.
+func TestR_GTPJ_Z8EL_three_sections_share_uniform_gap_markup(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-GTPJ-Z8EL)", rr.Code)
+	}
+	body := rr.Body.String()
+	openIdx := strings.Index(body, `<main class="page">`)
+	closeIdx := strings.Index(body, `</main>`)
+	if openIdx < 0 || closeIdx < 0 || closeIdx < openIdx {
+		t.Fatalf("could not locate <main class=\"page\"> … </main> "+
+			"in body (R-GTPJ-Z8EL): %q", body)
+	}
+	inside := body[openIdx+len(`<main class="page">`) : closeIdx]
+
+	bannerOpen := `<section class="banner">`
+	counterOpen := `<section class="counter-card">`
+	headOpen := `<div class="instructions-head" aria-label="Connect an MCP client">`
+
+	bannerOff := strings.Index(inside, bannerOpen)
+	counterOff := strings.Index(inside, counterOpen)
+	headOff := strings.Index(inside, headOpen)
+	if bannerOff < 0 {
+		t.Fatalf("banner section opener %q not found under "+
+			"<main class=\"page\"> (R-GTPJ-Z8EL)", bannerOpen)
+	}
+	if counterOff < 0 {
+		t.Fatalf("counter-card section opener %q not found under "+
+			"<main class=\"page\"> (R-GTPJ-Z8EL)", counterOpen)
+	}
+	if headOff < 0 {
+		t.Fatalf("instructions-head opener %q not found under "+
+			"<main class=\"page\"> (R-GTPJ-Z8EL)", headOpen)
+	}
+	if !(bannerOff < counterOff && counterOff < headOff) {
+		t.Fatalf("expected order banner, counter-card, instructions "+
+			"head under .page; got offsets %d / %d / %d (R-GTPJ-Z8EL)",
+			bannerOff, counterOff, headOff)
+	}
+
+	// Between banner's </section> and counter-card's opener there
+	// must be NOTHING — no interposing wrapper or element that would
+	// inject extra margin and break the equal-gap property the
+	// canonical CSS relies on.
+	bannerCloseRel := strings.Index(inside[bannerOff:], `</section>`)
+	if bannerCloseRel < 0 {
+		t.Fatalf("banner <section> has no closing </section> under " +
+			".page (R-GTPJ-Z8EL)")
+	}
+	bannerClose := bannerOff + bannerCloseRel + len(`</section>`)
+	gap1 := inside[bannerClose:counterOff]
+	if strings.TrimSpace(gap1) != "" {
+		t.Errorf("banner </section> and counter-card <section> are "+
+			"not adjacent siblings under .page; interposing markup "+
+			"%q would inject extra spacing and break R-GTPJ-Z8EL's "+
+			"uniform inter-section gap", gap1)
+	}
+
+	// Between counter-card's </section> and the instructions-head
+	// <article> opener: same constraint.
+	counterCloseRel := strings.Index(inside[counterOff:], `</section>`)
+	if counterCloseRel < 0 {
+		t.Fatalf("counter-card <section> has no closing </section> " +
+			"under .page (R-GTPJ-Z8EL)")
+	}
+	counterClose := counterOff + counterCloseRel + len(`</section>`)
+	gap2 := inside[counterClose:headOff]
+	if strings.TrimSpace(gap2) != "" {
+		t.Errorf("counter-card </section> and instructions-head "+
+			"<article> are not adjacent siblings under .page; "+
+			"interposing markup %q would inject extra spacing and "+
+			"break R-GTPJ-Z8EL's uniform inter-section gap", gap2)
+	}
+
+	// None of the three section openers may carry an inline style=
+	// attribute. Inline margin overrides on any of these three
+	// would break the uniform-gap property the canonical CSS
+	// delivers (and R-8MP8-6B77 keeps the canonical CSS authoritative).
+	for _, opener := range []string{bannerOpen, counterOpen, headOpen} {
+		// Look at the opener as written (already includes the
+		// closing `>`); if a future variant injects style=, it
+		// would appear inside the opening tag instead.
+		// Scan for `style=` between the section's `<` and its `>`.
+		off := strings.Index(inside, opener)
+		// Also check any variant with style= injected before `>`.
+		// Use the tag-name prefix and walk to the closing `>`.
+		var prefix string
+		switch opener {
+		case bannerOpen:
+			prefix = `<section class="banner"`
+		case counterOpen:
+			prefix = `<section class="counter-card"`
+		case headOpen:
+			prefix = `<div class="instructions-head" aria-label="Connect an MCP client"`
+		}
+		pOff := strings.Index(inside, prefix)
+		if pOff < 0 {
+			t.Fatalf("section prefix %q vanished from .page "+
+				"(R-GTPJ-Z8EL)", prefix)
+		}
+		closeBracket := strings.Index(inside[pOff:], ">")
+		if closeBracket < 0 {
+			t.Fatalf("section opener for %q has no closing '>' "+
+				"(R-GTPJ-Z8EL)", prefix)
+		}
+		tag := inside[pOff : pOff+closeBracket+1]
+		if strings.Contains(tag, "style=") {
+			t.Errorf("section opener %q carries inline style= "+
+				"attribute; inline margin overrides break "+
+				"R-GTPJ-Z8EL's uniform inter-section gap: %q",
+				opener, tag)
+		}
+		_ = off
+	}
+}
+
+// R-NBGD-KUHA: the three top-level content sections (banner card,
+// counter card, MCP client instructions area) are separated by the
+// same vertical gap, and the MCP client instructions area reads as
+// ONE cohesive section, not two. The build agent owes the markup
+// posture the canonical CSS expects: the instructions head (the
+// <h2> reading "Connect an MCP client") is NOT wrapped in card
+// chrome (no <article class="section"> shell around it). The
+// canonical CSS hook is `.instructions-head`, which provides the
+// inter-section gap above and the small internal gap to the tabs
+// panel below.
+func TestR_NBGD_KUHA_instructions_head_not_card_chrome(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-NBGD-KUHA)", rr.Code)
+	}
+	body := rr.Body.String()
+
+	headOpen := `<div class="instructions-head" aria-label="Connect an MCP client">`
+	headIdx := strings.Index(body, headOpen)
+	if headIdx < 0 {
+		t.Fatalf("instructions head opener %q not found in body; "+
+			"the <h2> must live inside .instructions-head (the "+
+			"canonical CSS hook) and not inside a card-chrome "+
+			"shell (R-NBGD-KUHA): %q", headOpen, body)
+	}
+
+	headCloseRel := strings.Index(body[headIdx:], `</div>`)
+	if headCloseRel < 0 {
+		t.Fatalf("instructions head <div> has no closing </div> " +
+			"(R-NBGD-KUHA)")
+	}
+	headBlock := body[headIdx : headIdx+headCloseRel+len(`</div>`)]
+
+	if !strings.Contains(headBlock, `<h2>Connect an MCP client</h2>`) {
+		t.Errorf("instructions head does not contain the canonical "+
+			"<h2>Connect an MCP client</h2>; the heading is an h2, "+
+			"not an h3 or any card-chromed title element "+
+			"(R-NBGD-KUHA): %q", headBlock)
+	}
+
+	if strings.Contains(headBlock, `class="section"`) {
+		t.Errorf("instructions head contains class=\"section\" — "+
+			"the <h2> must NOT be wrapped in card chrome "+
+			"(R-NBGD-KUHA): %q", headBlock)
+	}
+
+	// The <h2> must not appear inside any <article class="section">
+	// shell elsewhere in the body either: card chrome around the
+	// heading is the failure mode the spec explicitly forbids.
+	cardArticleOpen := `<article class="section"`
+	for i := 0; ; {
+		off := strings.Index(body[i:], cardArticleOpen)
+		if off < 0 {
+			break
+		}
+		articleStart := i + off
+		closeRel := strings.Index(body[articleStart:], `</article>`)
+		if closeRel < 0 {
+			break
+		}
+		article := body[articleStart : articleStart+closeRel]
+		if strings.Contains(article, `<h2>Connect an MCP client</h2>`) {
+			t.Errorf("<h2>Connect an MCP client</h2> appears inside " +
+				"an <article class=\"section\"> shell; the heading " +
+				"must NOT be wrapped in card chrome (R-NBGD-KUHA)")
+		}
+		i = articleStart + closeRel + len(`</article>`)
+	}
+}
+
+// R-MCHV-YEO4: the index page's rendered HTML uses the class names
+// and DOM hooks reqs/design.css targets and does NOT introduce
+// app-specific class names that shadow the canonical ones. This test
+// scans the rendered body for the forbidden shadow names enumerated
+// in reqs/web.md 168-176 and for the buggy delta-append JS pattern
+// (val.parentNode.appendChild) that places the .delta as a sibling
+// of .counter-value rather than a child.
+func TestR_MCHV_YEO4_no_shadowed_classes(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-MCHV-YEO4)", rr.Code)
+	}
+	body := rr.Body.String()
+
+	forbiddenClasses := []string{
+		"counter-button",
+		"counter-flash",
+		"counter-delta",
+		"auth-pill",
+		"counter-form",
+		"mcp-client",
+		"footer-left",
+		"status-dot",
+		"footer-right",
+		"mcp-instructions",
+	}
+	for _, name := range forbiddenClasses {
+		if strings.Contains(body, name) {
+			t.Errorf("rendered body contains forbidden shadow class %q; "+
+				"use the canonical name from reqs/design.css instead "+
+				"(R-MCHV-YEO4)", name)
+		}
+	}
+
+	if strings.Contains(body, "parentNode.appendChild") {
+		t.Errorf("inline JS uses val.parentNode.appendChild — the " +
+			"delta must be appended as a CHILD of .counter-value, " +
+			"not as a sibling (R-MCHV-YEO4)")
+	}
+}
+
+func TestR_UAQQ_NU7B_title_subtitle_are_page_scope_only(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-UAQQ-NU7B)", rr.Code)
+	}
+	body := rr.Body.String()
+	bannerOpen := strings.Index(body, `<section class="banner"`)
+	if bannerOpen < 0 {
+		t.Fatalf("could not locate <section class=\"banner\"> in body "+
+			"(R-UAQQ-NU7B): %q", body)
+	}
+	bannerClose := strings.Index(body[bannerOpen:], `</section>`)
+	if bannerClose < 0 {
+		t.Fatalf("could not locate banner </section> in body "+
+			"(R-UAQQ-NU7B): %q", body)
+	}
+	bannerEnd := bannerOpen + bannerClose + len(`</section>`)
+
+	classAttrRe := regexp.MustCompile(`class="([^"]*)"`)
+	matches := classAttrRe.FindAllStringSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		t.Fatalf("no class=\"…\" attributes found in body (R-UAQQ-NU7B)")
+	}
+	reserved := map[string]bool{"title": true, "subtitle": true}
+	titleSeen := 0
+	subtitleSeen := 0
+	for _, m := range matches {
+		attrStart := m[0]
+		val := body[m[2]:m[3]]
+		for _, tok := range strings.Fields(val) {
+			if !reserved[tok] {
+				continue
+			}
+			if attrStart < bannerOpen || attrStart >= bannerEnd {
+				t.Errorf("reserved page-scope class %q appears outside "+
+					"<section class=\"banner\"> … </section> at offset "+
+					"%d (class=%q); .title and .subtitle are reserved "+
+					"for page-level use only (R-UAQQ-NU7B): %q",
+					tok, attrStart, val, body)
+			}
+			if tok == "title" {
+				titleSeen++
+			} else {
+				subtitleSeen++
+			}
+		}
+	}
+	if titleSeen == 0 {
+		t.Errorf("no class=\"title\" found inside banner; expected "+
+			"the <h1 class=\"title\"> page heading (R-UAQQ-NU7B): %q",
+			body[bannerOpen:bannerEnd])
+	}
+	if subtitleSeen == 0 {
+		t.Errorf("no class=\"subtitle\" found inside banner; expected "+
+			"the rotating tagline span (R-UAQQ-NU7B): %q",
+			body[bannerOpen:bannerEnd])
+	}
+}
+
+// R-772N-VHQE: on first page load, the Claude Code trigger AND
+// panel both carry the canonical `.active` class; the Claude
+// Desktop trigger and panel do not. This pins the "Default
+// active tab on first render: Claude Code (01)" property
+// R-H4LJ-G9HR states, expressed via the `.active` mechanism
+// R-MCHV-YEO4 names.
+func TestR_772N_VHQE_default_active_tab_first_render(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "hal.example.test"
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-772N-VHQE)", rr.Code)
+	}
+	body := rr.Body.String()
+
+	// Claude Code trigger opening tag.
+	ccTabRe := regexp.MustCompile(
+		`<button[^>]*data-target="claude-code"[^>]*>`)
+	ccTab := ccTabRe.FindString(body)
+	if ccTab == "" {
+		t.Fatalf("Claude Code trigger not found (R-772N-VHQE)")
+	}
+	if !regexp.MustCompile(`class="[^"]*\bactive\b[^"]*"`).MatchString(ccTab) {
+		t.Errorf("Claude Code trigger missing .active on first render "+
+			"(R-772N-VHQE): %q", ccTab)
+	}
+
+	// Claude Desktop trigger opening tag.
+	cdTabRe := regexp.MustCompile(
+		`<button[^>]*data-target="claude-desktop"[^>]*>`)
+	cdTab := cdTabRe.FindString(body)
+	if cdTab == "" {
+		t.Fatalf("Claude Desktop trigger not found (R-772N-VHQE)")
+	}
+	if regexp.MustCompile(`class="[^"]*\bactive\b[^"]*"`).MatchString(cdTab) {
+		t.Errorf("Claude Desktop trigger carries .active on first render "+
+			"(R-772N-VHQE): %q", cdTab)
+	}
+
+	// Claude Code panel opening tag.
+	ccPanelRe := regexp.MustCompile(
+		`<div[^>]*data-client="claude-code"[^>]*>`)
+	ccPanel := ccPanelRe.FindString(body)
+	if ccPanel == "" {
+		t.Fatalf("Claude Code panel not found (R-772N-VHQE)")
+	}
+	if !regexp.MustCompile(`class="[^"]*\bactive\b[^"]*"`).MatchString(ccPanel) {
+		t.Errorf("Claude Code panel missing .active on first render — "+
+			"trigger highlights but panel stays hidden (R-772N-VHQE): %q",
+			ccPanel)
+	}
+
+	// Claude Desktop panel opening tag.
+	cdPanelRe := regexp.MustCompile(
+		`<div[^>]*data-client="claude-desktop"[^>]*>`)
+	cdPanel := cdPanelRe.FindString(body)
+	if cdPanel == "" {
+		t.Fatalf("Claude Desktop panel not found (R-772N-VHQE)")
+	}
+	if regexp.MustCompile(`class="[^"]*\bactive\b[^"]*"`).MatchString(cdPanel) {
+		t.Errorf("Claude Desktop panel carries .active on first render "+
+			"(R-772N-VHQE): %q", cdPanel)
+	}
+}
+
+// R-UBPK-DLTT: every dark code-block snippet inside an MCP client
+// panel is a single element carrying the canonical `code` class
+// (`<div class="code">` or `<pre class="code">`) — no `code-wrap`,
+// `code-block`, or `snippet` shadow wrapper, and no inline
+// `style="position:relative"` simulation of the `.code` rule's
+// position context. The copy button inside each block is
+// `<button class="copy">` and its body is an `<svg>` element (the
+// clipboard glyph), not the literal text `copy`. The button still
+// carries an `aria-label` so the affordance is announced.
+func TestR_UBPK_DLTT_code_blocks_use_canonical_code_class(t *testing.T) {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "hal." + "example" + ".test"
+	handleTestIndex(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (R-UBPK-DLTT)", rr.Code)
+	}
+	body := rr.Body.String()
+
+	// Isolate each MCP client panel. Find every panel-opener
+	// position via FindAllStringSubmatchIndex, then take the
+	// body as the slice from one opener's end to the next
+	// opener's start (or to `</article>` for the last panel).
+	openerRe := regexp.MustCompile(
+		`<div[^>]*\bclient-panel\b[^"]*"[^>]*data-client="([^"]+)"[^>]*>`)
+	idxs := openerRe.FindAllStringSubmatchIndex(body, -1)
+	if len(idxs) < 2 {
+		t.Fatalf("could not isolate both client panels (R-UBPK-DLTT): %d found",
+			len(idxs))
+	}
+	// The panels live inside the tabs article (second
+	// <article class="section">); use the last </article> as the
+	// boundary so we don't accidentally pick up the head article's
+	// close, which precedes the panels (R-9TPL-HQBV).
+	articleEnd := strings.LastIndex(body, "</article>")
+	if articleEnd < 0 {
+		t.Fatalf("body has no closing </article> (R-UBPK-DLTT)")
+	}
+	type panel struct{ client, inner string }
+	var panels []panel
+	for i, m := range idxs {
+		client := body[m[2]:m[3]]
+		bodyStart := m[1]
+		var bodyEnd int
+		if i+1 < len(idxs) {
+			bodyEnd = idxs[i+1][0]
+		} else {
+			bodyEnd = articleEnd
+		}
+		panels = append(panels, panel{client: client, inner: body[bodyStart:bodyEnd]})
+	}
+
+	for _, p := range panels {
+		client, inner := p.client, p.inner
+
+		// Forbidden shadow-wrapper class names anywhere in the panel.
+		for _, forbidden := range []string{
+			`class="code-wrap"`, `class="code-block"`, `class="snippet"`,
+			`class="code-wrap "`, `class="code-block "`, `class="snippet "`,
+		} {
+			if strings.Contains(inner, forbidden) {
+				t.Errorf("panel %q contains forbidden wrapper %q (R-UBPK-DLTT): %q",
+					client, forbidden, inner)
+			}
+		}
+
+		// Forbidden inline `position:relative` simulation of the
+		// `.code` rule's position context.
+		if regexp.MustCompile(`style="[^"]*position\s*:\s*relative`).MatchString(inner) {
+			t.Errorf("panel %q has inline position:relative (R-UBPK-DLTT): %q",
+				client, inner)
+		}
+
+		// At least one canonical code element. Match
+		// `<pre class="code">` or `<div class="code">` (single
+		// element carrying the canonical class).
+		codeRe := regexp.MustCompile(
+			`<(?:pre|div)[^>]*class="[^"]*\bcode\b[^"]*"[^>]*>`)
+		codes := codeRe.FindAllString(inner, -1)
+		if len(codes) == 0 {
+			t.Errorf("panel %q has no canonical `.code` block (R-UBPK-DLTT): %q",
+				client, inner)
+			continue
+		}
+
+		// Every copy button in the panel has an <svg> child and an
+		// aria-label naming the affordance.
+		copyRe := regexp.MustCompile(
+			`(?s)<button[^>]*class="[^"]*\bcopy\b[^"]*"[^>]*>(.*?)</button>`)
+		copies := copyRe.FindAllStringSubmatch(inner, -1)
+		if len(copies) != len(codes) {
+			t.Errorf("panel %q has %d copy buttons, want %d (one per code block) "+
+				"(R-UBPK-DLTT)", client, len(copies), len(codes))
+		}
+		for _, cm := range copies {
+			full, glyph := cm[0], cm[1]
+			if !strings.Contains(full, `aria-label=`) {
+				t.Errorf("panel %q copy button missing aria-label (R-UBPK-DLTT): %q",
+					client, full)
+			}
+			if !strings.Contains(glyph, `<svg`) {
+				t.Errorf("panel %q copy button body lacks <svg> glyph "+
+					"(R-UBPK-DLTT): %q", client, full)
+			}
+			// Body must not be the literal text `copy` as the visible
+			// affordance — the glyph is the affordance.
+			if strings.TrimSpace(glyph) == "copy" {
+				t.Errorf("panel %q copy button body is the literal text `copy` "+
+					"with no <svg> glyph (R-UBPK-DLTT): %q", client, full)
+			}
+		}
+	}
+}
+
+// TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update pins the
+// browser-side half of the agents live-update path: a signed-in page that
+// initially has zero live chains renders no agents block, but it ships an
+// /agents/stream subscriber that creates that missing block and row when a
+// later SSE snapshot contains the first live MCP token chain.
+func TestR_KSI8_M0JX_agents_block_zero_to_one_browser_update(t *testing.T) {
+	email := "zero-one-" + "siteindex" + "@discovery.one"
+	sess, err := testWebSessionStore.Issue(email)
+	if err != nil {
+		t.Fatalf("webSessionStore.issue: %v (R-KSI8-M0JX)", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: websessionpkg.CookieName, Value: sess})
+	w := httptest.NewRecorder()
+	handleTestIndex(w, req)
+	body := w.Body.String()
+
+	if strings.Contains(body, `<div class="agents-block"`) {
+		t.Fatalf("signed-in zero-chain page rendered an agents block before "+
+			"the zero-to-one update (R-KSI8-M0JX): %q", body)
+	}
+	for _, want := range []string{
+		`var es=new EventSource('/agents/stream');`,
+		`if(!block){`,
+		`block=document.createElement('div');`,
+		`block.className='agents-block';`,
+		`block.setAttribute('aria-label','Authenticated MCP agents');`,
+		`auth.appendChild(block);`,
+		`var r=document.createElement('div');`,
+		`r.className='agent-row';`,
+		`r.setAttribute('data-chain-id',chain.chain_id||'');`,
+		`name.textContent=(chain.client_name||'undefined')+' ('+String(chain.client_id||'').slice(0,8)+')';`,
+		`form.method='post';form.action='/agents/revoke';`,
+		`input.type='hidden';input.name='chain_id';`,
+		`btn.className='auth-btn';btn.type='submit';`,
+		`chains.forEach(function(chain){block.appendChild(row(chain));});`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("signed-in zero-chain page missing agents live-update "+
+				"hook %q (R-KSI8-M0JX): %q", want, body)
+		}
+	}
+}
