@@ -40,6 +40,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	webpkg "github.com/mgreenly/hal/web"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -579,7 +580,10 @@ func TestR_VKZD_UKVS_body_reading_endpoints_reject_oversized_bodies(t *testing.T
 	}
 
 	nextReached := false
-	mcpHandler := mcpPromptSignal(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	mcpHandler := mcpwirepkg.Surface{
+		OAuthTokens:                 oauthTokenStore,
+		CanonicalResourceIdentifier: canonicalResourceIdentifier,
+	}.PromptSignal(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		nextReached = true
 	}))
 	mcpReq := httptest.NewRequest(http.MethodPost, "/mcp",
@@ -1222,9 +1226,9 @@ func TestR_K1E9_OR3T_workspace_domain_not_hard_coded(t *testing.T) {
 // R-325I-TX6C: the MCP server is built on the official MCP Go SDK
 // (github.com/modelcontextprotocol/go-sdk). JSON-RPC and transport framing
 // are not hand-rolled. Structural test asserts (a) go.mod requires the SDK
-// module, (b) main.go imports the SDK's mcp subpackage, and (c) main.go
-// constructs a server through the SDK constructor (mcp.NewServer) rather
-// than wiring a hand-rolled stand-in.
+// module, (b) the extracted MCP wiring package imports the SDK's mcp
+// subpackage, and (c) that package constructs a server through the SDK
+// constructor (mcp.NewServer) rather than wiring a hand-rolled stand-in.
 func TestR_325I_TX6C_mcp_server_built_on_official_sdk(t *testing.T) {
 	const sdkModule = "github.com/modelcontextprotocol/go-sdk"
 	const sdkPkg = sdkModule + "/mcp"
@@ -1238,15 +1242,15 @@ func TestR_325I_TX6C_mcp_server_built_on_official_sdk(t *testing.T) {
 		t.Errorf("go.mod does not require %s; MCP server must be built on the official SDK", sdkModule)
 	}
 
-	src, err := os.ReadFile("main.go")
+	src, err := os.ReadFile("mcpwire/mcpwire.go")
 	if err != nil {
-		t.Fatalf("read main.go: %v", err)
+		t.Fatalf("read mcpwire/mcpwire.go: %v", err)
 	}
 	if !strings.Contains(string(src), `"`+sdkPkg+`"`) {
-		t.Errorf("main.go does not import %q; MCP server must be built on the official SDK", sdkPkg)
+		t.Errorf("mcpwire does not import %q; MCP server must be built on the official SDK", sdkPkg)
 	}
 	if !strings.Contains(string(src), "mcp.NewServer(") {
-		t.Errorf("main.go does not call mcp.NewServer(...); MCP server must be constructed via the SDK")
+		t.Errorf("mcpwire does not call mcp.NewServer(...); MCP server must be constructed via the SDK")
 	}
 }
 
@@ -5367,7 +5371,8 @@ func TestR_UC3P_Z0IX_exactly_one_shared_counter(t *testing.T) {
 		"handleCounterStreamWithCounter(servingCounter,",
 		"handleCounterIncrementWithCounterAndStores(servingCounter,",
 		"handleCounterDecrementWithCounterAndStores(servingCounter,",
-		"newMCPServerWithCounterAndTokenStore(servingCounter,",
+		"mcpwirepkg.Surface{",
+		"Counter:                     servingCounter,",
 	} {
 		if !bytes.Contains(src, []byte(needle)) {
 			t.Fatalf("main.go missing %q; serve must thread one counter "+
@@ -6093,16 +6098,22 @@ func TestR_OBU9_0WFI_counter_mutations_auth_before_state(t *testing.T) {
 		{
 			name: "mcp increment",
 			call: func() (*mcp.CallToolResult, error) {
-				res, _, err := counterIncrementToolWithCounterAndTokenStore(
-					isolatedCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
+				res, _, err := mcpwirepkg.Surface{
+					Counter:                     isolatedCounter,
+					OAuthTokens:                 newOAuthTokenStorage(),
+					CanonicalResourceIdentifier: canonicalResourceIdentifier,
+				}.CounterIncrementTool()(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
 		{
 			name: "mcp decrement at zero",
 			call: func() (*mcp.CallToolResult, error) {
-				res, _, err := counterDecrementToolWithCounterAndTokenStore(
-					isolatedCounter, newOAuthTokenStorage())(context.Background(), mcpReq, struct{}{})
+				res, _, err := mcpwirepkg.Surface{
+					Counter:                     isolatedCounter,
+					OAuthTokens:                 newOAuthTokenStorage(),
+					CanonicalResourceIdentifier: canonicalResourceIdentifier,
+				}.CounterDecrementTool()(context.Background(), mcpReq, struct{}{})
 				return res, err
 			},
 		},
@@ -15920,7 +15931,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
-		"jsonapi/jsonapi.go",
+		"jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -16008,7 +16019,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
-		"jsonapi/jsonapi.go",
+		"jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)

@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -31,10 +30,10 @@ import (
 
 	counterpkg "github.com/mgreenly/hal/counter"
 	jsonapipkg "github.com/mgreenly/hal/jsonapi"
+	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	webpkg "github.com/mgreenly/hal/web"
 	websessionpkg "github.com/mgreenly/hal/websession"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	_ "modernc.org/sqlite"
@@ -104,176 +103,6 @@ func appNewTicker(d time.Duration) appTicker {
 
 func appNewJSONAPITicker(d time.Duration) jsonapipkg.Ticker {
 	return appNewTicker(d)
-}
-
-// R-Z3LX-89W1: tool names and descriptions registered below are written
-// for a model audience — each name is the verb-on-resource form
-// (counter_read / counter_increment / counter_decrement) and each
-// description states what the tool does, what it returns, and when to
-// choose it, so a model can pick the right tool without further context.
-func newMCPServer() *mcp.Server {
-	return newMCPServerWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())
-}
-
-func newMCPServerWithTokenStore(tokens *oauthTokenStorage) *mcp.Server {
-	return newMCPServerWithCounterAndTokenStore(newCounter(), tokens)
-}
-
-func newMCPServerWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) *mcp.Server {
-	s := mcp.NewServer(
-		&mcp.Implementation{Name: "hal", Version: halVersion},
-		nil,
-	)
-	// R-XS1U-B7YY: the read tool accepts no arguments and returns the
-	// current counter value as a non-negative integer. The counter is
-	// uint64, so non-negativity is structural. R-0CQ7-DSBQ allows this
-	// tool to be invoked unauthenticated — no auth gate here.
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "counter_read",
-		Description: "Return the current value of the shared counter. Takes no arguments. " +
-			"The value is a non-negative integer that any client can observe; reading does " +
-			"not modify it. Use this when you need to know the counter's state before " +
-			"deciding whether to call counter_increment or counter_decrement.",
-	}, counterReadToolWithCounter(c))
-	// R-YHNQ-CEJJ: the increment tool accepts no arguments. On success it
-	// adds one to the counter and returns the post-increment value.
-	// R-ZQS0-HWZ8: an inbound request invoking this tool must present a
-	// valid bearer access token issued by this service; the gate runs
-	// inside counterIncrementTool, reading Authorization from
-	// req.Extra.Header (populated by the Streamable HTTP transport).
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "counter_increment",
-		Description: "Add one to the shared counter and return the new value. Takes no " +
-			"arguments. The returned value is the counter's state AFTER the increment, " +
-			"a non-negative integer. Use this when the user wants the counter to go up by " +
-			"one; call counter_read first if you need the pre-increment value.",
-	}, counterIncrementToolWithCounterAndTokenStore(c, tokens))
-	// R-GG9B-GS8T: the decrement tool accepts no arguments. When the
-	// counter is greater than zero, subtract one and return the
-	// post-decrement value. When the counter is exactly zero, return
-	// the standard MCP tool-error signal naming the cause; the counter
-	// is not modified. R-285U-FWW3: the same valid HAL-issued access
-	// token accepted for counter_increment also authorizes this
-	// bearer-token-protected mutation surface.
-	mcp.AddTool(s, &mcp.Tool{
-		Name: "counter_decrement",
-		Description: "Subtract one from the shared counter and return the new value. Takes no " +
-			"arguments. The returned value is the counter's state AFTER the decrement, a " +
-			"non-negative integer. The counter cannot go below zero: if it is already zero, " +
-			"this tool returns an error and does not modify the counter. Use this when the " +
-			"user wants the counter to go down by one.",
-	}, counterDecrementToolWithCounterAndTokenStore(c, tokens))
-	return s
-}
-
-type counterReadOutput struct {
-	Value uint64 `json:"value" jsonschema:"current counter value"`
-}
-
-func counterReadTool(
-	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
-) (*mcp.CallToolResult, counterReadOutput, error) {
-	return counterReadToolWithCounter(newCounter())(ctx, req, struct{}{})
-}
-
-func counterReadToolWithCounter(c *counterpkg.Counter) func(
-	context.Context, *mcp.CallToolRequest, struct{},
-) (*mcp.CallToolResult, counterReadOutput, error) {
-	return func(
-		_ context.Context, _ *mcp.CallToolRequest, _ struct{},
-	) (*mcp.CallToolResult, counterReadOutput, error) {
-		return nil, counterReadOutput{Value: c.Read()}, nil
-	}
-}
-
-type counterIncrementOutput struct {
-	Value uint64 `json:"value" jsonschema:"post-increment counter value"`
-}
-
-func counterIncrementTool(
-	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
-) (*mcp.CallToolResult, counterIncrementOutput, error) {
-	return counterIncrementToolWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())(ctx, req, struct{}{})
-}
-
-func counterIncrementToolWithTokenStore(tokens *oauthTokenStorage) func(
-	context.Context, *mcp.CallToolRequest, struct{},
-) (*mcp.CallToolResult, counterIncrementOutput, error) {
-	return counterIncrementToolWithCounterAndTokenStore(newCounter(), tokens)
-}
-
-func counterIncrementToolWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) func(
-	context.Context, *mcp.CallToolRequest, struct{},
-) (*mcp.CallToolResult, counterIncrementOutput, error) {
-	return func(
-		_ context.Context, req *mcp.CallToolRequest, _ struct{},
-	) (*mcp.CallToolResult, counterIncrementOutput, error) {
-		// R-ZQS0-HWZ8: gate on a valid bearer access token issued by this
-		// service. The Streamable HTTP transport hands the per-request HTTP
-		// headers to handlers on req.Extra.Header; we validate via the same
-		// token store the /counter/increment HTTP gate uses, so an MCP
-		// client and a browser client see the same accept/reject decision
-		// against the same store.
-		var hdr http.Header
-		if req != nil && req.Extra != nil {
-			hdr = req.Extra.Header
-		}
-		if ok, errDesc := checkMCPBearerWithTokenStore(tokens, hdr); !ok {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
-			}, counterIncrementOutput{}, nil
-		}
-		return nil, counterIncrementOutput{Value: c.Increment()}, nil
-	}
-}
-
-type counterDecrementOutput struct {
-	Value uint64 `json:"value" jsonschema:"post-decrement counter value"`
-}
-
-func counterDecrementTool(
-	ctx context.Context, req *mcp.CallToolRequest, _ struct{},
-) (*mcp.CallToolResult, counterDecrementOutput, error) {
-	return counterDecrementToolWithCounterAndTokenStore(newCounter(), newOAuthTokenStorage())(ctx, req, struct{}{})
-}
-
-func counterDecrementToolWithTokenStore(tokens *oauthTokenStorage) func(
-	context.Context, *mcp.CallToolRequest, struct{},
-) (*mcp.CallToolResult, counterDecrementOutput, error) {
-	return counterDecrementToolWithCounterAndTokenStore(newCounter(), tokens)
-}
-
-func counterDecrementToolWithCounterAndTokenStore(c *counterpkg.Counter, tokens *oauthTokenStorage) func(
-	context.Context, *mcp.CallToolRequest, struct{},
-) (*mcp.CallToolResult, counterDecrementOutput, error) {
-	return func(
-		_ context.Context, req *mcp.CallToolRequest, _ struct{},
-	) (*mcp.CallToolResult, counterDecrementOutput, error) {
-		// R-285U-FWW3: MCP counter_decrement uses the same bearer-token
-		// validation as counter_increment; access tokens are service-wide
-		// for counter mutations, not scoped per operation.
-		var hdr http.Header
-		if req != nil && req.Extra != nil {
-			hdr = req.Extra.Header
-		}
-		if ok, errDesc := checkMCPBearerWithTokenStore(tokens, hdr); !ok {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{Text: errDesc}},
-			}, counterDecrementOutput{}, nil
-		}
-		v, ok := c.Decrement()
-		if !ok {
-			return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{&mcp.TextContent{
-					Text: "the counter cannot go below zero",
-				}},
-			}, counterDecrementOutput{}, nil
-		}
-		return nil, counterDecrementOutput{Value: v}, nil
-	}
 }
 
 // R-74NI-T9CI: the hal binary exposes exactly three subcommands.
@@ -1792,24 +1621,6 @@ func runServeWithEnvClockAndDatabaseOpener(
 	mux.HandleFunc(http.MethodPost, "/counter/decrement", func(w http.ResponseWriter, r *http.Request) {
 		handleCounterDecrementWithCounterAndStores(servingCounter, servingWebSessions, servingOAuthTokens, w, r)
 	})
-	// R-325I-TX6C: the MCP server is built on the official MCP Go SDK
-	// (github.com/modelcontextprotocol/go-sdk). The serve entry point owns
-	// this SDK server instance and threads it to the Streamable HTTP
-	// transport below; JSON-RPC and transport framing stay owned by the SDK,
-	// not hand-rolled in this codebase.
-	mcpServer := newMCPServerWithCounterAndTokenStore(servingCounter, servingOAuthTokens)
-	// R-UK7D-Z0IZ: the MCP server speaks the Streamable HTTP transport
-	// defined in the current Model Context Protocol specification. The
-	// SDK-provided handler owns JSON-RPC framing, session management,
-	// and the GET/POST/DELETE method discipline; mounting it at `/mcp`
-	// on the same mux that serves the rest of the application keeps a
-	// single listener and origin (R-VVRG-W2G2). JSONResponse is enabled
-	// so a single POST returns its result inline as application/json
-	// rather than holding a text/event-stream channel open — sufficient
-	// for the request/response shape the three counter tools need, and
-	// distinct in name and intent from the legacy HTTP+SSE two-endpoint
-	// transport that R-V65K-UVVH forbids.
-	//
 	// R-7A9U-HJFF: the path is fixed at `/mcp`. It is the path component
 	// of the canonical resource identifier R-75E8-YGGN publishes and
 	// R-791Y-3ROQ validates `HAL_RESOURCE_IDENTIFIER` against. The
@@ -1817,10 +1628,12 @@ func runServeWithEnvClockAndDatabaseOpener(
 	// runtime, and the operator cannot configure a different path
 	// through environment or flags — there is no env var, no flag, and
 	// no code path that mounts the MCP transport at any other location.
-	mcpHandler := mcpPromptSignalWithTokenStore(servingOAuthTokens, mcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *mcp.Server { return mcpServer },
-		&mcp.StreamableHTTPOptions{JSONResponse: true},
-	))
+	mcpHandler := mcpwirepkg.Surface{
+		Counter:                     servingCounter,
+		OAuthTokens:                 servingOAuthTokens,
+		CanonicalResourceIdentifier: canonicalResourceIdentifier,
+		Version:                     halVersion,
+	}.Handler()
 	mux.Handle(http.MethodGet, "/mcp", mcpHandler)
 	mux.Handle(http.MethodPost, "/mcp", mcpHandler)
 	mux.Handle(http.MethodDelete, "/mcp", mcpHandler)
@@ -2709,127 +2522,6 @@ func bearerTokenFromRequest(r *http.Request) (string, bool) {
 
 func parseBearerAuthHeader(h string) (string, bool) {
 	return jsonapipkg.ParseBearerAuthHeader(h)
-}
-
-// checkMCPBearer validates the Authorization header carried by an MCP
-// request against the service's access-token store. It is the
-// R-ZQS0-HWZ8 gate for the increment tool: bearer-only (no web-session
-// path — the MCP transport carries no cookie), with the same
-// per-cause discriminator vocabulary that checkMutationAuth uses on
-// the HTTP side so R-0YOE-9NO8 can pick a single error_description
-// surface when it lands.
-func checkMCPBearer(h http.Header) (bool, string) {
-	return checkMCPBearerWithTokenStore(newOAuthTokenStorage(), h)
-}
-
-func checkMCPBearerWithTokenStore(tokens *oauthTokenStorage, h http.Header) (bool, string) {
-	authHeader := h.Get("Authorization")
-	if authHeader == "" {
-		return false, "no credentials presented"
-	}
-	plaintext, parsed := parseBearerAuthHeader(authHeader)
-	if !parsed {
-		return false, "bearer authorization header malformed"
-	}
-	rec, reason := tokens.LookupAccessReason(plaintext)
-	if rec != nil {
-		if rec.Resource != canonicalResourceIdentifier() {
-			return false, "bearer token resource binding does not match"
-		}
-		return true, ""
-	}
-	switch reason {
-	case "expired":
-		return false, "bearer token expired"
-	case "revoked":
-		// R-7E4W-K6HL: a user-revoked token chain must stop an
-		// already-connected MCP agent's next authenticated mutation.
-		return false, "bearer token revoked"
-	default:
-		return false, "bearer token not recognized"
-	}
-}
-
-// R-0YOE-9NO8: HTTP-level prompt-signal for the /mcp transport. When an
-// MCP request invokes a tool that requires bearer credentials and presents
-// no Authorization header, this middleware responds with HTTP 401 plus a
-// WWW-Authenticate: Bearer header carrying the standard `resource_metadata`
-// parameter pointing at this service's protected-resource metadata document.
-// R-51PZ-MEQR: when a request presents malformed, unknown, expired, revoked,
-// or wrong-resource bearer credentials, the HTTP authorization boundary
-// rejects it before the SDK handler or any MCP tool handler runs.
-func mcpPromptSignal(next http.Handler) http.Handler {
-	return mcpPromptSignalWithTokenStore(newOAuthTokenStorage(), next)
-}
-
-func mcpPromptSignalWithTokenStore(tokens *oauthTokenStorage, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			if ok, errDesc := checkMCPBearerWithTokenStore(tokens, r.Header); !ok {
-				writeMCPBearerChallenge(w, r, "invalid_token", errDesc)
-				return
-			}
-			next.ServeHTTP(w, r)
-			return
-		}
-		if r.Method != http.MethodPost {
-			next.ServeHTTP(w, r)
-			return
-		}
-		limitRequestBodyR_VKZD_UKVS(w, r)
-		buf, err := io.ReadAll(r.Body)
-		if err != nil {
-			if requestBodyTooLargeR_VKZD_UKVS(err) {
-				writeBodyTooLargeR_VKZD_UKVS(w)
-				return
-			}
-			next.ServeHTTP(w, r)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(buf))
-		if !jsonRPCInvokesGatedTool(buf) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		writeMCPBearerChallenge(w, r, "invalid_request", "no credentials presented")
-	})
-}
-
-func writeMCPBearerChallenge(w http.ResponseWriter, r *http.Request, code, desc string) {
-	// R-7BHQ-VB64: resource_metadata names the path
-	// `/.well-known/oauth-protected-resource/mcp` so the URL is
-	// scoped to the MCP transport per RFC 9728 §5.1.
-	meta := requestBaseURL(r) + "/.well-known/oauth-protected-resource/mcp"
-	w.Header().Set("WWW-Authenticate",
-		`Bearer realm="hal", error="`+code+`", `+
-			`error_description="`+desc+`", `+
-			`resource_metadata="`+meta+`"`)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(w).Encode(struct {
-		Error            string `json:"error"`
-		ErrorDescription string `json:"error_description,omitempty"`
-	}{Error: code, ErrorDescription: desc})
-}
-
-// jsonRPCInvokesGatedTool reports whether the JSON-RPC request body
-// invokes a tool that requires bearer credentials. counter_read is
-// explicitly unauthenticated (R-0CQ7-DSBQ). Batch requests and
-// unparseable bodies fall through (returns false) so the SDK handler
-// handles them on its own terms.
-func jsonRPCInvokesGatedTool(buf []byte) bool {
-	var msg struct {
-		Method string `json:"method"`
-		Params struct {
-			Name string `json:"name"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(buf, &msg); err != nil {
-		return false
-	}
-	return msg.Method == "tools/call" &&
-		(msg.Params.Name == "counter_increment" ||
-			msg.Params.Name == "counter_decrement")
 }
 
 // writeMutationUnauthorized emits the standard 401 response shared by
