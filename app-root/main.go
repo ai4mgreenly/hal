@@ -27,6 +27,7 @@ import (
 	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	oauthflowpkg "github.com/mgreenly/hal/oauthflow"
+	siteindexpkg "github.com/mgreenly/hal/siteindex"
 	webpkg "github.com/mgreenly/hal/web"
 	websessionpkg "github.com/mgreenly/hal/websession"
 	_ "modernc.org/sqlite"
@@ -979,6 +980,19 @@ func oauthFlowSurface(
 	}
 }
 
+func siteIndexSurface(
+	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
+) siteindexpkg.Surface {
+	return siteindexpkg.Surface{
+		Counter:        c,
+		WebSessions:    sessions,
+		OAuthTokens:    tokens,
+		OAuthClients:   clients,
+		RequestBaseURL: requestBaseURL,
+		Version:        halVersion,
+	}
+}
+
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
 // successful completion of the Google federation round-trip R-8GJG-64MR
 // defines — the callback handler validates state per R-ETP6-60VA,
@@ -1423,24 +1437,7 @@ func handleIndexWithCounterAndStores(
 	c *counterpkg.Counter, sessions *webSessionStorage, tokens *oauthTokenStorage, clients *oauthClientStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
-	var session *webSession
-	if c, err := r.Cookie(webSessionCookieName); err == nil {
-		session = sessions.Lookup(c.Value)
-	}
-	var ownerEmail string
-	var chains []oauthpkg.AgentChain
-	if session != nil {
-		ownerEmail = session.OwnerEmail()
-		chains = tokens.LiveAgentChains(ownerEmail, clients)
-	}
-	webpkg.WriteIndex(w, webpkg.IndexData{
-		Count:       c.Read(),
-		SignedIn:    session != nil,
-		OwnerEmail:  ownerEmail,
-		AgentChains: chains,
-		BaseURL:     requestBaseURL(r),
-		Version:     halVersion,
-	})
+	siteIndexSurface(c, sessions, tokens, clients).HandleIndex(w, r)
 }
 
 // R-9PNQ-BN2G: GET /login from a user-agent without an active web session
