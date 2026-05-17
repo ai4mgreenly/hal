@@ -7414,27 +7414,6 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 		t.Fatalf("loaded clientName = %q, want persisted metadata (R-YRMT-B7LZ)",
 			loaded.ClientName())
 	}
-
-	authReq := httptest.NewRequest(http.MethodGet,
-		"/oauth/authorize?client_id="+url.QueryEscape(clientID)+
-			"&redirect_uri="+url.QueryEscape(redirectURI)+
-			"&response_type=code"+
-			"&code_challenge=R_YRMT_B7LZ_PKCE"+
-			"&code_challenge_method=S256"+
-			"&resource="+url.QueryEscape(canonicalResourceIdentifier()), nil)
-	authRec := httptest.NewRecorder()
-
-	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, authRec, authReq)
-
-	if authRec.Code != http.StatusSeeOther {
-		t.Fatalf("authorize after restart status = %d, want 303; body=%q (R-YRMT-B7LZ)",
-			authRec.Code, authRec.Body.String())
-	}
-	if loc := authRec.Header().Get("Location"); !strings.Contains(loc, "accounts.google.com") {
-		t.Fatalf("authorize after restart Location = %q, want Google redirect (R-YRMT-B7LZ)",
-			loc)
-	}
 }
 
 func TestR_JE3Z_IGI4_dynamic_client_registration_client_name_is_bounded_display_text(t *testing.T) {
@@ -8049,97 +8028,6 @@ func TestR_4SH1_HQGP_authorize_redirects_to_google(t *testing.T) {
 	}
 }
 
-func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
-	originalClients := oauthClientStore
-	t.Cleanup(func() {
-		oauthClientStore = originalClients
-	})
-	oauthClientStore = newOAuthClientStorage()
-	states := newOAuthStateStorage()
-
-	const redirectURI = "http://127.0.0.1/cb-r-baxt"
-	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
-		strings.NewReader(`{"redirect_uris":[`+strconv.Quote(redirectURI)+`]}`))
-	regReq.Header.Set("Content-Type", "application/json")
-	regRec := httptest.NewRecorder()
-	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
-	regRes := regRec.Result()
-	defer regRes.Body.Close()
-	if regRes.StatusCode != http.StatusCreated {
-		t.Fatalf("register status = %d, want 201 (R-BAXT-SBU9)",
-			regRes.StatusCode)
-	}
-	var regDoc map[string]any
-	if err := json.NewDecoder(regRes.Body).Decode(&regDoc); err != nil {
-		t.Fatalf("register body not JSON: %v (R-BAXT-SBU9)", err)
-	}
-	clientID, _ := regDoc["client_id"].(string)
-	if clientID == "" {
-		t.Fatal("register response missing client_id (R-BAXT-SBU9)")
-	}
-
-	base := url.Values{}
-	base.Set("client_id", clientID)
-	base.Set("redirect_uri", redirectURI)
-	base.Set("response_type", "code")
-	base.Set("code_challenge", "R_BAXT_SBU9_PKCE")
-	base.Set("code_challenge_method", "S256")
-	base.Set("resource", canonicalResourceIdentifier())
-	drive := func(v url.Values) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet,
-			"/oauth/authorize?"+v.Encode(), nil)
-		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
-		return rec
-	}
-
-	valid := drive(base)
-	if valid.Code != http.StatusSeeOther {
-		t.Fatalf("valid authorize status = %d, want 303; body=%q (R-BAXT-SBU9)",
-			valid.Code, valid.Body.String())
-	}
-	if loc := valid.Header().Get("Location"); !strings.Contains(loc, "accounts.google.com") {
-		t.Fatalf("valid authorize Location = %q, want Google redirect (R-BAXT-SBU9)",
-			loc)
-	}
-
-	cases := []struct {
-		name   string
-		mutate func(url.Values)
-	}{
-		{"missing response_type", func(v url.Values) { v.Del("response_type") }},
-		{"unsupported response_type", func(v url.Values) { v.Set("response_type", "token") }},
-		{"missing code_challenge", func(v url.Values) { v.Del("code_challenge") }},
-		{"empty code_challenge", func(v url.Values) { v.Set("code_challenge", "") }},
-		{"missing code_challenge_method", func(v url.Values) { v.Del("code_challenge_method") }},
-		{"empty code_challenge_method", func(v url.Values) { v.Set("code_challenge_method", "") }},
-		{"unsupported code_challenge_method", func(v url.Values) { v.Set("code_challenge_method", "bogus") }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			before := states.Count()
-			v := url.Values{}
-			for key, vals := range base {
-				v[key] = append([]string(nil), vals...)
-			}
-			tc.mutate(v)
-			rec := drive(v)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body=%q (R-BAXT-SBU9)",
-					rec.Code, rec.Body.String())
-			}
-			if loc := rec.Header().Get("Location"); loc != "" {
-				t.Fatalf("Location = %q, want no redirect (R-BAXT-SBU9)", loc)
-			}
-			if after := states.Count(); after != before {
-				t.Fatalf("oauth state records changed from %d to %d on rejection (R-BAXT-SBU9)",
-					before, after)
-			}
-		})
-	}
-}
-
 func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	originalClients := oauthClientStore
 	originalTokens := oauthTokenStore
@@ -8148,7 +8036,6 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		oauthTokenStore = originalTokens
 	})
 	oauthClientStore = newOAuthClientStorage()
-	states := newOAuthStateStorage()
 	authCodes := newOAuthAuthCodeStorage()
 	oauthTokenStore = newOAuthTokenStorage()
 
@@ -8171,59 +8058,6 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 	clientID, _ := regDoc["client_id"].(string)
 	if clientID == "" {
 		t.Fatal("register response missing client_id (R-JTTZ-CG5J)")
-	}
-
-	base := url.Values{}
-	base.Set("client_id", clientID)
-	base.Set("redirect_uri", redirectURI)
-	base.Set("response_type", "code")
-	base.Set("code_challenge", "R_JTTZ_CG5J_PKCE")
-	base.Set("code_challenge_method", "S256")
-	base.Set("resource", canonicalResourceIdentifier())
-	driveAuthorize := func(v url.Values) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet,
-			"/oauth/authorize?"+v.Encode(), nil)
-		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
-		return rec
-	}
-
-	for _, tc := range []struct {
-		name   string
-		mutate func(url.Values)
-	}{
-		{"plain", func(v url.Values) { v.Set("code_challenge_method", "plain") }},
-		{"omitted", func(v url.Values) { v.Del("code_challenge_method") }},
-		{"empty", func(v url.Values) { v.Set("code_challenge_method", "") }},
-		{"other", func(v url.Values) { v.Set("code_challenge_method", "S384") }},
-	} {
-		t.Run("authorize_rejects_"+tc.name, func(t *testing.T) {
-			before := states.Count()
-			v := url.Values{}
-			for key, vals := range base {
-				v[key] = append([]string(nil), vals...)
-			}
-			tc.mutate(v)
-			rec := driveAuthorize(v)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400; body=%q (R-JTTZ-CG5J)",
-					rec.Code, rec.Body.String())
-			}
-			if loc := rec.Header().Get("Location"); loc != "" {
-				t.Fatalf("Location = %q, want no redirect (R-JTTZ-CG5J)", loc)
-			}
-			if after := states.Count(); after != before {
-				t.Fatalf("oauth state records changed from %d to %d on rejection (R-JTTZ-CG5J)",
-					before, after)
-			}
-		})
-	}
-
-	valid := driveAuthorize(base)
-	if valid.Code != http.StatusSeeOther {
-		t.Fatalf("S256 authorize status = %d, want 303; body=%q (R-JTTZ-CG5J)",
-			valid.Code, valid.Body.String())
 	}
 
 	const verifier = "s256-verifier-for-r-jttz-cg5j-long-enough"
@@ -8443,151 +8277,20 @@ func TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri(t *testing.T) {
 	}
 }
 
-// TestR_126C_AM1E_authorize_omits_forced_auth_params pins the MCP-flow
-// posture: the redirect /oauth/authorize issues to Google must NOT
-// carry prompt=login, prompt=consent, or max_age=0. Those parameters
-// are the web-flow posture (R-3BKZ-L7R4) and are deliberately omitted
-// here so the MCP authorization flow can ride Google's silent SSO when
-// an active Google session exists for the user — MCP refresh is
-// expensive (it requires a browser pop and a human present), and
-// forcing re-authentication on each refresh's federation step would
-// invalidate the looser MCP cadence pinned in R-TNXJ-ZWQ0 / R-8UAA-YKR9.
-func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
-	// Register a client so the authorize endpoint has a redirect_uri
-	// to exact-match against (R-1ERW-YD9G).
-	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
-		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
-	regReq.Header.Set("Content-Type", "application/json")
-	regRec := httptest.NewRecorder()
-	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
-	regRes := regRec.Result()
-	defer regRes.Body.Close()
-	if regRes.StatusCode != http.StatusCreated {
-		t.Fatalf("register status = %d, want 201 (R-126C-AM1E)",
-			regRes.StatusCode)
-	}
-	var regDoc map[string]any
-	if err := json.NewDecoder(regRes.Body).Decode(&regDoc); err != nil {
-		t.Fatalf("register body not JSON: %v (R-126C-AM1E)", err)
-	}
-	clientID, _ := regDoc["client_id"].(string)
-	if clientID == "" {
-		t.Fatalf("register missing client_id (R-126C-AM1E)")
-	}
-
-	authURL := "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
-		"&response_type=code" +
-		"&code_challenge=R_126C_AM1E_PKCE" +
-		"&code_challenge_method=S256" +
-		"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
-	req := httptest.NewRequest(http.MethodGet, authURL, nil)
-	rec := httptest.NewRecorder()
-	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, rec, req)
-	res := rec.Result()
-	defer res.Body.Close()
-	if res.StatusCode < 300 || res.StatusCode >= 400 {
-		t.Fatalf("status = %d, want a 3xx redirect (R-126C-AM1E)",
-			res.StatusCode)
-	}
-	loc := res.Header.Get("Location")
-	u, err := url.Parse(loc)
-	if err != nil {
-		t.Fatalf("Location %q unparseable: %v (R-126C-AM1E)", loc, err)
-	}
-	q := u.Query()
-	if got := q.Get("prompt"); got == "login" || got == "consent" {
-		t.Errorf("Location query has prompt=%q (R-126C-AM1E); MCP "+
-			"authorization flow must omit prompt=login and "+
-			"prompt=consent so Google may satisfy the request via "+
-			"silent SSO", got)
-	}
-	if got := q.Get("max_age"); got == "0" {
-		t.Errorf("Location query has max_age=0 (R-126C-AM1E); MCP " +
-			"authorization flow must omit max_age=0 so Google may " +
-			"satisfy the request via silent SSO")
-	}
-}
-
 // TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time
 // pins the issue-time mirror of the bearer-side resource-binding
-// check. Both /oauth/authorize and /oauth/token must reject a request
-// whose `resource` parameter is present and not byte-equal to the
-// canonical resource identifier (RFC 8707 `invalid_target`), without
-// redirecting the user-agent using the offending value. A request that
-// supplies the canonical value must fall through to whatever
-// non-resource behavior the endpoint has — proving the check is gated
-// on the resource value, not pinning some unrelated failure. Omitted
-// resource indicators are covered by R-WLUL-MZCD.
+// check. The /oauth/authorize assertions live with the federation-flow
+// capability; this entry-point test keeps the token endpoint side. A
+// request whose `resource` parameter is present and not byte-equal to
+// the canonical resource identifier must fail with RFC 8707
+// `invalid_target`. A request that supplies the canonical value must
+// fall through to whatever non-resource behavior the endpoint has —
+// proving the check is gated on the resource value, not pinning some
+// unrelated failure. Omitted resource indicators are covered by
+// R-WLUL-MZCD.
 func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testing.T) {
 	canonical := canonicalResourceIdentifier()
 	mismatched := canonical + "extra"
-
-	// Register a client so the authorize endpoint has a redirect_uri
-	// to exact-match against; the token endpoint takes form params so
-	// no DCR is required to exercise the resource check there.
-	regReq := httptest.NewRequest(http.MethodPost, "/oauth/register",
-		strings.NewReader(`{"redirect_uris":["http://127.0.0.1/cb"]}`))
-	regReq.Header.Set("Content-Type", "application/json")
-	regRec := httptest.NewRecorder()
-	handleOAuthRegisterWithClientStore(oauthClientStore, regRec, regReq)
-	regRes := regRec.Result()
-	defer regRes.Body.Close()
-	if regRes.StatusCode != http.StatusCreated {
-		t.Fatalf("register status = %d, want 201 (R-4GRA-EGBY)",
-			regRes.StatusCode)
-	}
-	var regDoc map[string]any
-	_ = json.NewDecoder(regRes.Body).Decode(&regDoc)
-	clientID, _ := regDoc["client_id"].(string)
-	if clientID == "" {
-		t.Fatalf("register missing client_id (R-4GRA-EGBY)")
-	}
-
-	authBase := "/oauth/authorize?client_id=" + clientID +
-		"&redirect_uri=" + url.QueryEscape("http://127.0.0.1/cb") +
-		"&response_type=code" +
-		"&code_challenge=R_4GRA_EGBY_PKCE" +
-		"&code_challenge_method=S256"
-
-	// Mismatched resource at /oauth/authorize → 400 invalid_target,
-	// no Location header (no redirect using the offending value).
-	badReq := httptest.NewRequest(http.MethodGet,
-		authBase+"&resource="+url.QueryEscape(mismatched), nil)
-	badRec := httptest.NewRecorder()
-	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, badRec, badReq)
-	badRes := badRec.Result()
-	defer badRes.Body.Close()
-	if badRes.StatusCode != http.StatusBadRequest {
-		t.Errorf("authorize mismatched resource status = %d, want 400 (R-4GRA-EGBY)",
-			badRes.StatusCode)
-	}
-	if loc := badRes.Header.Get("Location"); loc != "" {
-		t.Errorf("authorize mismatched resource Location = %q, want empty "+
-			"(no redirect using offending value) (R-4GRA-EGBY)", loc)
-	}
-	var badDoc map[string]any
-	_ = json.NewDecoder(badRes.Body).Decode(&badDoc)
-	if got, _ := badDoc["error"].(string); got != "invalid_target" {
-		t.Errorf("authorize mismatched resource error = %q, want %q (R-4GRA-EGBY)",
-			got, "invalid_target")
-	}
-
-	// Canonical resource at /oauth/authorize → falls through to the
-	// existing Google redirect path.
-	okReq := httptest.NewRequest(http.MethodGet,
-		authBase+"&resource="+url.QueryEscape(canonical), nil)
-	okRec := httptest.NewRecorder()
-	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, okRec, okReq)
-	okRes := okRec.Result()
-	defer okRes.Body.Close()
-	if okRes.StatusCode < 300 || okRes.StatusCode >= 400 {
-		t.Errorf("authorize canonical resource status = %d, want 3xx (R-4GRA-EGBY)",
-			okRes.StatusCode)
-	}
 
 	// Mismatched resource at /oauth/token → 400 invalid_target.
 	tokBad := httptest.NewRequest(http.MethodPost, "/oauth/token",

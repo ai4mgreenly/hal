@@ -1,128 +1,139 @@
 # NEXT — one transformation
 
-## Relocate the now-decoupled identity tests to live with the site-root capability
+## Relocate the OAuth-authorize request-validation tests to live with the federation-flow capability
 
-**Outcome.** The small set of site-root behavior tests that were just
-decoupled from another capability's internal storage — they now obtain
-a live agent connection's identity solely through the capability's
-public live-connections view — are relocated out of the entry-point
-test monolith into the test file co-located with the site-root
-capability, constructed and driven through that capability's existing
-public injected-input surface, exactly as the earlier rendering and
-presence batches were. They assert byte-for-byte the same observable
+**Outcome.** With the site-root tests relocated, the next capability
+whose behavior tests still sit in the entry-point test monolith is the
+OAuth/Google-federation flow. The subset of those tests that pin how
+the OAuth authorize endpoint validates an incoming authorization
+request — the flow and proof-key rules it enforces, the resource
+constraint it enforces, the parameters it does and does not inject, and
+that a client re-registered after a process restart still authorizes —
+and that exercise the capability purely at the request/response
+boundary, are relocated out of the entry-point test monolith into a
+test file co-located with the federation-flow capability, constructed
+and driven through that capability's existing public injected-input
+surface, exactly as the site-root tests were relocated to live with the
+site-root capability. They assert byte-for-byte the same observable
 properties as before. No production source change and no behavior
 change.
 
-**Why.** These were the last identity-coupled site-root tests; the
-preceding round removed their only entanglement with another
-capability's internals, leaving them pure public-surface consumers —
-structurally identical to the batches already relocated cleanly.
-Moving them now completes the mechanical relocation of every site-root
-test that can be relocated without a separate decision, further empties
-the entry-point test monolith, and makes explicit that what then keeps
-the entry-point compatibility wrappers alive is only tests that are
-gated on a separate decision, permanently source-bound, or belong to a
-different capability — clarifying exactly what remains before those
-wrappers can be retired.
+**Why.** With the site-root tests relocated, the federation-flow
+capability is the next-largest block of behavior tests stranded in the
+entry-point test monolith behind entry-point compatibility wrappers.
+That capability was already extracted and exposes a public
+injected-input surface, so its tests can be relocated by the same
+proven pattern with no new production surface. Starting with the
+authorize-validation tests — a single coherent behavioral cluster that
+exercises the capability purely at the request boundary — establishes
+and proves the relocated test seam for this capability while leaving
+every observable behavior unchanged, and is the smallest slice that
+fully accounts for the authorize-request-validation behavior.
 
 ## Scope
 
-- Relocate exactly the site-root behavior tests that were just
-  rewritten to obtain a connection's identity through the capability's
-  public live-connections view and now require nothing beyond the
-  capability's existing public surface and public dependency APIs. They
-  move into the same co-located test file as the already-relocated
-  tests and assert byte-for-byte the same observable properties (the
-  rendered agent row, its identity attribute, the escaping, the
-  multi-element row, and every other property each pins). This is a
-  pure relocation, not a further rewrite: do not weaken, rename, skip,
-  or delete any assertion, and do not change how identity is acquired.
-- The fixture-side identity lookup these tests now use — a
-  self-validating selection over the public live-connections view that
-  fails loudly when there is no match or more than one — moves with
-  them unchanged. It must remain a fixture-side query over the public
-  view only, with no reintroduced access to any other capability's
-  internal storage. Any shared test fixture helper that already exists
-  in the destination test file must be reused, not duplicated.
-- NOT part of this slice, left unchanged where they are: tests that set
-  up their scenario by writing another capability's internal state
-  (revoked, expired, or specifically-timed connections); tests that
-  additionally read application (non-test) source files; the structural
-  source-text invariant test that pins how the single entry-owned
-  counter is threaded through the entry point; the test that drives a
-  full sign-in-through-federation round trip before observing the site
-  root; and the tests that stand up a live server to exercise its
-  streaming, footer, or onboarding behavior. Name in the result note
-  exactly which tests moved and which remain.
-- The entry-point compatibility wrappers stay in place this round (the
-  not-yet-moved tests still use them). Their deletion is a later round
-  and is gated on the remaining callers being resolved and on the
-  structural source-text invariant being re-expressed; do not delete
-  them now, and do not delete or alter that invariant.
-- Construct and drive the capability through its existing
-  injected-input surface and public dependency APIs only — not through
-  a global, the request context, application configuration, or any
-  other capability's internal storage. Introduce no new production
-  symbol, no test-only seam, and no cross-capability test double.
-- This batch is small and homogeneous and is expected to move whole.
-  Move the largest coherent set that keeps the whole suite green; if it
-  must nonetheless be split, move the largest coherent green slice and
-  name precisely what moved and what remains so the next round
-  continues it.
+- Relocate exactly the federation-flow behavior tests that pin how the
+  OAuth authorize endpoint validates an incoming authorization request
+  — that it requires the authorization-code flow, requires the strong
+  proof-key-for-code-exchange method, rejects a resource indicator that
+  does not match the canonical resource, does not inject forced
+  authentication parameters, and that a client re-registered after a
+  process restart still authorizes — and that exercise the capability
+  purely at the request/response boundary, needing nothing beyond the
+  capability's existing public injected-input surface, the
+  already-public dependency constructors, and the already-public
+  identity-provider test double. They move into a test file co-located
+  with that capability and assert byte-for-byte the same observable
+  properties (the redirect or rejection, the status, the redirect
+  location and its query parameters, the error response). Do not
+  weaken, rename, skip, or delete any assertion in the move.
+- This is the first relocation of this capability's tests. The
+  relocated tests are constructed and driven through the capability's
+  existing public injected-input surface — the same kind of seam the
+  site-root tests use to drive the site-root capability — built only
+  from the capability's already-public dependency constructors, the
+  already-public identity-provider test double, and test-local
+  configuration values. Introduce no new production symbol, no
+  test-only seam, and no new cross-capability test double; the surface
+  being driven already exists and must not be altered or extended.
+- NOT part of this slice, left unchanged where they are: the
+  federation-flow tests that drive the fully wired server rather than
+  the capability in isolation; the test that constructs a custom
+  identity-provider double or that resets or seeds another capability's
+  internal state; the test that carries an authorization request
+  through into the separate token-issuance endpoint and reaches another
+  capability's internal storage; and the login-redirect and
+  Google-callback behavior tests (separate later slices). Name in the
+  result note exactly which tests moved and which remain.
+- The entry-point compatibility wrappers that the not-yet-moved
+  federation-flow tests still use stay in place this round; their
+  deletion is a later round, gated on the remaining callers being
+  resolved; do not delete them now.
+- The relocated tests construct and drive the capability through its
+  existing injected-input surface and public dependency APIs only — not
+  through a global, the request context, application configuration, the
+  fully wired server, or any other capability's internal storage.
+- This is one coherent behavioral cluster and is expected to move
+  whole. Move the largest coherent set that keeps the whole suite
+  green; if it must nonetheless be split, move the largest coherent
+  green slice and name precisely what moved and what remains so the
+  next round continues it.
 - This is a test-location change only: do not modify production source,
   reqs/ (the behavioral contract), or helper/.
 
 ## Done when
 
 From app-root/, with no behavioral change versus before: the full test
-suite passes — the relocated tests asserting the same observable
-properties from their new home, every other test unchanged — the
-race-detector run passes, gofmt and go vet are clean across the whole
-module, no source line in the module exceeds 120 columns, and the
-static binary still builds; and each relocated test obtains the
-connection identity solely through the capability's public
-live-connections view with no access to another capability's internal
-storage, and no shared fixture helper is duplicated.
+suite passes — the relocated authorize-validation tests asserting the
+same observable properties from their new home, every other test
+unchanged — the race-detector run passes, gofmt and go vet are clean
+across the whole module, no source line in the module exceeds 120
+columns, and the static binary still builds; and the relocated tests
+drive the capability solely through its existing public injected-input
+surface, with no new production symbol or seam introduced and no other
+capability's internal storage accessed.
 
 ## Result note — 2026-05-17
 
-Completed the relocation for `TestR_0OZT_H8LQ_agent_row_three_elements`,
-`TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text`, and
-`TestR_VV71_J75U_agent_row_visual_signature`. They now live in
-`app-root/siteindex/siteindex_test.go`, drive `siteindex.Surface` through the
-existing `handleTestIndex` injected-input fixture, and still select chain IDs
-through `testOAuthTokenStore.LiveAgentChains(...)` with the moved
-self-validating helper. Removed the relocated copies and helper from
-`app-root/main_test.go`; no production files changed.
+Completed the relocation of the OAuth authorize request-validation cluster into
+`app-root/oauthflow/oauthflow_test.go`. The moved authorize-boundary coverage is:
+`TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce`,
+`TestR_JTTZ_CG5J_authorize_pkce_requires_s256`,
+`TestR_126C_AM1E_authorize_omits_forced_auth_params`,
+`TestR_4GRA_EGBY_authorize_rejects_mismatched_resource_at_issue_time`, and
+`TestR_YRMT_B7LZ_restarted_client_store_still_authorizes`. The relocated tests
+drive `oauthflow.Surface.HandleOAuthAuthorize` directly through its existing
+public injected-input surface, using public `oauth` constructors, public
+`googleidp.FakeProvider`, test-local resource/base URL values, and no production
+source changes.
 
-Left in `app-root/main_test.go`: `TestR_G6NK_RP8H_index_visual_fidelity`,
-`TestR_UC3P_Z0IX_exactly_one_shared_counter`,
-`TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity`,
-`TestR_0NRX_3GV1_agents_block_structure`,
-`TestR_VWEX_WYWJ_agent_rows_ordered_by_rendered_identity`,
-`TestR_D0XD_1YT0_chain_revoke_action`,
-`TestR_0TVF_0BKI_agents_stream_live_updates`,
-`TestR_T6VA_9U84_agents_stream_resource_budget`, and
-`TestR_6KK2_AAY0_agent_stack_bottom_right_geometry`, matching the scoped
-exceptions for source-file reads, entry-point structural invariants,
-federation round trips, internal revoked/expired/specifically timed setup,
-revoke behavior, live server streams, or geometry checks.
+Left in `app-root/main_test.go`: the fully wired
+`TestR_4SH1_HQGP_authorize_redirects_to_google` and
+`TestR_1ERW_YD9G_authorize_rejects_mismatched_redirect_uri`; the token/auth-code
+assertions in `TestR_JTTZ_CG5J_pkce_requires_s256`; the token endpoint side of
+`TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time`;
+`TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical`; login redirect,
+Google callback, state-binding, full round-trip, and server-wired federation
+tests; and the DCR persistence assertions in
+`TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart`.
 
-Files changed: `app-root/main_test.go`,
-`app-root/siteindex/siteindex_test.go`, and `NEXT.md`.
+Files changed: `app-root/main_test.go`, `app-root/oauthflow/oauthflow_test.go`,
+and `NEXT.md`.
 
-Verification: `GOROOT=/usr/local/go go test ./siteindex -run
-'TestR_(0OZT_H8LQ|10ZV_8OFH|VV71_J75U|2ZZH_LJYA|6QIE_4D71|3RL1_IUP6)'`
-passed; `GOROOT=/usr/local/go go test -race ./siteindex -run
-'TestR_(0OZT_H8LQ|10ZV_8OFH|VV71_J75U)'` passed; `GOROOT=/usr/local/go go vet
-./...` passed; `awk 'length($0)>120 {print FILENAME ":" FNR ":" length($0)}'
-$(git ls-files '*.go' ':!:vendor/*')` produced no output; `GOROOT=/usr/local/go
-CGO_ENABLED=0 go build -o /tmp/hal-static-test .` passed. `GOROOT=/usr/local/go
-go test ./...` and `GOROOT=/usr/local/go go test -race ./...` both failed only
-at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+Verification: `GOROOT=/usr/local/go go test ./oauthflow -run
+'TestR_(BAXT_SBU9|JTTZ_CG5J|126C_AM1E|4GRA_EGBY|YRMT_B7LZ)'` passed;
+`GOROOT=/usr/local/go go test . -run 'TestR_(JTTZ_CG5J|4GRA_EGBY|YRMT_B7LZ)'`
+passed; `GOROOT=/usr/local/go go test -race ./oauthflow -run
+'TestR_(BAXT_SBU9|JTTZ_CG5J|126C_AM1E|4GRA_EGBY|YRMT_B7LZ)'` passed;
+`GOROOT=/usr/local/go go vet ./...` passed; `awk 'length($0)>120 {print
+FILENAME ":" FNR ":" length($0)}' $(git ls-files '*.go' ':!:vendor/*')`
+produced no output; and `GOROOT=/usr/local/go CGO_ENABLED=0 go build -o
+/tmp/hal-static-test .` passed. `GOROOT=/usr/local/go go test ./...` and
+`GOROOT=/usr/local/go go test -race ./...` both failed only at
+`TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
 `.ralph/requirements-verified.jsonl` is permission denied, which the refactor
 prompt identifies as out-of-scope local Ralph state.
 
 Blockers/follow-up risks: broad full-suite and full-race verification remain
 locally blocked by unreadable `.ralph/requirements-verified.jsonl`; focused
-site-root verification for the relocated tests is green.
+federation-flow verification for the relocated tests is green.
