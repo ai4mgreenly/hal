@@ -111,3 +111,44 @@ Blockers / follow-up risks:
 - Existing main-package tests still refer to the old unexported seam names via
   type aliases and use small test endpoint hooks on `googleidp.RealProvider`;
   later test relocation can remove those shims.
+
+## Result
+
+Completed the remaining in-scope consumer migration away from main-package
+Google IDP compatibility aliases. `main.go` now types its Google IDP wiring
+directly against `googleidp.Provider` / `googleidp.RealProvider`, and
+`main_test.go` imports `googleidp` directly for the fake provider and identity
+shape assertions. The entry-point package no longer carries alias shims for
+the extracted provider seam, fake provider, identity, or real provider.
+
+Files changed:
+- `app-root/main.go`
+- `app-root/main_test.go`
+- `NEXT.md`
+
+Verification:
+- `env -u GOROOT go test -run 'TestR_(T0B2_A4E5|VF61_2Y6I|W3K0_QD0E|ZBV4_KEJ6|33DF_7OX1|ANRQ_04PK)' .`
+  passed.
+- `env -u GOROOT go test ./googleidp` passed.
+- `env -u GOROOT go test -run 'TestR_(T0B2_A4E5|VF61_2Y6I|W3K0_QD0E|ZBV4_KEJ6|33DF_7OX1|ANRQ_04PK|7NWT_PODV)' .`
+  passed.
+- `env -u GOROOT go test -race -run 'TestR_(T0B2_A4E5|VF61_2Y6I|W3K0_QD0E|ZBV4_KEJ6|33DF_7OX1|ANRQ_04PK|7NWT_PODV)' .`
+  passed.
+- `env -u GOROOT go vet ./...` passed.
+- `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(find . -name '*.go' -not -path './.ralph/*' | sort)`
+  produced no output.
+- `env -u GOROOT CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/hal-refactor-build .`
+  passed.
+- `env -u GOROOT go test ./...` reached project code and failed only at
+  `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+  `.ralph/requirements-verified.jsonl` is permission-denied local Ralph state,
+  which `helper/REFACTOR.md` marks out of scope.
+- `env -u GOROOT go test -race ./...` likewise failed only at that same Ralph
+  ledger permission check.
+
+Blockers / follow-up risks:
+- The shell environment still has `GOROOT` set to a Go 1.23.5 tree while `go`
+  is Go 1.26.2; verification commands had to unset `GOROOT` to use the
+  matching `/usr/local/go` tree.
+- The test-only endpoint hooks remain on `googleidp.RealProvider` until the
+  identity-provider tests are relocated to the extracted package.

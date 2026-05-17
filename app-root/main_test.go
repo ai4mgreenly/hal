@@ -40,6 +40,7 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	googleidppkg "github.com/mgreenly/hal/googleidp"
 	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	webpkg "github.com/mgreenly/hal/web"
@@ -70,7 +71,7 @@ func contextWithTestStores(ctx context.Context) context.Context {
 			contextWithOAuthTokenStore(contextWithWebSessionStore(ctx, webSessionStore), oauthTokenStore),
 			theCounter,
 		),
-		googleFakeIDP{},
+		googleidppkg.FakeProvider{},
 	)
 }
 
@@ -3223,12 +3224,12 @@ func TestR_8MP8_6B77_design_css_is_embedded_and_served(t *testing.T) {
 // the seam structurally; behavioral verification of the real-Google
 // and test-double implementations is the job of other requirements.
 func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
-	iface := reflect.TypeOf((*googleIDP)(nil)).Elem()
+	iface := reflect.TypeOf((*googleidppkg.Provider)(nil)).Elem()
 	if iface.Kind() != reflect.Interface {
-		t.Fatalf("googleIDP must be an interface, got %v", iface.Kind())
+		t.Fatalf("googleidppkg.Provider must be an interface, got %v", iface.Kind())
 	}
 	if got := iface.NumMethod(); got != 2 {
-		t.Fatalf("googleIDP must have exactly 2 methods (R-T0B2-A4E5), "+
+		t.Fatalf("googleidppkg.Provider must have exactly 2 methods (R-T0B2-A4E5), "+
 			"got %d", got)
 	}
 	wantMethods := map[string]bool{
@@ -3238,7 +3239,7 @@ func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
 	for i := 0; i < iface.NumMethod(); i++ {
 		name := iface.Method(i).Name
 		if _, ok := wantMethods[name]; !ok {
-			t.Errorf("googleIDP has unexpected method %q; want exactly "+
+			t.Errorf("googleidppkg.Provider has unexpected method %q; want exactly "+
 				"AuthorizationURL and ExchangeCode (R-T0B2-A4E5)", name)
 			continue
 		}
@@ -3246,12 +3247,12 @@ func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
 	}
 	for name, seen := range wantMethods {
 		if !seen {
-			t.Errorf("googleIDP missing required method %q (R-T0B2-A4E5)",
+			t.Errorf("googleidppkg.Provider missing required method %q (R-T0B2-A4E5)",
 				name)
 		}
 	}
 
-	identity := reflect.TypeOf(googleIdentity{})
+	identity := reflect.TypeOf(googleidppkg.Identity{})
 	wantFields := map[string]reflect.Kind{
 		"Sub":           reflect.String,
 		"Email":         reflect.String,
@@ -3259,18 +3260,18 @@ func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
 		"EmailVerified": reflect.Bool,
 	}
 	if got := identity.NumField(); got != len(wantFields) {
-		t.Fatalf("googleIdentity must carry exactly the four claims "+
+		t.Fatalf("googleidppkg.Identity must carry exactly the four claims "+
 			"R-T0B2-A4E5 pins (sub, email, hosted_domain, "+
 			"email_verified), got %d fields", got)
 	}
 	for name, kind := range wantFields {
 		f, ok := identity.FieldByName(name)
 		if !ok {
-			t.Errorf("googleIdentity missing field %q (R-T0B2-A4E5)", name)
+			t.Errorf("googleidppkg.Identity missing field %q (R-T0B2-A4E5)", name)
 			continue
 		}
 		if f.Type.Kind() != kind {
-			t.Errorf("googleIdentity.%s has kind %v, want %v "+
+			t.Errorf("googleidppkg.Identity.%s has kind %v, want %v "+
 				"(R-T0B2-A4E5)", name, f.Type.Kind(), kind)
 		}
 	}
@@ -3283,12 +3284,12 @@ func TestR_T0B2_A4E5_google_seam_is_exactly_two_operations(t *testing.T) {
 // pin the real-Google code path to any "not yet implemented" sentinel —
 // that coupling would itself be a defect, by the requirement's own text.
 func TestR_VF61_2Y6I_test_env_uses_google_double(t *testing.T) {
-	idp := configuredGoogleIDP(googleFakeIDP{})
+	idp := configuredGoogleIDP(googleidppkg.FakeProvider{})
 	if idp == nil {
 		t.Fatalf("configuredGoogleIDP returned nil in the test env; the " +
 			"test double must be wired (R-VF61-2Y6I)")
 	}
-	if _, ok := idp.(googleFakeIDP); !ok {
+	if _, ok := idp.(googleidppkg.FakeProvider); !ok {
 		t.Fatalf("configured Google identity provider in the test env "+
 			"must be the test double (R-VF61-2Y6I); got %T", idp)
 	}
@@ -6036,7 +6037,7 @@ func TestR_9PNQ_BN2G_login_redirects_to_google(t *testing.T) {
 	t.Run("handler_direct_get_no_session", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDP(googleFakeIDP{}, rec, req)
+		handleLoginWithGoogleIDP(googleidppkg.FakeProvider{}, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -6121,7 +6122,7 @@ func TestR_3BKZ_L7R4_login_demands_fresh_google_authentication(t *testing.T) {
 	t.Run("handler_direct_get", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDP(googleFakeIDP{}, rec, req)
+		handleLoginWithGoogleIDP(googleidppkg.FakeProvider{}, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -6771,7 +6772,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, rec, req)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -6837,7 +6838,8 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(
+			googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -6927,7 +6929,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 	t.Run("binding_cookie_attributes_satisfy_R-AYLJ-8SYX", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDP(googleFakeIDP{}, rec, req)
+		handleLoginWithGoogleIDP(googleidppkg.FakeProvider{}, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		c := findBindingCookie(t, res.Header)
@@ -6950,7 +6952,7 @@ func TestR_ETP6_60VA_state_bound_to_browser_session(t *testing.T) {
 		req := httptest.NewRequest("GET", "/login", nil)
 		req.Header.Set("X-Forwarded-Proto", "https")
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDP(googleFakeIDP{}, rec, req)
+		handleLoginWithGoogleIDP(googleidppkg.FakeProvider{}, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		c := findBindingCookie(t, res.Header)
@@ -6974,7 +6976,7 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
 	loginRec := httptest.NewRecorder()
-	handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+	handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 	loginRes := loginRec.Result()
 	defer loginRes.Body.Close()
 	var bindingID string
@@ -6999,7 +7001,7 @@ func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
 	handleGoogleCallbackWithGoogleIDPStores(
-		googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
+		googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -7027,7 +7029,7 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 
 	loginReq := httptest.NewRequest("GET", "/login", nil)
 	loginRec := httptest.NewRecorder()
-	handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+	handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 	loginRes := loginRec.Result()
 	defer loginRes.Body.Close()
 	var bindingID string
@@ -7045,7 +7047,7 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 	cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	cbRec := httptest.NewRecorder()
 	handleGoogleCallbackWithGoogleIDPStores(
-		googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
+		googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 	cbRes := cbRec.Result()
 	defer cbRes.Body.Close()
 
@@ -7062,14 +7064,14 @@ func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
 }
 
 type rEMW1D8A0IDP struct {
-	identity googleIdentity
+	identity googleidppkg.Identity
 }
 
 func (i rEMW1D8A0IDP) AuthorizationURL(redirectURI, state string, forceLogin bool) string {
-	return googleFakeIDP{}.AuthorizationURL(redirectURI, state, forceLogin)
+	return googleidppkg.FakeProvider{}.AuthorizationURL(redirectURI, state, forceLogin)
 }
 
-func (i rEMW1D8A0IDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
+func (i rEMW1D8A0IDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleidppkg.Identity, error) {
 	return i.identity, nil
 }
 
@@ -7080,7 +7082,7 @@ func (i rEMW1D8A0IDP) ExchangeCode(ctx context.Context, code, redirectURI string
 // authorization code or web session.
 func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 	installTestAuthConfig(t, map[string]string{"GOOGLE_WORKSPACE_DOMAIN": "example.com"})
-	unverifiedIDP := rEMW1D8A0IDP{identity: googleIdentity{
+	unverifiedIDP := rEMW1D8A0IDP{identity: googleidppkg.Identity{
 		Sub:           "sub-unverified",
 		Email:         "user@example.com",
 		HostedDomain:  "example.com",
@@ -7106,7 +7108,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 	t.Run("web_origin_rejects_without_session", func(t *testing.T) {
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 
@@ -7175,7 +7177,7 @@ func TestR_EMW1_D8A0_callback_rejects_unverified_google_email(t *testing.T) {
 		authReq := httptest.NewRequest(http.MethodGet, authURL, nil)
 		authRec := httptest.NewRecorder()
 		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-			googleFakeIDP{}, states, oauthClientStore, authRec, authReq)
+			googleidppkg.FakeProvider{}, states, oauthClientStore, authRec, authReq)
 		authRes := authRec.Result()
 		defer authRes.Body.Close()
 
@@ -7253,7 +7255,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 		states := newOAuthStateStorage()
 		loginReq := httptest.NewRequest("GET", "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		var bindingID string
@@ -7277,7 +7279,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 		}
 		cbRec := httptest.NewRecorder()
 		handleGoogleCallbackWithGoogleIDPStores(
-			googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
+			googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		return cbRec.Result()
 	}
 
@@ -7360,7 +7362,7 @@ func TestR_CXJ2_R3BN_web_session_established_by_google_callback(t *testing.T) {
 			Value: "anything",
 		})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDP(googleFakeIDP{}, rec, req)
+		handleGoogleCallbackWithGoogleIDP(googleidppkg.FakeProvider{}, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode != http.StatusBadRequest {
@@ -7392,7 +7394,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		if loginRes.StatusCode < 300 || loginRes.StatusCode >= 400 {
@@ -7421,7 +7423,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
 		handleGoogleCallbackWithGoogleIDPStores(
-			googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
+			googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 		if cbRes.StatusCode != http.StatusSeeOther {
@@ -7476,7 +7478,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 
 		loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 		loginRec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, loginRec, loginReq)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, loginRec, loginReq)
 		loginRes := loginRec.Result()
 		defer loginRes.Body.Close()
 		var bindingID string
@@ -7494,7 +7496,7 @@ func TestR_8GJG_64MR_web_login_flow_records_google_email_as_identity(t *testing.
 		cbReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 		cbRec := httptest.NewRecorder()
 		handleGoogleCallbackWithGoogleIDPStores(
-			googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
+			googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, cbRec, cbReq)
 		cbRes := cbRec.Result()
 		defer cbRes.Body.Close()
 
@@ -8246,7 +8248,7 @@ func TestR_YRMT_B7LZ_dynamic_client_registration_survives_process_restart(t *tes
 	authRec := httptest.NewRecorder()
 
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleFakeIDP{}, newOAuthStateStorage(), oauthClientStore, authRec, authReq)
+		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, authRec, authReq)
 
 	if authRec.Code != http.StatusSeeOther {
 		t.Fatalf("authorize after restart status = %d, want 303; body=%q (R-YRMT-B7LZ)",
@@ -8910,7 +8912,8 @@ func TestR_BAXT_SBU9_authorize_requires_code_flow_and_pkce(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(googleFakeIDP{}, states, oauthClientStore, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
 		return rec
 	}
 
@@ -9004,7 +9007,8 @@ func TestR_JTTZ_CG5J_pkce_requires_s256(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/oauth/authorize?"+v.Encode(), nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(googleFakeIDP{}, states, oauthClientStore, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
 		return rec
 	}
 
@@ -9303,7 +9307,7 @@ func TestR_126C_AM1E_authorize_omits_forced_auth_params(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, authURL, nil)
 	rec := httptest.NewRecorder()
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleFakeIDP{}, newOAuthStateStorage(), oauthClientStore, rec, req)
+		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, rec, req)
 	res := rec.Result()
 	defer res.Body.Close()
 	if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -9376,7 +9380,7 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 		authBase+"&resource="+url.QueryEscape(mismatched), nil)
 	badRec := httptest.NewRecorder()
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleFakeIDP{}, newOAuthStateStorage(), oauthClientStore, badRec, badReq)
+		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, badRec, badReq)
 	badRes := badRec.Result()
 	defer badRes.Body.Close()
 	if badRes.StatusCode != http.StatusBadRequest {
@@ -9400,7 +9404,7 @@ func TestR_4GRA_EGBY_resource_indicator_mismatch_rejected_at_issue_time(t *testi
 		authBase+"&resource="+url.QueryEscape(canonical), nil)
 	okRec := httptest.NewRecorder()
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleFakeIDP{}, newOAuthStateStorage(), oauthClientStore, okRec, okReq)
+		googleidppkg.FakeProvider{}, newOAuthStateStorage(), oauthClientStore, okRec, okReq)
 	okRes := okRec.Result()
 	defer okRes.Body.Close()
 	if okRes.StatusCode < 300 || okRes.StatusCode >= 400 {
@@ -9494,7 +9498,7 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 	authReq := httptest.NewRequest(http.MethodGet, authBase, nil)
 	authRec := httptest.NewRecorder()
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-		googleFakeIDP{}, states, oauthClientStore, authRec, authReq)
+		googleidppkg.FakeProvider{}, states, oauthClientStore, authRec, authReq)
 	authRes := authRec.Result()
 	defer authRes.Body.Close()
 	if authRes.StatusCode < 300 || authRes.StatusCode >= 400 {
@@ -9531,7 +9535,8 @@ func TestR_WLUL_MZCD_oauth_omitted_resource_defaults_to_canonical(t *testing.T) 
 		"/oauth/google/callback?state="+url.QueryEscape(state)+"&code=fake-code", nil)
 	callbackReq.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: bindingID})
 	callbackRec := httptest.NewRecorder()
-	handleGoogleCallbackWithGoogleIDPStores(googleFakeIDP{}, states, authCodes, webSessionStore, callbackRec, callbackReq)
+	handleGoogleCallbackWithGoogleIDPStores(
+		googleidppkg.FakeProvider{}, states, authCodes, webSessionStore, callbackRec, callbackReq)
 	callbackRes := callbackRec.Result()
 	defer callbackRes.Body.Close()
 	if callbackRes.StatusCode != http.StatusSeeOther {
@@ -15866,7 +15871,7 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 				t.Helper()
 				req := httptest.NewRequest("GET", "/login", nil)
 				rec := httptest.NewRecorder()
-				handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, rec, req)
+				handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, rec, req)
 				return rec.Result()
 			},
 		},
@@ -15886,7 +15891,8 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 					"&resource=" + url.QueryEscape(canonicalResourceIdentifier())
 				req := httptest.NewRequest("GET", u, nil)
 				rec := httptest.NewRecorder()
-				handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(googleFakeIDP{}, states, oauthClientStore, rec, req)
+				handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+					googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
 				return rec.Result()
 			},
 		},
@@ -15942,7 +15948,8 @@ func TestR_T37L_4J01_state_binding_enforced_on_every_redirect_path(t *testing.T)
 			})
 		}
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(googleFakeIDP{}, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(
+			googleidppkg.FakeProvider{}, states, newOAuthAuthCodeStorage(), webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -16040,7 +16047,7 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 		states := newOAuthStateStorage()
 		req := httptest.NewRequest("GET", "/login", nil)
 		rec := httptest.NewRecorder()
-		handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, rec, req)
+		handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -16108,7 +16115,8 @@ func TestR_MTRN_DL9W_state_record_carries_origin_and_mcp_context(t *testing.T) {
 			"&resource=" + url.QueryEscape(wantResource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(googleFakeIDP{}, states, oauthClientStore, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -16209,7 +16217,8 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			"&resource=" + url.QueryEscape(resource)
 		req := httptest.NewRequest("GET", u, nil)
 		rec := httptest.NewRecorder()
-		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(googleFakeIDP{}, states, oauthClientStore, rec, req)
+		handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
+			googleidppkg.FakeProvider{}, states, oauthClientStore, rec, req)
 		res := rec.Result()
 		defer res.Body.Close()
 		if res.StatusCode < 300 || res.StatusCode >= 400 {
@@ -16239,7 +16248,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 			Value: bindingID,
 		})
 		rec := httptest.NewRecorder()
-		handleGoogleCallbackWithGoogleIDPStores(googleFakeIDP{}, states, authCodes, webSessionStore, rec, req)
+		handleGoogleCallbackWithGoogleIDPStores(googleidppkg.FakeProvider{}, states, authCodes, webSessionStore, rec, req)
 		return rec.Result()
 	}
 
@@ -16355,7 +16364,7 @@ func TestR_MUZJ_RD0L_google_callback_dispatches_on_origin(t *testing.T) {
 		func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/login", nil)
 			rec := httptest.NewRecorder()
-			handleLoginWithGoogleIDPAndStateStore(googleFakeIDP{}, states, rec, req)
+			handleLoginWithGoogleIDPAndStateStore(googleidppkg.FakeProvider{}, states, rec, req)
 			res := rec.Result()
 			defer res.Body.Close()
 			var bindingID string

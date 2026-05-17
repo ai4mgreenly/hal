@@ -193,24 +193,19 @@ func openCounterDB(path string) (*sql.DB, error) {
 
 type databaseOpener func(string) (*sql.DB, error)
 
-type googleIDP = googleidppkg.Provider
-type googleIdentity = googleidppkg.Identity
-type googleFakeIDP = googleidppkg.FakeProvider
-type googleRealIDP = googleidppkg.RealProvider
-
-func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleRealIDP {
+func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleidppkg.RealProvider {
 	return googleidppkg.NewRealProvider(
 		clientID, clientSecret, workspaceDomain, googleidppkg.WithNow(appNow))
 }
 
 type googleIDPContextKey struct{}
 
-func contextWithGoogleIDP(ctx context.Context, idp googleIDP) context.Context {
+func contextWithGoogleIDP(ctx context.Context, idp googleidppkg.Provider) context.Context {
 	return context.WithValue(ctx, googleIDPContextKey{}, idp)
 }
 
-func googleIDPFromContext(ctx context.Context) googleIDP {
-	if idp, ok := ctx.Value(googleIDPContextKey{}).(googleIDP); ok {
+func googleIDPFromContext(ctx context.Context) googleidppkg.Provider {
+	if idp, ok := ctx.Value(googleIDPContextKey{}).(googleidppkg.Provider); ok {
 		return idp
 	}
 	return nil
@@ -1024,7 +1019,7 @@ const webSessionCookieName = websessionpkg.CookieName
 // startup fails loudly if either is missing (R-LWCN-ZBXO / R-68WP-XVCK).
 // Tests that need R-VF61-2Y6I's double inject it through this same serving
 // seam.
-func configuredGoogleIDP(servingIDP googleIDP) googleIDP {
+func configuredGoogleIDP(servingIDP googleidppkg.Provider) googleidppkg.Provider {
 	return servingIDP
 }
 
@@ -1441,12 +1436,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	handleLoginWithGoogleIDP(nil, w, r)
 }
 
-func handleLoginWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+func handleLoginWithGoogleIDP(servingIDP googleidppkg.Provider, w http.ResponseWriter, r *http.Request) {
 	handleLoginWithGoogleIDPAndStateStore(servingIDP, newOAuthStateStorage(), w, r)
 }
 
 func handleLoginWithGoogleIDPAndStateStore(
-	servingIDP googleIDP, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
+	servingIDP googleidppkg.Provider, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	idp := configuredGoogleIDP(servingIDP)
 	if idp == nil {
@@ -1515,19 +1510,19 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	handleGoogleCallbackWithGoogleIDP(nil, w, r)
 }
 
-func handleGoogleCallbackWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+func handleGoogleCallbackWithGoogleIDP(servingIDP googleidppkg.Provider, w http.ResponseWriter, r *http.Request) {
 	handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(servingIDP, newOAuthAuthCodeStorage(), w, r)
 }
 
 func handleGoogleCallbackWithGoogleIDPAndAuthCodeStore(
-	servingIDP googleIDP, authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
+	servingIDP googleidppkg.Provider, authCodes *oauthAuthCodeStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	handleGoogleCallbackWithGoogleIDPStores(
 		servingIDP, newOAuthStateStorage(), authCodes, newWebSessionStorage(), w, r)
 }
 
 func handleGoogleCallbackWithGoogleIDPStores(
-	servingIDP googleIDP, states *oauthStateStorage, authCodes *oauthAuthCodeStorage,
+	servingIDP googleidppkg.Provider, states *oauthStateStorage, authCodes *oauthAuthCodeStorage,
 	sessions *webSessionStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
@@ -1991,20 +1986,20 @@ func handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	handleOAuthAuthorizeWithGoogleIDP(nil, w, r)
 }
 
-func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleIDP, w http.ResponseWriter, r *http.Request) {
+func handleOAuthAuthorizeWithGoogleIDP(servingIDP googleidppkg.Provider, w http.ResponseWriter, r *http.Request) {
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 		servingIDP, newOAuthStateStorage(), newOAuthClientStorage(), w, r)
 }
 
 func handleOAuthAuthorizeWithGoogleIDPAndStateStore(
-	servingIDP googleIDP, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
+	servingIDP googleidppkg.Provider, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
 ) {
 	handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 		servingIDP, states, newOAuthClientStorage(), w, r)
 }
 
 func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
-	servingIDP googleIDP, states *oauthStateStorage, clients *oauthClientStorage,
+	servingIDP googleidppkg.Provider, states *oauthStateStorage, clients *oauthClientStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
 	idp := configuredGoogleIDP(servingIDP)
