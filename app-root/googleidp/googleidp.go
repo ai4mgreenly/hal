@@ -73,6 +73,24 @@ func WithNow(now func() time.Time) RealOption {
 	}
 }
 
+// WithTokenURL supplies the OAuth2 token endpoint.
+func WithTokenURL(tokenURL string) RealOption {
+	return func(g *RealProvider) {
+		if tokenURL != "" {
+			g.cfg.Endpoint.TokenURL = tokenURL
+		}
+	}
+}
+
+// WithJWKsURL supplies the public-key endpoint used for ID-token signature validation.
+func WithJWKsURL(jwksURL string) RealOption {
+	return func(g *RealProvider) {
+		if jwksURL != "" {
+			g.jwksURL = jwksURL
+		}
+	}
+}
+
 // RealProvider is the OAuth2-backed Google identity provider.
 type RealProvider struct {
 	cfg       oauth2.Config
@@ -129,21 +147,6 @@ func (g *RealProvider) ExchangeCode(ctx context.Context, code, redirectURI strin
 		return Identity{}, errors.New("google: token response missing id_token")
 	}
 	return validateIDToken(ctx, rawID, g.cfg.ClientID, g.jwksURL, g.now)
-}
-
-// SetTokenURLForTest redirects token exchange to an in-process endpoint.
-func (g *RealProvider) SetTokenURLForTest(tokenURL string) {
-	g.cfg.Endpoint.TokenURL = tokenURL
-}
-
-// SetJWKsURLForTest redirects ID-token signature validation to an in-process endpoint.
-func (g *RealProvider) SetJWKsURLForTest(jwksURL string) {
-	g.jwksURL = jwksURL
-}
-
-// TokenURL returns the configured OAuth2 token endpoint.
-func (g *RealProvider) TokenURL() string {
-	return g.cfg.Endpoint.TokenURL
 }
 
 func validateIDToken(

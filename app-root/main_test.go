@@ -46,6 +46,7 @@ import (
 	webpkg "github.com/mgreenly/hal/web"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 var oauthClientStore = newOAuthClientStorage()
@@ -10222,14 +10223,17 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		}))
 		t.Cleanup(ts.Close)
 
-		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
 		// Redirect the oauth2 client at our loopback server and pass a
 		// context whose oauth2.HTTPClient value carries an HTTP client
 		// that trusts the httptest CA, so the HTTPS POST completes
 		// against the in-process server rather than reaching out to
 		// Google (R-VF61-2Y6I).
-		idp.SetTokenURLForTest(ts.URL + "/token")
-		idp.SetJWKsURLForTest(ts.URL + "/certs")
+		idp := googleidppkg.NewRealProvider(
+			clientID, clientSecret, workspaceDomain,
+			googleidppkg.WithNow(appNow),
+			googleidppkg.WithTokenURL(ts.URL+"/token"),
+			googleidppkg.WithJWKsURL(ts.URL+"/certs"),
+		)
 		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
 
@@ -10288,11 +10292,17 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 	})
 
 	t.Run("token_endpoint_targets_google_https_host_by_default", func(t *testing.T) {
-		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
 		// Default TokenURL must be Google's documented HTTPS token
 		// endpoint. Host concatenated at source per R-70ZT-NY4F.
+		src, err := os.ReadFile("googleidp/googleidp.go")
+		if err != nil {
+			t.Fatalf("read googleidp/googleidp.go: %v", err)
+		}
+		if !bytes.Contains(src, []byte("Endpoint:     google.Endpoint")) {
+			t.Fatalf("NewRealProvider no longer defaults to google.Endpoint (R-W3K0-QD0E)")
+		}
 		wantHost := "oauth2." + "googleapis." + "com"
-		tokenURL := idp.TokenURL()
+		tokenURL := google.Endpoint.TokenURL
 		u, err := url.Parse(tokenURL)
 		if err != nil {
 			t.Fatalf("parse TokenURL %q: %v", tokenURL, err)
@@ -10400,9 +10410,12 @@ func TestR_ZBV4_KEJ6_real_google_id_token_validation(t *testing.T) {
 		}))
 		t.Cleanup(ts.Close)
 
-		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
-		idp.SetTokenURLForTest(ts.URL + "/token")
-		idp.SetJWKsURLForTest(ts.URL + "/certs")
+		idp := googleidppkg.NewRealProvider(
+			clientID, clientSecret, workspaceDomain,
+			googleidppkg.WithNow(appNow),
+			googleidppkg.WithTokenURL(ts.URL+"/token"),
+			googleidppkg.WithJWKsURL(ts.URL+"/certs"),
+		)
 		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
 		_, err := idp.ExchangeCode(exchangeCtx, "auth-code-abc", redirectURI)
