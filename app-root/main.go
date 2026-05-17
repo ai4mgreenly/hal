@@ -3,17 +3,10 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/rsa"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,13 +22,12 @@ import (
 	"time"
 
 	counterpkg "github.com/mgreenly/hal/counter"
+	googleidppkg "github.com/mgreenly/hal/googleidp"
 	jsonapipkg "github.com/mgreenly/hal/jsonapi"
 	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	webpkg "github.com/mgreenly/hal/web"
 	websessionpkg "github.com/mgreenly/hal/websession"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 	_ "modernc.org/sqlite"
 )
 
@@ -201,33 +193,14 @@ func openCounterDB(path string) (*sql.DB, error) {
 
 type databaseOpener func(string) (*sql.DB, error)
 
-// R-T0B2-A4E5: the seam between the service's Google client and Google
-// is narrow — exactly two operations. AuthorizationURL produces the URL
-// the user-agent should be redirected to. ExchangeCode swaps an
-// authorization code for an identity value. Both implementations (test
-// double, real-Google) return values of identical shape; callers depend
-// only on this contract and do not branch on which is in use.
-// R-126C-AM1E: AuthorizationURL takes a `forceLogin` flag because the
-// web flow (R-3BKZ-L7R4) and the MCP flow have asymmetric trust
-// postures. The web flow passes true so Google demands a fresh
-// re-authentication on every /login (prompt=login). The MCP flow at
-// /oauth/authorize passes false so Google may satisfy the request via
-// silent SSO when an active Google session exists for the user. The
-// seam stays exactly two methods — the flag is a parameter on the
-// existing AuthorizationURL operation, not a new operation.
-type googleIDP interface {
-	AuthorizationURL(redirectURI, state string, forceLogin bool) string
-	ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error)
-}
+type googleIDP = googleidppkg.Provider
+type googleIdentity = googleidppkg.Identity
+type googleFakeIDP = googleidppkg.FakeProvider
+type googleRealIDP = googleidppkg.RealProvider
 
-// R-T0B2-A4E5: the identity value the code-exchange operation returns
-// carries exactly the four claims the callback consumes — drawn from
-// the resulting OIDC ID token.
-type googleIdentity struct {
-	Sub           string
-	Email         string
-	HostedDomain  string
-	EmailVerified bool
+func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleRealIDP {
+	return googleidppkg.NewRealProvider(
+		clientID, clientSecret, workspaceDomain, googleidppkg.WithNow(appNow))
 }
 
 type googleIDPContextKey struct{}
@@ -241,264 +214,6 @@ func googleIDPFromContext(ctx context.Context) googleIDP {
 		return idp
 	}
 	return nil
-}
-
-// R-VF61-2Y6I: in the test environment, the Google identity provider is
-// a test double. The double returns payloads whose shape matches Google's
-// documented OAuth/OIDC responses, so service code under test exercises
-// the same code paths it would against real Google. No outbound network
-// calls leave the process.
-type googleFakeIDP struct{}
-
-func (googleFakeIDP) AuthorizationURL(redirectURI, state string, forceLogin bool) string {
-	v := url.Values{}
-	v.Set("response_type", "code")
-	v.Set("client_id", "fake-client.apps.googleusercontent.com")
-	v.Set("redirect_uri", redirectURI)
-	v.Set("state", state)
-	v.Set("scope", "openid email profile")
-	if forceLogin {
-		// R-3BKZ-L7R4: every web /login redirect demands a fresh
-		// authentication of the user at Google rather than satisfying
-		// the request via silent SSO. prompt=login is Google's
-		// documented parameter for that demand.
-		//
-		// R-126C-AM1E: the MCP authorization flow passes
-		// forceLogin=false so this parameter is OMITTED — MCP
-		// federation uses Google's default behavior, which permits
-		// silent SSO when Google has an active session for the user.
-		v.Set("prompt", "login")
-	}
-	return "https://accounts.google.com/o/oauth2/v2/auth?" + v.Encode()
-}
-
-func (googleFakeIDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
-	const fakeDomain = "example.com"
-	return googleIdentity{
-		Sub:           "fake-sub-" + code,
-		Email:         "user" + "@" + fakeDomain,
-		HostedDomain:  fakeDomain,
-		EmailVerified: true,
-	}, nil
-}
-
-// R-W3K0-QD0E: the dev/prod Google identity provider. Both seam
-// operations are fully implemented: AuthorizationURL builds a URL on
-// Google's documented OAuth 2.0 / OIDC authorization endpoint
-// parameterized with `client_id`, `redirect_uri`, `state`, the
-// `openid email profile` scopes, and the `hd` parameter set to the
-// configured Workspace domain (R-5LQM-O89D); ExchangeCode performs an
-// HTTPS POST to Google's documented token endpoint authenticating with
-// `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (R-68WP-XVCK) and
-// returns an identity carrying the `sub`, `email`, `hosted_domain`,
-// and `email_verified` claims from the resulting ID token.
-//
-// R-33DF-7OX1: built on golang.org/x/oauth2 — the wire format and
-// endpoint URLs come from the package (defaults to google.Endpoint)
-// rather than being hand-rolled.
-//
-// R-T0B2-A4E5: the seam stays exactly two operations; the
-// returned identity carries only the four claims callers depend on.
-type googleRealIDP struct {
-	cfg       oauth2.Config
-	workspace string
-	jwksURL   string
-}
-
-func newGoogleRealIDP(clientID, clientSecret, workspaceDomain string) *googleRealIDP {
-	return &googleRealIDP{
-		cfg: oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			Scopes:       []string{"openid", "email", "profile"},
-			Endpoint:     google.Endpoint,
-		},
-		workspace: workspaceDomain,
-		jwksURL:   "https://www." + "googleapis.com/oauth2/v3/certs",
-	}
-}
-
-func (g *googleRealIDP) AuthorizationURL(redirectURI, state string, forceLogin bool) string {
-	// The redirect URI is request-derived per R-DA34-WX9P, so it is
-	// supplied per-call and applied to a value copy of the config
-	// rather than mutating the shared one.
-	cfg := g.cfg
-	cfg.RedirectURL = redirectURI
-	opts := []oauth2.AuthCodeOption{
-		oauth2.SetAuthURLParam("hd", g.workspace),
-	}
-	if forceLogin {
-		// R-3BKZ-L7R4: web /login demands fresh re-authentication.
-		// R-126C-AM1E: MCP federation passes forceLogin=false so this
-		// parameter is OMITTED on that path.
-		opts = append(opts, oauth2.SetAuthURLParam("prompt", "login"))
-	}
-	return cfg.AuthCodeURL(state, opts...)
-}
-
-func (g *googleRealIDP) ExchangeCode(ctx context.Context, code, redirectURI string) (googleIdentity, error) {
-	cfg := g.cfg
-	cfg.RedirectURL = redirectURI
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	tok, err := cfg.Exchange(ctx, code)
-	if err != nil {
-		return googleIdentity{}, err
-	}
-	rawID, _ := tok.Extra("id_token").(string)
-	if rawID == "" {
-		return googleIdentity{}, errors.New("google: token response missing id_token")
-	}
-	return validateGoogleIDToken(ctx, rawID, g.cfg.ClientID, g.jwksURL)
-}
-
-// R-ZBV4-KEJ6: Google identity claims are accepted only from an ID token
-// valid for this service: Google's issuer, a matching audience, an unexpired
-// token, and an RS256 signature that verifies against Google's published JWKs.
-func validateGoogleIDToken(
-	ctx context.Context, idToken, audience, jwksURL string,
-) (googleIdentity, error) {
-	parts := strings.Split(idToken, ".")
-	if len(parts) != 3 {
-		return googleIdentity{}, errors.New("google: id_token malformed")
-	}
-	header, err := decodeJWTObject(parts[0])
-	if err != nil {
-		return googleIdentity{}, fmt.Errorf("google: id_token header decode: %w", err)
-	}
-	alg, _ := header["alg"].(string)
-	if alg != "RS256" {
-		return googleIdentity{}, fmt.Errorf("google: id_token alg %q is not RS256", alg)
-	}
-	kid, _ := header["kid"].(string)
-	if kid == "" {
-		return googleIdentity{}, errors.New("google: id_token missing kid")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return googleIdentity{}, fmt.Errorf("google: id_token payload decode: %w", err)
-	}
-	var c struct {
-		Sub           string `json:"sub"`
-		Email         string `json:"email"`
-		HD            string `json:"hd"`
-		EmailVerified bool   `json:"email_verified"`
-		Issuer        string `json:"iss"`
-		Audience      any    `json:"aud"`
-		ExpiresAt     int64  `json:"exp"`
-	}
-	if err := json.Unmarshal(payload, &c); err != nil {
-		return googleIdentity{}, fmt.Errorf("google: id_token payload parse: %w", err)
-	}
-	if c.Issuer != "https://accounts.google.com" && c.Issuer != "accounts.google.com" {
-		return googleIdentity{}, fmt.Errorf("google: id_token issuer %q is not Google", c.Issuer)
-	}
-	if !jwtAudienceMatches(c.Audience, audience) {
-		return googleIdentity{}, errors.New("google: id_token audience mismatch")
-	}
-	if c.ExpiresAt <= appNow().Unix() {
-		return googleIdentity{}, errors.New("google: id_token expired")
-	}
-	key, err := fetchGoogleJWK(ctx, jwksURL, kid)
-	if err != nil {
-		return googleIdentity{}, err
-	}
-	signed := parts[0] + "." + parts[1]
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return googleIdentity{}, fmt.Errorf("google: id_token signature decode: %w", err)
-	}
-	sum := sha256.Sum256([]byte(signed))
-	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, sum[:], sig); err != nil {
-		return googleIdentity{}, fmt.Errorf("google: id_token signature invalid: %w", err)
-	}
-	return googleIdentity{
-		Sub:           c.Sub,
-		Email:         c.Email,
-		HostedDomain:  c.HD,
-		EmailVerified: c.EmailVerified,
-	}, nil
-}
-
-func decodeJWTObject(part string) (map[string]any, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(part)
-	if err != nil {
-		return nil, err
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	return obj, nil
-}
-
-func jwtAudienceMatches(aud any, want string) bool {
-	switch v := aud.(type) {
-	case string:
-		return v == want
-	case []any:
-		for _, elem := range v {
-			if s, ok := elem.(string); ok && s == want {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func fetchGoogleJWK(ctx context.Context, jwksURL, kid string) (*rsa.PublicKey, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("google: jwks request: %w", err)
-	}
-	client := http.DefaultClient
-	if ctxClient, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && ctxClient != nil {
-		client = ctxClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("google: jwks fetch: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("google: jwks fetch status %d", resp.StatusCode)
-	}
-	var doc struct {
-		Keys []struct {
-			Kty string `json:"kty"`
-			Use string `json:"use"`
-			Alg string `json:"alg"`
-			Kid string `json:"kid"`
-			N   string `json:"n"`
-			E   string `json:"e"`
-		} `json:"keys"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("google: jwks parse: %w", err)
-	}
-	for _, k := range doc.Keys {
-		if k.Kid != kid || k.Kty != "RSA" || k.N == "" || k.E == "" {
-			continue
-		}
-		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
-		if err != nil {
-			return nil, fmt.Errorf("google: jwk n decode: %w", err)
-		}
-		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
-		if err != nil {
-			return nil, fmt.Errorf("google: jwk e decode: %w", err)
-		}
-		e := new(big.Int).SetBytes(eBytes)
-		if !e.IsInt64() || e.Int64() <= 1 {
-			return nil, errors.New("google: jwk exponent invalid")
-		}
-		return &rsa.PublicKey{
-			N: new(big.Int).SetBytes(nBytes),
-			E: int(e.Int64()),
-		}, nil
-	}
-	return nil, errors.New("google: signing key not found")
 }
 
 // R-LWCN-ZBXO: authConfig is the single named configuration surface for

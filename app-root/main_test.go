@@ -10223,8 +10223,8 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		// that trusts the httptest CA, so the HTTPS POST completes
 		// against the in-process server rather than reaching out to
 		// Google (R-VF61-2Y6I).
-		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
-		idp.jwksURL = ts.URL + "/certs"
+		idp.SetTokenURLForTest(ts.URL + "/token")
+		idp.SetJWKsURLForTest(ts.URL + "/certs")
 		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
 
@@ -10287,14 +10287,15 @@ func TestR_W3K0_QD0E_real_google_identity_provider(t *testing.T) {
 		// Default TokenURL must be Google's documented HTTPS token
 		// endpoint. Host concatenated at source per R-70ZT-NY4F.
 		wantHost := "oauth2." + "googleapis." + "com"
-		u, err := url.Parse(idp.cfg.Endpoint.TokenURL)
+		tokenURL := idp.TokenURL()
+		u, err := url.Parse(tokenURL)
 		if err != nil {
-			t.Fatalf("parse TokenURL %q: %v", idp.cfg.Endpoint.TokenURL, err)
+			t.Fatalf("parse TokenURL %q: %v", tokenURL, err)
 		}
 		if u.Scheme != "https" || u.Host != wantHost {
 			t.Errorf("default token endpoint = %q, want scheme=https "+
 				"host=%q (R-W3K0-QD0E: Google's documented token "+
-				"endpoint, HTTPS)", idp.cfg.Endpoint.TokenURL, wantHost)
+				"endpoint, HTTPS)", tokenURL, wantHost)
 		}
 	})
 }
@@ -10395,8 +10396,8 @@ func TestR_ZBV4_KEJ6_real_google_id_token_validation(t *testing.T) {
 		t.Cleanup(ts.Close)
 
 		idp := newGoogleRealIDP(clientID, clientSecret, workspaceDomain)
-		idp.cfg.Endpoint.TokenURL = ts.URL + "/token"
-		idp.jwksURL = ts.URL + "/certs"
+		idp.SetTokenURLForTest(ts.URL + "/token")
+		idp.SetJWKsURLForTest(ts.URL + "/certs")
 		exchangeCtx := context.WithValue(
 			context.Background(), oauth2.HTTPClient, ts.Client())
 		_, err := idp.ExchangeCode(exchangeCtx, "auth-code-abc", redirectURI)
@@ -10446,12 +10447,13 @@ func TestR_ZBV4_KEJ6_real_google_id_token_validation(t *testing.T) {
 // R-33DF-7OX1: the upstream-OAuth client is built on
 // golang.org/x/oauth2 — JSON-RPC, transport framing, and endpoint URLs
 // come from the package rather than being hand-rolled. Verified
-// structurally by scanning main.go's import list for the package path.
+// structurally by scanning the extracted Google identity-provider package's
+// import list for the package path.
 func TestR_33DF_7OX1_upstream_oauth_client_built_on_x_oauth2(t *testing.T) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "main.go", nil, parser.ImportsOnly)
+	file, err := parser.ParseFile(fset, "googleidp/googleidp.go", nil, parser.ImportsOnly)
 	if err != nil {
-		t.Fatalf("parse main.go imports: %v", err)
+		t.Fatalf("parse googleidp/googleidp.go imports: %v", err)
 	}
 	want := `"golang.org/x/oauth2"`
 	for _, imp := range file.Imports {
@@ -10459,9 +10461,9 @@ func TestR_33DF_7OX1_upstream_oauth_client_built_on_x_oauth2(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("main.go does not import %s — R-33DF-7OX1 requires the "+
-		"upstream-OAuth client be built on golang.org/x/oauth2, not "+
-		"a hand-rolled HTTP client", want)
+	t.Errorf("googleidp/googleidp.go does not import %s — R-33DF-7OX1 "+
+		"requires the upstream-OAuth client be built on golang.org/x/oauth2, "+
+		"not a hand-rolled HTTP client", want)
 }
 
 // TestR_ZPE1_0DV8_authorization_code_store_single_use_and_bound pins the
@@ -13473,7 +13475,7 @@ func TestR_8OAK_OKFV_make_build_static_linux_amd64_and_make_test_runs_suite(t *t
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
-		"jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
+		"googleidp/googleidp.go", "jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
@@ -13561,7 +13563,7 @@ func TestR_8PIH_2C6K_make_install_places_hal_under_home_local_bin(t *testing.T) 
 	for _, name := range []string{
 		"Makefile", "main.go", "go.mod", "go.sum", "web/design.css", "web/render.go",
 		"counter/counter.go", "oauth/authcode.go", "oauth/client.go", "oauth/state.go", "oauth/token.go",
-		"jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
+		"googleidp/googleidp.go", "jsonapi/jsonapi.go", "mcpwire/mcpwire.go",
 		"websession/session.go",
 	} {
 		src, err := os.ReadFile(name)
