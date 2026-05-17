@@ -3,6 +3,7 @@ package oauthflow_test
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	jsonapipkg "github.com/mgreenly/hal/jsonapi"
 	oauthpkg "github.com/mgreenly/hal/oauth"
 	oauthflowpkg "github.com/mgreenly/hal/oauthflow"
+	websessionpkg "github.com/mgreenly/hal/websession"
 
 	_ "modernc.org/sqlite"
 )
@@ -226,6 +228,102 @@ func TestR_YRMT_B7LZ_restarted_client_store_still_authorizes(t *testing.T) {
 	}
 }
 
+// R-5LQM-O89D: the service is configured at deploy time with the
+// single Google Workspace domain whose users are allowed. A Google
+// identity whose hosted-domain claim is outside that domain is
+// rejected at the federation step with a clear error and no token /
+// web session is issued. The fake IDP returns the constant hosted
+// domain "example.com"; we drive the callback under a configured
+// allow-domain of "allowed.example.org" so the check rejects.
+func TestR_5LQM_O89D_callback_rejects_off_domain_identity(t *testing.T) {
+	f := newCallbackFixture("allowed.example.org")
+
+	loginReq := httptest.NewRequest("GET", "/login", nil)
+	loginRec := httptest.NewRecorder()
+	f.surface.HandleLogin(loginRec, loginReq)
+	loginRes := loginRec.Result()
+	defer loginRes.Body.Close()
+	var bindingID string
+	for _, c := range loginRes.Cookies() {
+		if c.Name == oauthpkg.StateCookieName {
+			bindingID = c.Value
+		}
+	}
+	loc, err := url.Parse(loginRes.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	state := loc.Query().Get("state")
+	if state == "" || bindingID == "" {
+		t.Fatalf("login did not produce state/binding "+
+			"(state=%q bindingID=%q)", state, bindingID)
+	}
+
+	target := "/oauth/google/callback?state=" + url.QueryEscape(state) +
+		"&code=fake"
+	cbReq := httptest.NewRequest("GET", target, nil)
+	cbReq.AddCookie(&http.Cookie{Name: oauthpkg.StateCookieName, Value: bindingID})
+	cbRec := httptest.NewRecorder()
+	f.surface.HandleGoogleCallback(cbRec, cbReq)
+	cbRes := cbRec.Result()
+	defer cbRes.Body.Close()
+
+	if cbRes.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for off-domain identity "+
+			"(R-5LQM-O89D)", cbRes.StatusCode)
+	}
+	body, _ := io.ReadAll(cbRes.Body)
+	lb := strings.ToLower(string(body))
+	if !strings.Contains(lb, "domain") && !strings.Contains(lb, "workspace") {
+		t.Fatalf("error body must name the cause (R-5LQM-O89D): %q", body)
+	}
+}
+
+// R-5LQM-O89D: when the Google-asserted hosted domain matches the
+// configured Workspace domain, the callback proceeds past the
+// federation check and produces the placeholder success response.
+// (Web-session establishment lands under R-CXJ2-R3BN.) The configured
+// domain ("example.com") matches the fake IDP's constant HostedDomain
+// claim, so the success path is exercised without any environment
+// plumbing.
+func TestR_5LQM_O89D_callback_accepts_in_domain_identity(t *testing.T) {
+	f := newCallbackFixture("example.com")
+
+	loginReq := httptest.NewRequest("GET", "/login", nil)
+	loginRec := httptest.NewRecorder()
+	f.surface.HandleLogin(loginRec, loginReq)
+	loginRes := loginRec.Result()
+	defer loginRes.Body.Close()
+	var bindingID string
+	for _, c := range loginRes.Cookies() {
+		if c.Name == oauthpkg.StateCookieName {
+			bindingID = c.Value
+		}
+	}
+	loc, _ := url.Parse(loginRes.Header.Get("Location"))
+	state := loc.Query().Get("state")
+
+	target := "/oauth/google/callback?state=" + url.QueryEscape(state) +
+		"&code=fake"
+	cbReq := httptest.NewRequest("GET", target, nil)
+	cbReq.AddCookie(&http.Cookie{Name: oauthpkg.StateCookieName, Value: bindingID})
+	cbRec := httptest.NewRecorder()
+	f.surface.HandleGoogleCallback(cbRec, cbReq)
+	cbRes := cbRec.Result()
+	defer cbRes.Body.Close()
+
+	if cbRes.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(cbRes.Body)
+		t.Fatalf("status = %d, want 303 for in-domain identity "+
+			"(R-5LQM-O89D / R-CXJ2-R3BN); body=%q",
+			cbRes.StatusCode, body)
+	}
+	if loc := cbRes.Header.Get("Location"); loc != "/" {
+		t.Fatalf("Location = %q, want %q after in-domain callback "+
+			"(R-CXJ2-R3BN)", loc, "/")
+	}
+}
+
 type authorizeFixture struct {
 	surface oauthflowpkg.Surface
 	states  *oauthpkg.StateStore
@@ -275,6 +373,35 @@ func (f authorizeFixture) driveAuthorize(v url.Values) *httptest.ResponseRecorde
 	rec := httptest.NewRecorder()
 	f.surface.HandleOAuthAuthorize(rec, req)
 	return rec
+}
+
+type callbackFixture struct {
+	surface     oauthflowpkg.Surface
+	webSessions *websessionpkg.Store
+}
+
+func newCallbackFixture(workspaceDomain string) callbackFixture {
+	states := oauthpkg.NewStateStore(oauthpkg.StateOptions{
+		TTL: func() time.Duration { return testOAuthTTL },
+	})
+	webSessions := websessionpkg.New(websessionpkg.Options{
+		AbsoluteTTL: func() time.Duration { return 12 * time.Hour },
+		IdleTTL:     func() time.Duration { return time.Hour },
+	})
+	return callbackFixture{
+		webSessions: webSessions,
+		surface: oauthflowpkg.Surface{
+			GoogleIDP:             googleidppkg.FakeProvider{},
+			OAuthStates:           states,
+			OAuthAuthCodes:        oauthpkg.NewAuthCodeStore(oauthpkg.AuthCodeOptions{}),
+			WebSessions:           webSessions,
+			OAuthStateTTL:         func() time.Duration { return testOAuthTTL },
+			WebSessionAbsoluteTTL: func() time.Duration { return 12 * time.Hour },
+			WorkspaceDomain:       func() string { return workspaceDomain },
+			RequestBaseURL:        func(*http.Request) string { return testBaseURL },
+			WriteOAuthError:       jsonapipkg.WriteOAuthError,
+		},
+	}
 }
 
 func cloneValues(in url.Values) url.Values {
