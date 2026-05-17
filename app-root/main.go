@@ -26,6 +26,7 @@ import (
 	jsonapipkg "github.com/mgreenly/hal/jsonapi"
 	mcpwirepkg "github.com/mgreenly/hal/mcpwire"
 	oauthpkg "github.com/mgreenly/hal/oauth"
+	oauthflowpkg "github.com/mgreenly/hal/oauthflow"
 	webpkg "github.com/mgreenly/hal/web"
 	websessionpkg "github.com/mgreenly/hal/websession"
 	_ "modernc.org/sqlite"
@@ -957,6 +958,27 @@ func jsonAPISurfaceWithAgents(
 	return s
 }
 
+func oauthFlowSurface(
+	servingIDP googleidppkg.Provider, states *oauthStateStorage, authCodes *oauthAuthCodeStorage,
+	clients *oauthClientStorage, sessions *webSessionStorage,
+) oauthflowpkg.Surface {
+	return oauthflowpkg.Surface{
+		GoogleIDP:                   configuredGoogleIDP(servingIDP),
+		OAuthStates:                 states,
+		OAuthAuthCodes:              authCodes,
+		OAuthClients:                clients,
+		WebSessions:                 sessions,
+		OAuthStateTTL:               func() time.Duration { return authCfg().OAuthStateTTL },
+		WebSessionAbsoluteTTL:       func() time.Duration { return authCfg().WebSessionAbsoluteTTL },
+		WorkspaceDomain:             googleWorkspaceDomain,
+		CanonicalResourceIdentifier: canonicalResourceIdentifier,
+		RequestBaseURL:              requestBaseURL,
+		ForwardedProtoHTTPS:         forwardedProtoHTTPS,
+		WriteOAuthError:             writeOAuthError,
+		NewStateValue:               newOAuthStateValue,
+	}
+}
+
 // R-CXJ2-R3BN: the only code path that establishes a web session is the
 // successful completion of the Google federation round-trip R-8GJG-64MR
 // defines — the callback handler validates state per R-ETP6-60VA,
@@ -1443,54 +1465,7 @@ func handleLoginWithGoogleIDP(servingIDP googleidppkg.Provider, w http.ResponseW
 func handleLoginWithGoogleIDPAndStateStore(
 	servingIDP googleidppkg.Provider, states *oauthStateStorage, w http.ResponseWriter, r *http.Request,
 ) {
-	idp := configuredGoogleIDP(servingIDP)
-	if idp == nil {
-		http.Error(w, "google identity provider not configured",
-			http.StatusServiceUnavailable)
-		return
-	}
-	state, err := newOAuthStateValue()
-	if err != nil {
-		http.Error(w, "state generation failed",
-			http.StatusInternalServerError)
-		return
-	}
-	// R-ETP6-60VA: the bindingID written to the browser as the
-	// `hal_oauth_state` cookie ties the in-flight state to the
-	// originating browser session. The callback compares this cookie
-	// against the bindingID recorded server-side; a callback that
-	// presents no cookie, or a cookie whose value differs, is rejected.
-	bindingID, err := newOAuthStateValue()
-	if err != nil {
-		http.Error(w, "state generation failed",
-			http.StatusInternalServerError)
-		return
-	}
-	// R-MTRN-DL9W: record the origin discriminator ("web") so the
-	// Google callback's dispatch (R-MUZJ-RD0L) can route this record
-	// to the web-session establishment path.
-	states.PutWeb(state, bindingID)
-	// R-AYLJ-8SYX: the binding cookie is HttpOnly + SameSite=Lax, with
-	// `Secure` set only when the request reached the service over HTTPS
-	// (production posture detected via the forwarded-protocol signal,
-	// per R-ID5L-BSJM). SameSite=Lax — not Strict — is mandatory so the
-	// cookie travels on Google's top-level cross-site redirect back to
-	// /oauth/google/callback. MaxAge matches the state TTL so an
-	// abandoned flow leaves no stale cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookieName,
-		Value:    bindingID,
-		Path:     "/",
-		MaxAge:   int(authCfg().OAuthStateTTL / time.Second),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   forwardedProtoHTTPS(r),
-	})
-	redirectURI := requestBaseURL(r) + "/oauth/google/callback"
-	// R-3BKZ-L7R4: web /login demands fresh re-authentication — pass
-	// forceLogin=true so the resulting redirect carries prompt=login.
-	http.Redirect(w, r, idp.AuthorizationURL(redirectURI, state, true),
-		http.StatusSeeOther)
+	oauthFlowSurface(servingIDP, states, nil, nil, nil).HandleLogin(w, r)
 }
 
 // handleGoogleCallback receives Google's redirect after the user
@@ -1526,152 +1501,7 @@ func handleGoogleCallbackWithGoogleIDPStores(
 	sessions *webSessionStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
-	state := r.URL.Query().Get("state")
-	if state == "" {
-		http.Error(w, errOAuthStateMissing.Error(), http.StatusBadRequest)
-		return
-	}
-	var presentedBinding string
-	if c, err := r.Cookie(oauthStateCookieName); err == nil {
-		presentedBinding = c.Value
-	}
-	stateRec, err := states.Consume(state, presentedBinding)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	// Clear the binding cookie now that it has done its job. Any future
-	// /login regenerates a fresh value.
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   forwardedProtoHTTPS(r),
-	})
-	// R-5LQM-O89D: exchange the authorization code for an identity and
-	// reject any identity whose Google-asserted hosted domain is not
-	// the single configured Workspace domain. No token / web session is
-	// issued on rejection. The error message clearly names the cause.
-	idp := configuredGoogleIDP(servingIDP)
-	if idp == nil {
-		http.Error(w, "google identity provider not configured",
-			http.StatusServiceUnavailable)
-		return
-	}
-	identity, err := idp.ExchangeCode(
-		r.Context(),
-		r.URL.Query().Get("code"),
-		requestBaseURL(r)+"/oauth/google/callback",
-	)
-	if err != nil {
-		http.Error(w, "google code exchange failed", http.StatusBadGateway)
-		return
-	}
-	if !identity.EmailVerified {
-		// R-EMW1-D8A0: Google-federated identities are accepted only
-		// when Google asserts a verified email address. This gate runs
-		// before origin dispatch, so neither web-origin nor mcp-origin
-		// callbacks mint a web session, HAL authorization code, or token
-		// chain from an unverified email claim.
-		if mcpCtx := stateRec.MCPContext(); stateRec.Origin() == "mcp" && mcpCtx != nil {
-			writeOAuthErrorRedirect(w, r, mcpCtx.RedirectURI,
-				"access_denied",
-				"Google email address is not verified",
-				mcpCtx.ClientState)
-			return
-		}
-		http.Error(w, "Google email address is not verified",
-			http.StatusForbidden)
-		return
-	}
-	if identity.HostedDomain != googleWorkspaceDomain() {
-		// R-MUZJ-RD0L: workspace-domain rejection surface depends on the
-		// origin discriminator. Web-origin gets an in-browser error page;
-		// mcp-origin gets the OAuth `error=access_denied` redirect back
-		// to the MCP client's registered redirect_uri with the client's
-		// original `state` echoed.
-		if mcpCtx := stateRec.MCPContext(); stateRec.Origin() == "mcp" && mcpCtx != nil {
-			writeOAuthErrorRedirect(w, r, mcpCtx.RedirectURI,
-				"access_denied",
-				"identity is not in the allowed Workspace domain",
-				mcpCtx.ClientState)
-			return
-		}
-		http.Error(w,
-			"this Google account is not in the allowed Workspace domain",
-			http.StatusForbidden)
-		return
-	}
-	// R-MUZJ-RD0L: dispatch on the recorded origin discriminator. The
-	// state-binding (R-T37L-4J01) and workspace-domain (R-5LQM-O89D)
-	// checks above have both passed; only now is an authenticated
-	// artifact produced.
-	switch stateRec.Origin() {
-	case "mcp":
-		mcpCtx := stateRec.MCPContext()
-		if mcpCtx == nil {
-			http.Error(w, "mcp state record missing context",
-				http.StatusInternalServerError)
-			return
-		}
-		// Mint a HAL authorization code (R-ZPE1-0DV8) bound to the
-		// state record's recorded MCP-authorize context — NOT to the
-		// callback request's query parameters. The Google-asserted
-		// email is recorded as ownerEmail; the recorded resource
-		// value (R-4GRA-EGBY-vetted at authorize time) is bound onto
-		// the code so token exchange can propagate it onto the
-		// access-token record.
-		code, err := authCodes.IssueWithResource(
-			mcpCtx.ClientID,
-			mcpCtx.RedirectURI,
-			mcpCtx.CodeChallenge,
-			mcpCtx.CodeChallengeMethod,
-			identity.Email,
-			mcpCtx.Resource,
-		)
-		if err != nil {
-			http.Error(w, "authorization code issuance failed",
-				http.StatusInternalServerError)
-			return
-		}
-		// Build the redirect to the MCP client's registered callback
-		// using the RECORDED redirect_uri and the RECORDED original
-		// MCP `state` (echoed back). Do not establish a web session;
-		// do not touch the web-session store.
-		target := mcpCtx.RedirectURI +
-			"?code=" + url.QueryEscape(code) +
-			"&state=" + url.QueryEscape(mcpCtx.ClientState)
-		http.Redirect(w, r, target, http.StatusSeeOther)
-		return
-	case "web":
-		// R-CXJ2-R3BN: mint a web session and set the session cookie. The
-		// plaintext identifier appears only here, in the Set-Cookie response;
-		// the store keeps a hash (R-SLGL-B5B4).
-		plaintext, err := sessions.Issue(identity.Email)
-		if err != nil {
-			http.Error(w, "session issuance failed",
-				http.StatusInternalServerError)
-			return
-		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     webSessionCookieName,
-			Value:    plaintext,
-			Path:     "/",
-			MaxAge:   int(authCfg().WebSessionAbsoluteTTL / time.Second),
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Secure:   forwardedProtoHTTPS(r),
-		})
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	default:
-		http.Error(w, "state record carries unknown origin",
-			http.StatusInternalServerError)
-		return
-	}
+	oauthFlowSurface(servingIDP, states, authCodes, nil, sessions).HandleGoogleCallback(w, r)
 }
 
 // writeOAuthErrorRedirect issues a 303 to the MCP client's registered
@@ -1684,11 +1514,7 @@ func writeOAuthErrorRedirect(
 	w http.ResponseWriter, r *http.Request,
 	redirectURI, errCode, errDesc, clientState string,
 ) {
-	target := redirectURI +
-		"?error=" + url.QueryEscape(errCode) +
-		"&error_description=" + url.QueryEscape(errDesc) +
-		"&state=" + url.QueryEscape(clientState)
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	oauthflowpkg.WriteOAuthErrorRedirect(w, r, redirectURI, errCode, errDesc, clientState)
 }
 
 // R-FZ10-BE37: /logout ends the current web session and returns the
@@ -1940,25 +1766,11 @@ func normalizeOAuthClientName(raw string) (string, bool) {
 }
 
 func validOAuthRedirectURI(raw string) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	// R-9OWM-O8XJ: DCR accepts only absolute http/https redirect URIs
-	// with a non-empty host and no fragment. Loopback HTTP clients are
-	// covered by the same http allowance; malformed, relative,
-	// fragment-bearing, hostless, or non-http(s) values are rejected.
-	if !parsed.IsAbs() || parsed.Host == "" || parsed.Fragment != "" {
-		return false
-	}
-	return parsed.Scheme == "http" || parsed.Scheme == "https"
+	return oauthflowpkg.ValidRedirectURI(raw)
 }
 
 func supportedAuthorizeCodeChallengeMethod(method string) bool {
-	// R-JTTZ-CG5J: the authorize endpoint accepts only explicit S256.
-	// Omitted, empty, plain, or any other method is rejected before Google
-	// redirect or HAL state creation.
-	return method == "S256"
+	return oauthflowpkg.SupportedAuthorizeCodeChallengeMethod(method)
 }
 
 // R-4SH1-HQGP: GET /oauth/authorize hands the user-agent off to Google
@@ -2002,120 +1814,7 @@ func handleOAuthAuthorizeWithGoogleIDPAndStateStoreAndClientStore(
 	servingIDP googleidppkg.Provider, states *oauthStateStorage, clients *oauthClientStorage,
 	w http.ResponseWriter, r *http.Request,
 ) {
-	idp := configuredGoogleIDP(servingIDP)
-	if idp == nil {
-		http.Error(w, "google identity provider not configured",
-			http.StatusServiceUnavailable)
-		return
-	}
-	q := r.URL.Query()
-	clientID := q.Get("client_id")
-	if clientID == "" {
-		http.Error(w, "client_id is required", http.StatusBadRequest)
-		return
-	}
-	client := clients.Lookup(clientID)
-	if client == nil {
-		http.Error(w, "unknown client_id", http.StatusBadRequest)
-		return
-	}
-	requested := q.Get("redirect_uri")
-	if requested == "" {
-		http.Error(w, "redirect_uri is required", http.StatusBadRequest)
-		return
-	}
-	matched := false
-	for _, u := range client.RedirectURIs() {
-		if u == requested {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		http.Error(w, "redirect_uri does not match a registered value",
-			http.StatusBadRequest)
-		return
-	}
-	// R-BAXT-SBU9: /oauth/authorize accepts only Authorization Code
-	// requests carrying a non-empty PKCE challenge and a supported
-	// challenge method. Bad flow shape is refused here, before any
-	// redirect to Google or state record creation.
-	if q.Get("response_type") != "code" {
-		http.Error(w, "response_type must be code", http.StatusBadRequest)
-		return
-	}
-	if q.Get("code_challenge") == "" {
-		http.Error(w, "code_challenge is required", http.StatusBadRequest)
-		return
-	}
-	if !supportedAuthorizeCodeChallengeMethod(q.Get("code_challenge_method")) {
-		http.Error(w, "unsupported code_challenge_method", http.StatusBadRequest)
-		return
-	}
-	// R-WLUL-MZCD: omitted resource indicators target the one canonical
-	// service resource. R-4GRA-EGBY: a present value still has to match
-	// that identifier byte-for-byte before any Google redirect or HAL
-	// authorization code can be issued.
-	requestedResource := q.Get("resource")
-	if requestedResource == "" {
-		requestedResource = canonicalResourceIdentifier()
-	} else if requestedResource != canonicalResourceIdentifier() {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_target",
-			"resource parameter does not match this service's canonical identifier")
-		return
-	}
-	state, err := newOAuthStateValue()
-	if err != nil {
-		http.Error(w, "state generation failed",
-			http.StatusInternalServerError)
-		return
-	}
-	// R-T37L-4J01: the MCP `/oauth/authorize` redirect to Google is one
-	// of the two enumerated redirect-to-Google paths governed by the
-	// state-binding contract. Mirror the web `/login` posture: generate
-	// a fresh bindingID, record the state server-side bound to it, and
-	// set the `hal_oauth_state` cookie on the redirect response so the
-	// callback can validate both. Skipping any of these steps lets the
-	// callback reject the state as "not recognized" — the exact failure
-	// mode R-T37L-4J01 forbids.
-	bindingID, err := newOAuthStateValue()
-	if err != nil {
-		http.Error(w, "state generation failed",
-			http.StatusInternalServerError)
-		return
-	}
-	// R-MTRN-DL9W: record the origin discriminator ("mcp") plus the
-	// byte-for-byte authorize-request context the callback
-	// (R-MUZJ-RD0L) needs to mint the HAL authorization code and
-	// build the redirect to the MCP client's registered callback URL.
-	// `requested` is already R-1ERW-YD9G-verified; the resource value is
-	// canonical, either explicitly per R-4GRA-EGBY or by the
-	// R-WLUL-MZCD omission default. PKCE values are recorded byte-for-byte
-	// from the request.
-	states.PutMCP(state, bindingID, oauthStateMCPContext{
-		ClientID:            clientID,
-		RedirectURI:         requested,
-		CodeChallenge:       q.Get("code_challenge"),
-		CodeChallengeMethod: q.Get("code_challenge_method"),
-		ClientState:         q.Get("state"),
-		Resource:            requestedResource,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookieName,
-		Value:    bindingID,
-		Path:     "/",
-		MaxAge:   int(authCfg().OAuthStateTTL / time.Second),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   forwardedProtoHTTPS(r),
-	})
-	redirectURI := requestBaseURL(r) + "/oauth/google/callback"
-	// R-126C-AM1E: MCP authorization flow does NOT demand fresh
-	// re-authentication — pass forceLogin=false so prompt=login,
-	// prompt=consent, and max_age=0 are omitted, permitting Google
-	// silent SSO when an active session exists.
-	http.Redirect(w, r, idp.AuthorizationURL(redirectURI, state, false),
-		http.StatusSeeOther)
+	oauthFlowSurface(servingIDP, states, nil, clients, nil).HandleOAuthAuthorize(w, r)
 }
 
 // handleOAuthToken is the POST /oauth/token endpoint. It supports the

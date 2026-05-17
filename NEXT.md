@@ -1,100 +1,116 @@
 # NEXT — one transformation
 
-## Remove the Google identity provider's test-only production hooks
+## Extract the OAuth/Google-federation HTTP-flow capability into its own package
 
-**Outcome.** The Google identity-provider package exposes no symbol
-that exists solely for tests to manipulate. The endpoints a test needs
-to redirect to point at an in-test server (the token-exchange endpoint
-and the public-key/JWKS endpoint) are supplied through the same
-construction-time injection discipline the package already uses for its
-clock: real Google endpoints are the defaults, production constructs the
-provider explicitly, and there is no post-construction, test-named
-mutator on the provider. Every observable behavior is byte-for-byte
-unchanged and the full test suite still passes.
+**Outcome.** The browser- and MCP-client-facing OAuth/Google-federation
+HTTP flow — the sign-in redirect to Google, the Google callback that
+binds state, enforces the workspace-domain constraint, and dispatches
+by origin, the OAuth authorize endpoint that validates the client,
+redirect URI, PKCE method, and resource and then redirects to Google,
+together with the OAuth-error-redirect helper and the redirect-URI and
+code-challenge-method validators — lives in its own package with a
+deliberately small exported surface, following the package layout the
+earlier extractions established. The entry-point package depends on
+that surface, no longer contains the flow internals, and keeps only
+route registration and the wiring seam. The program still builds as one
+binary and every observable behavior is unchanged.
 
-**Why.** An earlier phase of this refactor deliberately eliminated all
-test-only production hooks — code paths or exported members that exist
-only so tests can reach into production state. The Google
-identity-provider extraction reintroduced that class: exported,
-test-named mutators on the real provider that production never calls
-and only tests invoke. That is implicit, test-coupled production
-surface of exactly the kind the project removed on purpose. Restoring
-the discipline keeps the boundary explicit and matches the package's
-own existing construction-time injection precedent (its clock).
+**Why.** This OAuth/Google-federation flow is its own capability,
+distinct from the identity provider just extracted, the OAuth token and
+registration endpoints (already thin delegators), and the stores
+already extracted. Isolating it removes the last large block of
+business logic from the entry-point package, unblocks relocating the
+OAuth-flow tests and deleting the corresponding compatibility wrappers,
+and is a prerequisite for the eventual entry-point collapse.
 
 ## Scope
 
-- The defect to correct: the real Google provider currently carries
-  exported, test-named, post-construction mutators (for its
-  token-exchange endpoint and its key/JWKS endpoint) plus the
-  corresponding test-only accessor. After this round no such test-only
-  symbol exists in the package's non-test source.
-- Replace them with the same construction-time injection the package
-  already applies to its clock: the test-redirectable endpoints become
-  optional construction inputs that default to the real Google
-  endpoints when not supplied. Production continues to construct the
-  real provider exactly as it does today and continues to get the real
-  endpoints. A test supplies its in-test endpoints at construction
-  through that same seam — not by mutating the provider after it is
-  built, and not through any symbol whose only caller is a test.
-- Do not merely rename the smell: re-exporting the underlying fields,
-  or adding a differently-named post-construction test mutator, does
-  not satisfy this. The only way a test may redirect an endpoint is the
-  same explicit construction-time injection production uses, with
-  production-real defaults.
-- Behavior is byte-for-byte invariant: the authorization URL, the
-  code-exchange result, and every accept/reject decision of ID-token
-  validation (issuer, audience, expiry, signature, key selection),
-  including error cases and the workspace-domain constraint, are
-  unchanged. The existing identity-provider tests keep every assertion
-  exactly; they migrate from the removed mutators to the
-  construction-time seam (migrating the test call sites is expected and
-  allowed) but assert the same things. Do not weaken, skip, or delete
-  any test or assertion.
-- Do not read application configuration or application stores from the
-  package, do not introduce a package-level global, and do not add any
-  new compatibility alias or shim in the entry-point package beyond
-  what is unavoidable to keep this round green.
-- If the change cannot be completed while staying green in one round,
-  make the largest coherent green portion and name in the result note
-  exactly what changed and what remains. Never loosen the invariant to
-  fit more in.
-- Do not edit reqs/ (the behavioral contract) or helper/.
+- Extract exactly the **OAuth/Google-federation HTTP flow** this round:
+  the login redirect-to-Google handler, the Google-callback handler
+  (state binding, workspace-domain enforcement, origin dispatch,
+  session/auth-code issuance), the OAuth authorize handler (client,
+  redirect-URI, PKCE-method, and resource validation, then Google
+  redirect), the OAuth-error-redirect helper, and the redirect-URI and
+  code-challenge-method validators. The logout handler, the OAuth
+  client-registration endpoint, and the OAuth token endpoint are NOT
+  part of this slice — they are a different concern or already thin
+  delegators; leave them where they are.
+- Every observable behavior is byte-for-byte identical: the redirect
+  targets and their query parameters, the cookies set, the state
+  binding and its consumption, the workspace-domain accept/reject, the
+  origin-based dispatch, every validation accept/reject (client,
+  redirect URI, PKCE method, resource), the issued session/auth-code,
+  and every error response and redirect do not change. The existing
+  tests pin these precisely and are the proof; do not weaken, skip, or
+  delete any test or its assertions.
+- The package must not read application configuration or hold
+  package-level singletons. The Google identity provider enters through
+  its already-extracted provider seam; the OAuth state, auth-code, and
+  client stores and the web-session store enter as their
+  already-extracted package types; and every configuration value or
+  cross-cutting helper the flow needs — the OAuth-state and
+  web-session TTLs, the allowed Workspace domain, the canonical
+  resource identifier, the request base-URL / forwarded-proto / OAuth-
+  error-writing helpers — is supplied to it as an injected input, not
+  read from a global. This is the same no-config/no-singleton
+  discipline the earlier capability extractions established.
+- The package exposes only the minimal surface its consumers need;
+  consumers use only that surface. The existing OAuth-flow tests
+  continue to run and assert unchanged from where they are (they
+  relocate to the new package in a later round).
+- Follow the module and package-layout precedent the earlier
+  extractions set; the exact name and path are yours to choose,
+  idiomatic Go. Do not leave new compatibility aliases in the
+  entry-point package beyond what is unavoidable to keep this round
+  green; prefer migrating the consumer to the new surface.
+- If the whole capability cannot move while staying green in one round,
+  move the largest coherent green slice and name in the result note
+  exactly what moved and what remains, so the next round continues it.
+  Never loosen the invariant to fit more in.
+- Production behavior is identical. Do not edit reqs/ (the behavioral
+  contract) or helper/.
 
 ## Done when
 
-From app-root/, with no behavioral change versus before: no test-only
-symbol remains in the Google identity-provider package's non-test
-source; the full test suite passes; the race-detector run passes;
-gofmt and go vet are clean across the whole module; no source line in
-the module exceeds 120 columns; and the static binary still builds.
+From app-root/, with no behavioral change versus before: the full test
+suite passes, the race-detector run passes, gofmt and go vet are clean
+across the whole module, no source line in the module exceeds 120
+columns, and the static binary still builds.
 
-## Result 2026-05-17
+## Result — 2026-05-17
 
-Completed the Google identity-provider hook removal by replacing the
-post-construction test mutators and token endpoint accessor with construction-time
-endpoint options, then migrated the affected identity-provider tests to inject
-their loopback token and JWKS endpoints during provider construction.
+Completed the OAuth/Google-federation HTTP-flow extraction into the new
+`app-root/oauthflow` package. The entry-point package now wires an injected
+`oauthflow.Surface` and keeps thin compatibility wrappers for the current
+main-package tests. The moved surface owns `/login`, `/oauth/google/callback`,
+`/oauth/authorize`, OAuth error redirects, redirect-URI validation, and
+authorize PKCE-method validation. Logout, registration, and token handling were
+left in their existing packages as scoped.
 
 Files changed:
-- `app-root/googleidp/googleidp.go`
+- `app-root/oauthflow/oauthflow.go`
+- `app-root/main.go`
 - `app-root/main_test.go`
 - `NEXT.md`
 
 Verification:
-- `GOROOT=/usr/local/go go test ./... -run 'TestR_W3K0_QD0E|TestR_ZBV4_KEJ6|TestR_33DF_7OX1'` passed.
-- `GOROOT=/usr/local/go go vet ./...` passed.
-- `test -z "$(gofmt -l $(find . -path './.ralph' -prune -o -type f -name '*.go' -print))"` passed.
-- `awk 'length($0) > 120 { print FILENAME ":" FNR ":" length($0) }' $(find . -path './.ralph' -prune -o -type f -name '*.go' -print)` produced no output.
-- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hal .` passed.
-- `GOROOT=/usr/local/go go test ./...` failed only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because `.ralph/requirements-verified.jsonl` is unreadable locally (`permission denied`), which is out-of-scope Ralph state for this refactor prompt.
-- `GOROOT=/usr/local/go go test -race ./...` failed only at the same local Ralph ledger permission check.
-- `GOROOT=/usr/local/go go test ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
-- `GOROOT=/usr/local/go go test -race ./... -skip TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` passed.
+- `gofmt -w main.go main_test.go oauthflow/oauthflow.go`: passed
+- `GOROOT=/usr/local/go go test ./...`: compiled and ran; failed only at
+  `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+  `.ralph/requirements-verified.jsonl` is permission-denied local Ralph state,
+  which is out of scope for this refactor prompt.
+- `GOROOT=/usr/local/go go test ./... -run '^$'`: passed
+- `GOROOT=/usr/local/go go test -run 'TestR_(9PNQ_BN2G|3BKZ_L7R4|ETP6_60VA|5LQM_O89D|EMW1_D8A0|CXJ2_R3BN|8GJG_64MR|T37L_4J01|MTRN_DL9W|MUZJ_RD0L|4SH1_HQGP|1ERW_YD9G|BAXT_SBU9|4GRA_EGBY|WLUL_MZCD)' .`: passed
+- `GOROOT=/usr/local/go go test -race -run 'TestR_(9PNQ_BN2G|3BKZ_L7R4|ETP6_60VA|5LQM_O89D|EMW1_D8A0|CXJ2_R3BN|8GJG_64MR|T37L_4J01|MTRN_DL9W|MUZJ_RD0L|4SH1_HQGP|1ERW_YD9G|BAXT_SBU9|4GRA_EGBY|WLUL_MZCD)' .`: passed
+- `GOROOT=/usr/local/go go test -race ./... -run '^$'`: passed
+- `GOROOT=/usr/local/go go vet ./...`: passed
+- line-length check for Go sources with `.ralph` pruned: passed
+- `git diff --check`: passed
+- `GOROOT=/usr/local/go CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o /tmp/hal-refactor-build ./`: passed
 
-Blockers or follow-up risks:
-- The shell environment has `GOROOT=/home/mgreenly/.local/go1.23.5.linux-amd64`
-  while `/usr/local/bin/go` is Go 1.26.2; verification required overriding
-  `GOROOT=/usr/local/go`.
-- Full unskipped suite verification remains blocked by unreadable local `.ralph/`
-  state, not by this refactor.
+Notes and follow-up risks:
+- The ambient `go` command has a mixed toolchain environment (`go1.26.2`
+  command with `GOROOT` pointing at a Go 1.23.5 tree). Verification used
+  `GOROOT=/usr/local/go` to select the matching Go tree.
+- Current OAuth-flow tests remain in `main_test.go` by scope; a later round can
+  move them to `oauthflow` and remove the compatibility wrappers.
