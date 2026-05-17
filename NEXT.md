@@ -1,132 +1,117 @@
 # NEXT — one transformation
 
-## Relocate the signed-in agent-presence rendering tests to live with the site-root capability
+## Decouple the identity-coupled site-root tests from another capability's internal storage
 
-**Outcome.** The remaining site-root behavior tests that sign a visitor
-in, give that visitor one or more live agent connections through the
-capability's public dependencies, and then assert the page's aggregate
-banner and agent-stack geometry — the layout the page takes on when
-running agents are present — and that need nothing beyond the
-capability's existing public surface, join the already-relocated
-rendering tests in the co-located test file, constructed and driven
-through that same public injected-input surface. They assert
-byte-for-byte the same observable properties as before. No production
-source change and no behavior change.
+**Outcome.** The small set of site-root behavior tests that today learn
+a specific live agent connection's generated identity by reaching into
+another capability's internal in-memory storage are rewritten so they
+instead obtain that identity from that capability's already-public
+live-connections view — the very same view the site-root page itself
+renders those connections from. The tests stay exactly where they are,
+assert byte-for-byte the same observable page properties, and afterward
+hold no access of any kind to that other capability's internals. No
+production source change, no behavior change, and no test relocation
+this round.
 
-**Why.** Two batches of pure site-root rendering tests have already
-been relocated cleanly through the capability's public surface. The
-next homogeneous batch is the signed-in tests whose assertions are
-about the aggregate presence layout — they only need a visitor signed
-in with some live agent connections created through public means, never
-the generated identity of any particular connection. Moving them now
-reuses the proven pattern with no rewrite and no new test machinery,
-further shrinks the entry-point test monolith, and continues toward the
-point where the entry-point compatibility wrappers can be retired and
-the entry point collapsed.
+**Why.** These tests assert on a rendered agent row keyed by a
+connection's generated identity, and currently recover that identity by
+locking and indexing another capability's internal storage through a
+private helper. That coupling is the only thing keeping them from the
+proven relocation pattern the earlier batches used. The capability
+already exposes a public roll-up of live agent connections (their
+identity, owning client, display name, and issue time), and the
+site-root page itself renders from exactly that roll-up — so reading
+the identity back through it is equivalent to what the page did by
+construction. Doing this as its own round, with the tests unmoved and
+still green, makes it a single independently-verifiable claim — "these
+tests no longer touch another capability's internals and assert
+identically" — cleanly separable from the later relocation, so a
+regression in either is unambiguously attributable.
 
 ## Scope
 
-- Relocate exactly the site-root behavior tests that (1) establish a
-  signed-in visitor and one or more live agent connections using only
-  the capability's public dependencies, (2) assert the resulting page's
-  aggregate banner / agent-stack geometry, and (3) need nothing beyond
-  the capability's existing public surface to construct and drive it.
-  They move into the same co-located test file as the already-relocated
-  tests and assert byte-for-byte the same observable properties
-  (presence versus absence of the agents region, banner growth and
-  stack placement, canonical offsets and padding, compact-versus-
-  expanded banner auth). Do not weaken, rename, skip, or delete any
-  assertion in the move.
-- This slice is deliberately limited to relocation that requires NO
-  behavioral rewrite of any test. Tests whose assertions depend on
-  recovering a specific agent connection's generated identity, and
-  which today obtain it by reaching into another capability's internal
-  storage, are NOT part of this slice — they relocate in a later round
-  that will first rewrite them to obtain that identity through the
-  already-available public agent-list view, with no production change.
-  A no-op relocation and a behavioral rewrite are separate,
-  independently-verifiable claims and must not be combined in one
-  round.
-- Also NOT part of this slice, left unchanged where they are: tests
-  that set up deterministic ordering by mutating another capability's
-  internal per-connection timestamps (no public means to do so exists
-  yet); tests that read application (non-test) source files; the
-  structural source-text invariant test that pins how the single
-  entry-owned counter is threaded through the entry point; the test
-  that drives a full sign-in-through-federation round trip before
-  observing the site root (it travels with the federation-flow test
-  relocation); and the tests that stand up a live server to exercise
-  its streaming, footer, or onboarding behavior. Name in the result
-  note exactly which tests moved and which remain.
-- The entry-point compatibility wrappers that the not-yet-moved tests
-  still use stay in place this round. Their deletion is a later round
-  and is gated on every remaining behavior caller having migrated and
-  on the structural source-text invariant being re-expressed; do not
-  delete them now, and do not delete or alter that structural invariant
-  — relocating behavior tests must not touch it.
-- The relocated tests construct and drive the capability through its
-  existing injected-input surface and public dependency APIs only — not
-  through a global, the request context, application configuration, or
-  any other capability's internal storage. The co-located test file
-  introduces no cross-capability test-only seam (no federation or
-  identity-provider doubles).
-- This batch is homogeneous and is expected to move whole. Move the
-  largest coherent set that keeps the whole suite green; if it must
-  nonetheless be split, move the largest coherent green slice and name
-  precisely what moved and what remains so the next round continues it.
-  Never loosen the invariant to fit more in.
-- This is a test-location change only: do not modify production source,
+- Rewrite exactly the site-root behavior tests that learn a specific
+  live agent connection's generated identity by reading another
+  capability's internal storage and have no other coupling. Each place
+  such a test recovers that identity — some recover it in more than one
+  place — is changed to obtain it from the capability's already-public
+  live-connections view, selecting the relevant entry by the
+  per-test-distinct owning-client distinguisher the test already sets
+  up. A test that is only partially converted does not satisfy this
+  round: after the rewrite, no such test may retain any access to the
+  other capability's internal storage or its private identity helper,
+  anywhere in it.
+- Every observable assertion is byte-for-byte unchanged: the rendered
+  agent row, its identity attribute, the escaping, the ordering, and
+  every other page property each test pins. This round changes only how
+  the expected identity is acquired by the test, never what is asserted
+  about the render. Do not weaken, rename, skip, or delete any
+  assertion.
+- The tests stay exactly where they are this round — no relocation.
+  They continue to drive the capability through the existing
+  entry-point compatibility wrapper, unchanged. Relocating them through
+  the public surface is a separate later round; a behavioral rewrite
+  and a relocation are distinct, independently-verifiable claims and
+  must not be combined.
+- NOT part of this round, left entirely unchanged where they are: tests
+  that set up their scenario by writing another capability's internal
+  state (for example, simulating revoked, expired, or
+  specifically-timed connections) — there is no public means for that
+  and none is to be introduced here; tests that additionally read
+  application (non-test) source files; the structural source-text
+  invariant test that pins how the single entry-owned counter is
+  threaded through the entry point; the test that drives a full
+  sign-in-through-federation round trip before observing the site root;
+  and the tests that stand up a live server to exercise its streaming,
+  footer, or onboarding behavior. Name in the result note exactly which
+  tests were rewritten.
+- This is a behavior-preserving, test-only change. The public
+  live-connections view the tests now read already exists and is
+  already what the page renders from; it must not be altered or
+  extended. Introduce no new production symbol, no test-only seam, and
+  no cross-capability test double. Do not modify production source,
   reqs/ (the behavioral contract), or helper/.
 
 ## Done when
 
 From app-root/, with no behavioral change versus before: the full test
-suite passes — the relocated site-root tests asserting the same
-observable properties from their new home, the tests left behind
-unchanged in place — the race-detector run passes, gofmt and go vet are
-clean across the whole module, no source line in the module exceeds 120
-columns, and the static binary still builds.
+suite passes — the rewritten tests asserting the same observable
+properties from where they already are, every other test unchanged —
+the race-detector run passes, gofmt and go vet are clean across the
+whole module, no source line in the module exceeds 120 columns, and the
+static binary still builds; and each rewritten test obtains the
+connection identity solely through the capability's public
+live-connections view, with no remaining access to another capability's
+internal storage.
 
 ## Result note — 2026-05-17
 
-Completed one relocation iteration for the signed-in aggregate
-agent-presence rendering tests. Moved these tests from `app-root/main_test.go`
-to `app-root/siteindex/siteindex_test.go`, driving them through the
-siteindex capability's injected `Surface` and public dependency APIs:
-`TestR_VTZ5_5FF5_agents_block_gating`,
-`TestR_2ZZH_LJYA_banner_grows_for_identity_stack`,
-`TestR_6QIE_4D71_agent_stack_uses_canonical_bottom_offset`,
-`TestR_CNWX_9VB2_agent_stack_matches_zero_agent_bottom_padding`,
-`TestR_TS71_XRW4_banner_does_not_reserve_absent_agent_rows`,
-`TestR_O87H_RSH4_no_agent_pages_keep_compact_banner_auth`, and
-`TestR_3RL1_IUP6_banner_auth_and_agents_share_one_stack`.
+Completed the identity-decoupling rewrite for these site-root behavior tests
+in `app-root/main_test.go`: `TestR_0OZT_H8LQ_agent_row_three_elements`,
+`TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text`, and
+`TestR_VV71_J75U_agent_row_visual_signature`. Each now obtains expected
+agent chain IDs through `oauthTokenStore.LiveAgentChains(...)`, selecting by
+the test's unique owner email and client ID, instead of reading
+`oauthTokenStore.M` directly. Left out-of-scope tests unchanged, including
+the ordering test that mutates token timestamps, the geometry test that reads
+`web/design.css`, the revoke-action tests, and the agents stream tests.
 
-Left in `app-root/main_test.go`: `TestR_VV71_J75U_agent_row_visual_signature`
-because it depends on recovering generated connection identity,
-`TestR_6KK2_AAY0_agent_stack_bottom_right_geometry` because it both recovers
-generated chain IDs and reads `web/design.css`, plus the other out-of-scope
-tests named in the prompt (ordering timestamp mutation, application source
-text invariants, federation round trip, live-server streaming/footer/onboarding
-coverage).
+Files changed: `app-root/main_test.go` and `NEXT.md`.
 
-Files changed: `app-root/main_test.go`,
-`app-root/siteindex/siteindex_test.go`, and `NEXT.md`.
+Verification: `GOROOT=/usr/local/go go test . -run
+'TestR_(0OZT_H8LQ|10ZV_8OFH|VV71_J75U|6KK2_AAY0|VWEX_WYWJ)'` passed;
+`GOROOT=/usr/local/go go test -race . -run
+'TestR_(0OZT_H8LQ|10ZV_8OFH|VV71_J75U)'` passed; `GOROOT=/usr/local/go
+go vet ./...` passed; `awk 'length($0)>120 {print FILENAME ":" FNR ":"
+length($0)}' $(git ls-files '*.go' ':!:vendor/*')` produced no output;
+`GOROOT=/usr/local/go CGO_ENABLED=0 go build -o /tmp/hal-static-test .`
+passed. `GOROOT=/usr/local/go go test ./...` and `GOROOT=/usr/local/go
+go test -race ./...` both failed only at
+`TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
+`.ralph/requirements-verified.jsonl` is permission denied, which the refactor
+prompt identifies as out-of-scope local Ralph state.
 
-Verification: `GOROOT=/usr/local/go go test ./siteindex` passed;
-`GOROOT=/usr/local/go go test ./siteindex -run
-'TestR_(VTZ5_5FF5|2ZZH_LJYA|6QIE_4D71|CNWX_9VB2|TS71_XRW4|O87H_RSH4|3RL1_IUP6)'`
-passed; `GOROOT=/usr/local/go go test . -run
-'TestR_(VV71_J75U|6KK2_AAY0)'` passed; `GOROOT=/usr/local/go go test -race
-./siteindex` passed; `GOROOT=/usr/local/go go test -race . -run
-'TestR_(VV71_J75U|6KK2_AAY0)'` passed; `GOROOT=/usr/local/go go vet ./...`
-passed; `awk 'length($0)>120 {print FILENAME ":" FNR ":" length($0)}'
-$(git ls-files '*.go' ':!:vendor/*')` produced no output; `GOROOT=/usr/local/go
-CGO_ENABLED=0 go build -o /tmp/hal-static-test .` passed. `GOROOT=/usr/local/go
-go test ./...` and `GOROOT=/usr/local/go go test -race ./...` both failed
-only at `TestR_K9TD_DC0K_verified_ledger_entries_have_named_tests` because
-`.ralph/requirements-verified.jsonl` is permission denied, which this refactor
-prompt names as out-of-scope local Ralph state.
-
-Blockers/follow-up risks: broad test and race commands remain locally blocked
-by the out-of-scope `.ralph` ledger permission failure unless that local state
-is made readable or the Ralph-state test is excluded for refactor verification.
+Blockers/follow-up risks: broad full-suite and full-race verification remain
+locally blocked by the unreadable `.ralph/requirements-verified.jsonl` state
+unless that local file is made readable or the Ralph-state test is excluded
+for refactor verification.

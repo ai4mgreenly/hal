@@ -12576,6 +12576,24 @@ func agentsBlockRandomEmailToken(t *testing.T) string {
 	return hex.EncodeToString(buf[:])
 }
 
+func agentsBlockChainIDFromLiveView(t *testing.T, ownerEmail, clientID string) string {
+	t.Helper()
+	var chainID string
+	for _, ch := range oauthTokenStore.LiveAgentChains(ownerEmail, oauthClientStore) {
+		if ch.ClientID != clientID {
+			continue
+		}
+		if chainID != "" {
+			t.Fatalf("multiple live chains for owner %q client %q", ownerEmail, clientID)
+		}
+		chainID = ch.ChainID
+	}
+	if chainID == "" {
+		t.Fatalf("live chain for owner %q client %q missing", ownerEmail, clientID)
+	}
+	return chainID
+}
+
 // TestR_0OZT_H8LQ_agent_row_three_elements pins the per-row content of
 // the agents block: exactly three visible elements left-to-right —
 // client_name (literal `undefined` for unset), client_id truncated to
@@ -12612,22 +12630,10 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		email := "named-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "abcdef0123456789-tail"
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: "Test Agent One"}))
-		refresh, err := oauthTokenStore.IssueRefresh(
-			email, clientID, "http://127.0.0.1:3000/mcp")
-		if err != nil {
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		// Look up the chainID from the issued record.
-		oauthTokenStore.Mu.Lock()
-		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
-		chainID := ""
-		if rec != nil {
-			chainID = rec.ChainID
-		}
-		oauthTokenStore.Mu.Unlock()
-		if chainID == "" {
-			t.Fatalf("issued refresh has empty chainID")
-		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
 
 		sess, err := webSessionStore.Issue(email)
 		if err != nil {
@@ -12672,21 +12678,10 @@ func TestR_0OZT_H8LQ_agent_row_three_elements(t *testing.T) {
 		// Use a clientID with NO entry in oauthClientStore — clientName
 		// resolves to the empty string and must render as `undefined`.
 		clientID := "ffffff9876543210-nameless-" + agentsBlockRandomEmailToken(t)
-		refresh, err := oauthTokenStore.IssueRefresh(
-			email, clientID, "http://127.0.0.1:3000/mcp")
-		if err != nil {
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.Mu.Lock()
-		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
-		chainID := ""
-		if rec != nil {
-			chainID = rec.ChainID
-		}
-		oauthTokenStore.Mu.Unlock()
-		if chainID == "" {
-			t.Fatalf("issued refresh has empty chainID")
-		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
 
 		sess, err := webSessionStore.Issue(email)
 		if err != nil {
@@ -12714,21 +12709,10 @@ func TestR_10ZV_8OFH_agent_client_name_renders_as_inert_text(t *testing.T) {
 	clientID := "xssagent" + agentsBlockRandomEmailToken(t)
 	maliciousName := `<img src=x onerror="alert('owned')">&<script>bad()</script>`
 	oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: maliciousName}))
-	refresh, err := oauthTokenStore.IssueRefresh(
-		email, clientID, "http://127.0.0.1:3000/mcp")
-	if err != nil {
+	if _, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
 		t.Fatalf("issueRefresh: %v", err)
 	}
-	oauthTokenStore.Mu.Lock()
-	rec := oauthTokenStore.M[oauthTokenHash(refresh)]
-	chainID := ""
-	if rec != nil {
-		chainID = rec.ChainID
-	}
-	oauthTokenStore.Mu.Unlock()
-	if chainID == "" {
-		t.Fatalf("issued refresh has empty chainID")
-	}
+	chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
 
 	sess, err := webSessionStore.Issue(email)
 	if err != nil {
@@ -15990,21 +15974,10 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 	issueChain := func(t *testing.T, email, clientID, clientName string) string {
 		t.Helper()
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: clientName}))
-		refresh, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
-		if err != nil {
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.Mu.Lock()
-		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
-		chainID := ""
-		if rec != nil {
-			chainID = rec.ChainID
-		}
-		oauthTokenStore.Mu.Unlock()
-		if chainID == "" {
-			t.Fatalf("issued refresh has empty chainID")
-		}
-		return chainID
+		return agentsBlockChainIDFromLiveView(t, email, clientID)
 	}
 
 	t.Run("identity_label_is_span_not_link_or_button", func(t *testing.T) {
@@ -16064,20 +16037,10 @@ func TestR_VV71_J75U_agent_row_visual_signature(t *testing.T) {
 		email := "sig-undef-" + agentsBlockRandomEmailToken(t) + "@discovery.one"
 		clientID := "undef0001abcdef99-tail"
 		oauthClientStore.Put(clientID, oauthpkg.NewClient(oauthpkg.ClientSpec{ClientName: ""}))
-		refresh, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp")
-		if err != nil {
+		if _, err := oauthTokenStore.IssueRefresh(email, clientID, "http://127.0.0.1:3000/mcp"); err != nil {
 			t.Fatalf("issueRefresh: %v", err)
 		}
-		oauthTokenStore.Mu.Lock()
-		rec := oauthTokenStore.M[oauthTokenHash(refresh)]
-		chainID := ""
-		if rec != nil {
-			chainID = rec.ChainID
-		}
-		oauthTokenStore.Mu.Unlock()
-		if chainID == "" {
-			t.Fatalf("chainID empty")
-		}
+		chainID := agentsBlockChainIDFromLiveView(t, email, clientID)
 
 		sess, err := webSessionStore.Issue(email)
 		if err != nil {
